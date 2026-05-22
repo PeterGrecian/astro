@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""to-fits — convert .npy raw Bayer frames to Rice-compressed FITS.
+
+Output is named identically (same epoch_ms basename) but with
+.fits.fz extension, in the same directory. After successful write
+the .npy is moved to the trash via super/bin/trash.
+
+Usage:
+    to-fits <night-dir>            convert all .npy in <night-dir>/**/
+    to-fits <dir>/<file.npy> [...] convert specific files
+    to-fits --dry-run <...>         report what would be done
+    to-fits --keep-npy <...>        keep .npy, don't trash
+    to-fits --min-age-s 600 <...>   only convert .npy older than N seconds
+
+Empirical: ~10 MB .npy → ~4 MB .fits.fz (40% size, 2.47× smaller).
+Encode ~330 ms on x86_64 / ~5–10 s on Pi 1B.
+
+The script is idempotent — already-converted frames (.fits.fz exists,
+same basename) are skipped.
+
+FITS headers written:
+    BAYERPAT = 'SGBRG'        # correct for OV5647 on this Pi
+    BITDEPTH = 10              # raw sensor depth
+    EXPTIME  = 2.9             # seconds
+    GAIN     = 16.0            # analogue gain set by the daemon
+    INSTRUME = 'OV5647'
+    TELESCOP = 'RPi V1 Camera'
+    CAMERA   = 'starcam'       # logical name (override with --camera)
+    EPOCH_MS = <int>           # capture epoch (ms) from filename
+    DATE-OBS = '<ISO 8601>'    # derived from EPOCH_MS, UTC
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+TRASH_CMD = os.path.expanduser("~/super/bin/trash")
+
+
+def epoch_ms_from_name(p: Path) -> int | None:
+    stem = p.stem
+    try:
+        return int(stem)
+    except ValueError:
+        return None
+
+
+def convert_one(npy: Path, *, camera: str, dry_run: bool,
+                keep_npy: bool) -> tuple[str, int, int]:
+    """Convert one .npy to .fits.fz.
+
+    Returns: (status, npy_bytes, fits_bytes).
+    status ∈ {'ok', 'skip-exists', 'skip-no-epoch', 'error'}.
+    """
+    fits_path = npy.with_suffix(".fits.fz")
+    if fits_path.exists():
+        return ("skip-exists", npy.stat().st_size, fits_path.stat().st_size)
+
+    epoch_ms = epoch_ms_from_name(npy)
+    if epoch_ms is None:
+        return ("skip-no-epoch", npy.stat().st_size, 0)
+
+    if dry_run:
+        return ("ok-dry", npy.stat().st_size, 0)
+
+    arr = np.load(npy)
+    if arr.dtype != np.uint16:
+        arr = arr.astype(np.uint16)
+
+    iso = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).isoformat()
+
+    phdu = fits.PrimaryHDU()
+    chdu = fits.CompImageHDU(
+        data=arr,
+        compression_type="RICE_1",
+        name="SCI",
+    )
+    h = chdu.header
+    h["BAYERPAT"] = "SGBRG"
+    h["BITDEPTH"] = 10
+    h["EXPTIME"]  = 2.9
+    h["GAIN"]     = 16.0
+    h["INSTRUME"] = "OV5647"
+    h["TELESCOP"] = "RPi V1 Camera"
+    h["CAMERA"]   = camera
+    h["EPOCH_MS"] = epoch_ms
+    h["DATE-OBS"] = iso
+
+    tmp = fits_path.with_suffix(".fz.tmp")
+    fits.HDUList([phdu, chdu]).writeto(tmp, overwrite=True)
+    os.replace(tmp, fits_path)
+
+    fits_bytes = fits_path.stat().st_size
+    npy_bytes = npy.stat().st_size
+
+    if not keep_npy:
+        # super/bin/trash dates by today; safer than rm.
+        if Path(TRASH_CMD).exists():
+            subprocess.run([TRASH_CMD, str(npy)], check=True)
+        else:
+            # Fallback for hosts where super/bin/trash isn't installed
+            # — keep the .npy, let the user clean up by hand.
+            print(f"  (no {TRASH_CMD}, keeping .npy)", file=sys.stderr)
+
+    return ("ok", npy_bytes, fits_bytes)
+
+
+def gather(paths: list[Path], min_age_s: int) -> list[Path]:
+    """Resolve dirs/files into a flat list of .npy paths."""
+    out: list[Path] = []
+    cutoff = time.time() - min_age_s if min_age_s else None
+    for p in paths:
+        if p.is_dir():
+            for npy in p.rglob("*.npy"):
+                if cutoff and npy.stat().st_mtime > cutoff:
+                    continue
+                out.append(npy)
+        elif p.is_file() and p.suffix == ".npy":
+            if cutoff and p.stat().st_mtime > cutoff:
+                continue
+            out.append(p)
+    out.sort()
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("paths", nargs="+", type=Path,
+                    help="Directories or .npy files")
+    ap.add_argument("--camera", default="starcam",
+                    help="Logical camera name → CAMERA header (default: starcam)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Print what would be done; write nothing")
+    ap.add_argument("--keep-npy", action="store_true",
+                    help="Don't trash the .npy after writing .fits.fz")
+    ap.add_argument("--min-age-s", type=int, default=0,
+                    help="Skip .npy files newer than N seconds (avoid "
+                         "mid-write races; e.g. 600 = 10 min)")
+    args = ap.parse_args()
+
+    npys = gather(args.paths, args.min_age_s)
+    if not npys:
+        print("no .npy files found", file=sys.stderr)
+        return 1
+
+    print(f"{len(npys)} .npy file(s) to consider"
+          f"{' (dry run)' if args.dry_run else ''}")
+
+    n_ok = 0
+    n_skip_exists = 0
+    n_skip_no_epoch = 0
+    total_npy_bytes = 0
+    total_fits_bytes = 0
+    t0 = time.time()
+
+    for i, npy in enumerate(npys, 1):
+        try:
+            status, nb, fb = convert_one(
+                npy,
+                camera=args.camera,
+                dry_run=args.dry_run,
+                keep_npy=args.keep_npy,
+            )
+        except Exception as e:
+            print(f"  [{i}/{len(npys)}] ERROR {npy}: {e}", file=sys.stderr)
+            continue
+
+        if status.startswith("ok"):
+            n_ok += 1
+            total_npy_bytes += nb
+            total_fits_bytes += fb
+        elif status == "skip-exists":
+            n_skip_exists += 1
+        elif status == "skip-no-epoch":
+            n_skip_no_epoch += 1
+
+        if i == 1 or i % 50 == 0:
+            elapsed = time.time() - t0
+            rate = i / max(0.001, elapsed)
+            print(f"  [{i}/{len(npys)}] {status}  {npy.name}  "
+                  f"({rate:.1f} files/s)")
+
+    elapsed = time.time() - t0
+    print(f"\nconverted={n_ok} skip-exists={n_skip_exists} "
+          f"skip-no-epoch={n_skip_no_epoch}")
+    if total_npy_bytes:
+        ratio = total_fits_bytes / total_npy_bytes * 100
+        print(f"size: {total_npy_bytes/1e9:.2f} GB .npy → "
+              f"{total_fits_bytes/1e9:.2f} GB .fits.fz ({ratio:.1f}%)")
+    print(f"elapsed: {elapsed:.1f} s")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
