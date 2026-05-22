@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""streak-sum — abs-diff accumulator across a time window.
+
+For consecutive frames within the window:
+    acc += |frame[n] - frame[n-1]|
+
+Static signal (sky-glow, hot pixels, sensor banding) cancels in each
+diff. Moving signal (star arcs sweeping across pixels at sidereal
+rate, aircraft, satellites) survives. Result: an image where star
+arcs are bright.
+
+Optional --bright-reject drops frames whose whole-frame mean exceeds
+the threshold (skip transient bright-pollution events).
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+
+
+EXAMPLES = """\
+Examples:
+  streak-sum --csv ~/starcam-frames/night/2026-05-21/brightness.csv \\
+             --window 23:00-02:00 --out streak.jpg
+      → abs-diff streaks from 23:00 to 02:00 UTC
+
+  streak-sum --csv .../brightness.csv --window 23:00-02:00 \\
+             --bright-reject 50 --out streak.jpg
+      → also skip any frame whose mean > 50 (drops light-pollution
+        transients that would otherwise add a uniform full-frame bump)
+
+  streak-sum --csv .../brightness.csv --window 22:30-03:00 \\
+             --stretch-lo 70 --stretch-hi 99.9 --out streak.jpg
+      → harder stretch for low-signal nights
+
+The .npy contains the int64 accumulator. The .jpg is the percentile-
+stretched 8-bit version.
+"""
+
+
+def load_frame(path: Path) -> np.ndarray:
+    if path.suffix == ".npy":
+        return np.load(path)
+    with fits.open(path, memmap=False) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data.copy()
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def parse_window(s: str) -> tuple[int, int, bool]:
+    a, b = s.split("-")
+    def to_min(x):
+        h, m = x.split(":")
+        return int(h) * 60 + int(m)
+    sm, em = to_min(a), to_min(b)
+    return sm, em, em <= sm
+
+
+def in_window(iso: str, sm: int, em: int, wraps: bool) -> bool:
+    dt = datetime.fromisoformat(iso)
+    m = dt.hour * 60 + dt.minute
+    if wraps:
+        return m >= sm or m < em
+    return sm <= m < em
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--csv", required=True, type=Path,
+                    help="brightness CSV from scan-brightness")
+    ap.add_argument("--window", required=True,
+                    help="UTC range as HH:MM-HH:MM (may wrap midnight)")
+    ap.add_argument("--bright-reject", type=float, default=0,
+                    help="skip frames whose whole-frame mean exceeds N "
+                         "(0 = no filter)")
+    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--save-npy", type=Path, default=None,
+                    help="optional .npy of the int64 accumulator")
+    ap.add_argument("--stretch-lo", type=float, default=50,
+                    help="lower-bound percentile for JPG stretch")
+    ap.add_argument("--stretch-hi", type=float, default=99.5,
+                    help="upper-bound percentile for JPG stretch")
+    args = ap.parse_args()
+
+    sm, em, wraps = parse_window(args.window)
+
+    rows = []
+    with open(args.csv) as f:
+        for r in csv.DictReader(f):
+            if in_window(r["iso_utc"], sm, em, wraps):
+                rows.append((Path(r["filename"]), float(r["mean"]),
+                             r["iso_utc"]))
+    rows.sort(key=lambda r: r[2])
+    print(f"in window {args.window} UTC: {len(rows)} frames")
+    if len(rows) < 2:
+        return 1
+
+    first = load_frame(rows[0][0]).astype(np.int32)
+    H, W = first.shape
+    acc = np.zeros((H, W), dtype=np.int64)
+    prev = first
+
+    n_acc = 0
+    n_rej = 0
+    t0 = time.time()
+    for i, (path, mean, _) in enumerate(rows[1:], 1):
+        if args.bright_reject and mean > args.bright_reject:
+            n_rej += 1
+            # do NOT update prev — keeps the diff baseline valid across
+            # the skipped frame.
+            if i == 1 or i % 200 == 0:
+                print(f"  [{i}/{len(rows)}] skip mean={mean:.1f}", flush=True)
+            continue
+        cur = load_frame(path).astype(np.int32)
+        acc += np.abs(cur - prev)
+        prev = cur
+        n_acc += 1
+        if i == 1 or i % 200 == 0:
+            rate = (i + 1) / max(0.001, time.time() - t0)
+            print(f"  [{i}/{len(rows)}] mean={mean:.1f} "
+                  f"acc_max={int(acc.max())} ({rate:.1f} fps)",
+                  flush=True)
+    elapsed = time.time() - t0
+    print(f"accumulated {n_acc}, rejected {n_rej} "
+          f"in {elapsed:.0f}s ({n_acc/max(0.001,elapsed):.1f} fps)")
+    print(f"acc: min={int(acc.min())} max={int(acc.max())} "
+          f"median={int(np.median(acc))}")
+
+    if args.save_npy:
+        np.save(args.save_npy, acc)
+        print(f"saved {args.save_npy}")
+
+    acc_f = acc.astype(np.float32)
+    lo = float(np.percentile(acc_f, args.stretch_lo))
+    hi = float(np.percentile(acc_f, args.stretch_hi))
+    print(f"stretch: p{args.stretch_lo}={lo:.1f} → black, "
+          f"p{args.stretch_hi}={hi:.1f} → white")
+    img8 = np.clip((acc_f - lo) * 255.0 / max(0.01, hi - lo),
+                   0, 255).astype(np.uint8)
+    cv2.imwrite(str(args.out), img8, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    print(f"wrote {args.out} "
+          f"({os.path.getsize(args.out) / 1024:.0f} KB)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
