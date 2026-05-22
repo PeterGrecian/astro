@@ -1,0 +1,15 @@
+[Unit]
+Description=astro: convert .npy frames to .fits.fz as they land
+After=network.target
+
+[Service]
+Type=simple
+User=peter
+ExecStart=/usr/bin/python3 -u /home/peter/astro/bin/to-fits-watch /home/peter/starcam-frames/night --camera starcam
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""to-fits-watch — watch a frame tree, convert .npy → .fits.fz on landing.
+
+Runs as a long-lived service on puppy. Watches NIGHT_ROOT recursively
+via inotify (watchdog library). For each <epoch_ms>.npy that arrives
+(IN_CLOSE_WRITE) it runs the same conversion logic as `bin/to-fits` —
+single file, idempotent, atomic — then optionally trashes the .npy.
+
+On startup, also runs one sweep over NIGHT_ROOT to catch any backlog
+that landed while the service was down (anything older than
+--startup-min-age-s seconds).
+
+Restart-safe:
+  - Idempotent: already-converted .fits.fz is left alone.
+  - Atomic: writes <name>.fz.tmp then os.replace.
+  - The daemon creates HH/ dirs lazily; the watcher picks them up
+    automatically on IN_CREATE.
+
+By default keeps the .npy (safe). Add --trash-npy when you trust the
+FITS pipeline end-to-end.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+
+
+EXAMPLES = """\
+Examples:
+  to-fits-watch ~/starcam-frames/night/
+      → watch the night tree; convert .npy as they land; keep .npy
+
+  to-fits-watch ~/starcam-frames/night/ --trash-npy
+      → also trash the .npy after a successful .fits.fz write
+
+  to-fits-watch ~/starcam-frames/night/ --camera starcam --trash-npy \\
+                --startup-min-age-s 120
+      → on startup also sweep anything older than 2 min for backlog
+
+Run as a service: see astro/services/to-fits-watch.service.
+"""
+
+
+TRASH_CMD = os.path.expanduser("~/super/bin/trash")
+
+
+def setup_logging() -> logging.Logger:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+    return logging.getLogger("to-fits-watch")
+
+
+def epoch_ms_from_name(p: Path) -> int | None:
+    name = p.name.split(".", 1)[0]
+    try:
+        return int(name)
+    except ValueError:
+        return None
+
+
+def convert_one(npy: Path, *, camera: str, trash_npy: bool,
+                log: logging.Logger) -> bool:
+    """Convert one .npy to .fits.fz. Returns True on success."""
+    fits_path = npy.with_suffix(".fits.fz")
+    if fits_path.exists():
+        return True
+    epoch_ms = epoch_ms_from_name(npy)
+    if epoch_ms is None:
+        log.warning(f"skip non-epoch filename: {npy.name}")
+        return False
+
+    try:
+        arr = np.load(npy)
+    except Exception as e:
+        log.error(f"load {npy.name} failed: {e}")
+        return False
+    if arr.dtype != np.uint16:
+        arr = arr.astype(np.uint16)
+
+    iso = datetime.fromtimestamp(
+        epoch_ms / 1000, tz=timezone.utc).isoformat()
+
+    phdu = fits.PrimaryHDU()
+    chdu = fits.CompImageHDU(
+        data=arr, compression_type="RICE_1", name="SCI")
+    h = chdu.header
+    h["BAYERPAT"] = "SGBRG"
+    h["BITDEPTH"] = 10
+    h["EXPTIME"]  = 2.9
+    h["GAIN"]     = 16.0
+    h["INSTRUME"] = "OV5647"
+    h["TELESCOP"] = "RPi V1 Camera"
+    h["CAMERA"]   = camera
+    h["EPOCH_MS"] = epoch_ms
+    h["DATE-OBS"] = iso
+
+    tmp = fits_path.with_suffix(".fz.tmp")
+    try:
+        fits.HDUList([phdu, chdu]).writeto(tmp, overwrite=True)
+        os.replace(tmp, fits_path)
+    except Exception as e:
+        log.error(f"fits write {fits_path.name} failed: {e}")
+        try: tmp.unlink()
+        except FileNotFoundError: pass
+        return False
+
+    fb = fits_path.stat().st_size
+    nb = npy.stat().st_size
+    log.info(f"converted {npy.name}: "
+             f"{nb/1e6:.1f}MB → {fb/1e6:.1f}MB ({fb*100/nb:.0f}%)")
+
+    if trash_npy:
+        if Path(TRASH_CMD).exists():
+            try:
+                subprocess.run([TRASH_CMD, str(npy)], check=True)
+            except subprocess.CalledProcessError as e:
+                log.warning(f"trash {npy.name} failed: {e}")
+        else:
+            log.warning(f"no {TRASH_CMD}; not trashing {npy.name}")
+    return True
+
+
+def startup_sweep(root: Path, *, camera: str, trash_npy: bool,
+                  min_age_s: int, log: logging.Logger) -> None:
+    cutoff = time.time() - min_age_s if min_age_s else None
+    backlog: list[Path] = []
+    for npy in root.rglob("*.npy"):
+        if cutoff and npy.stat().st_mtime > cutoff:
+            continue
+        if npy.with_suffix(".fits.fz").exists():
+            continue
+        backlog.append(npy)
+    backlog.sort()
+    if not backlog:
+        log.info("startup sweep: no backlog")
+        return
+    log.info(f"startup sweep: {len(backlog)} .npy without .fits.fz "
+             f"(older than {min_age_s}s)")
+    n_ok = 0
+    for npy in backlog:
+        if convert_one(npy, camera=camera, trash_npy=trash_npy, log=log):
+            n_ok += 1
+    log.info(f"startup sweep done: {n_ok}/{len(backlog)} converted")
+
+
+class Handler(FileSystemEventHandler):
+    def __init__(self, camera: str, trash_npy: bool,
+                 log: logging.Logger):
+        super().__init__()
+        self.camera = camera
+        self.trash_npy = trash_npy
+        self.log = log
+
+    def on_closed(self, event):
+        # IN_CLOSE_WRITE fires when a writer closes the file —
+        # guarantees np.save has finished.
+        if event.is_directory:
+            return
+        p = Path(event.src_path)
+        if p.suffix != ".npy":
+            return
+        convert_one(p, camera=self.camera, trash_npy=self.trash_npy,
+                    log=self.log)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("root", type=Path,
+                    help="root dir to watch recursively "
+                         "(e.g. ~/starcam-frames/night/)")
+    ap.add_argument("--camera", default="starcam",
+                    help="logical camera name for FITS CAMERA header")
+    ap.add_argument("--trash-npy", action="store_true",
+                    help="trash .npy via super/bin/trash after successful "
+                         ".fits.fz write (default: keep)")
+    ap.add_argument("--startup-min-age-s", type=int, default=120,
+                    help="on startup, also sweep .npy files older than N "
+                         "seconds for backlog (default: 120 = 2 min)")
+    args = ap.parse_args()
+
+    log = setup_logging()
+
+    if not args.root.exists():
+        log.error(f"root does not exist: {args.root}")
+        return 2
+
+    log.info(f"to-fits-watch starting: root={args.root} camera={args.camera} "
+             f"trash_npy={args.trash_npy}")
+
+    # Startup sweep first — catches anything that landed while down.
+    startup_sweep(args.root, camera=args.camera,
+                  trash_npy=args.trash_npy,
+                  min_age_s=args.startup_min_age_s, log=log)
+
+    # Then start inotify watch
+    handler = Handler(args.camera, args.trash_npy, log)
+    observer = Observer()
+    observer.schedule(handler, str(args.root), recursive=True)
+    observer.start()
+    log.info("inotify watch started; serving until SIGTERM")
+
+    stopped = False
+    def stop(_s, _f):
+        nonlocal stopped
+        stopped = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    try:
+        while not stopped:
+            time.sleep(1)
+    finally:
+        observer.stop()
+        observer.join()
+        log.info("to-fits-watch stopped cleanly")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
