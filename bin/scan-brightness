@@ -43,8 +43,10 @@ def load_frame(path: Path) -> np.ndarray:
 
 
 def epoch_ms_from_name(p: Path) -> int | None:
+    # Strip ALL extensions: 1779404330189.fits.fz → 1779404330189
+    name = p.name.split(".", 1)[0]
     try:
-        return int(p.stem)
+        return int(name)
     except ValueError:
         return None
 
