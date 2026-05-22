@@ -1,0 +1,15 @@
+[Unit]
+Description=astro: sweep .npy → .fits.fz periodically (NFS-safe replacement for inotify watcher)
+After=network.target
+
+[Service]
+Type=simple
+User=peter
+ExecStart=/usr/bin/python3 -u /home/peter/astro/bin/to-fits-sweep /home/peter/starcam-frames/night --camera starcam
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

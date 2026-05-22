@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""to-fits-sweep — periodic sweep, convert .npy → .fits.fz when safe.
+
+Replacement for to-fits-watch. inotify doesn't fire reliably for NFS
+writes (the daemon writes to puppy via NFS from the Pi), so we sweep
+instead. The cadence is fast enough that latency is unimportant.
+
+Safety rule (per HH dir):
+  - All .npy except the **last** are safe to convert (a newer one
+    exists, so this one's write is complete).
+  - The last .npy is only converted if its mtime is >10 s old
+    (= daemon has stopped writing this dir).
+  - Skip any .npy whose .fits.fz already exists (idempotent).
+
+Sweep frequency is set by --sleep-s (default 30 s). NFS dir listings
+are cheap; we touch ~1200 entries per active hour, ~1 ms each. So a
+full night-tree sweep is well under a second.
+
+Conversion logic matches bin/to-fits exactly (atomic write via .tmp +
+rename; same FITS headers).
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+EXAMPLES = """\
+Examples:
+  to-fits-sweep ~/starcam-frames/night/
+      → sweep every 30 s; convert all .npy with no .fits.fz next to them
+        (keep .npy by default)
+
+  to-fits-sweep ~/starcam-frames/night/ --trash-npy
+      → also trash the .npy after each successful .fits.fz write
+
+  to-fits-sweep ~/starcam-frames/night/ --sleep-s 10 --last-age-s 30
+      → tighter cadence; require last-file age 30 s before converting it
+
+  to-fits-sweep ~/starcam-frames/night/ --once
+      → run a single sweep and exit (useful for cron / manual cleanup)
+
+Run as a service: see astro/services/to-fits-sweep.service.
+"""
+
+
+TRASH_CMD = os.path.expanduser("~/super/bin/trash")
+
+
+def setup_logging() -> logging.Logger:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+        force=True,
+    )
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
+    return logging.getLogger("to-fits-sweep")
+
+
+def epoch_ms_from_name(p: Path) -> int | None:
+    name = p.name.split(".", 1)[0]
+    try:
+        return int(name)
+    except ValueError:
+        return None
+
+
+def convert_one(npy: Path, *, camera: str, trash_npy: bool,
+                log: logging.Logger) -> bool:
+    fits_path = npy.with_suffix(".fits.fz")
+    if fits_path.exists():
+        return True
+    epoch_ms = epoch_ms_from_name(npy)
+    if epoch_ms is None:
+        return False
+
+    try:
+        arr = np.load(npy)
+    except Exception as e:
+        log.error(f"load {npy.name} failed: {e}")
+        return False
+    if arr.dtype != np.uint16:
+        arr = arr.astype(np.uint16)
+
+    iso = datetime.fromtimestamp(
+        epoch_ms / 1000, tz=timezone.utc).isoformat()
+    phdu = fits.PrimaryHDU()
+    chdu = fits.CompImageHDU(
+        data=arr, compression_type="RICE_1", name="SCI")
+    h = chdu.header
+    h["BAYERPAT"] = "SGBRG"
+    h["BITDEPTH"] = 10
+    h["EXPTIME"]  = 2.9
+    h["GAIN"]     = 16.0
+    h["INSTRUME"] = "OV5647"
+    h["TELESCOP"] = "RPi V1 Camera"
+    h["CAMERA"]   = camera
+    h["EPOCH_MS"] = epoch_ms
+    h["DATE-OBS"] = iso
+
+    tmp = fits_path.with_suffix(".fz.tmp")
+    try:
+        fits.HDUList([phdu, chdu]).writeto(tmp, overwrite=True)
+        os.replace(tmp, fits_path)
+    except Exception as e:
+        log.error(f"fits write {fits_path.name} failed: {e}")
+        try: tmp.unlink()
+        except FileNotFoundError: pass
+        return False
+
+    fb = fits_path.stat().st_size
+    nb = npy.stat().st_size
+    log.info(f"converted {npy.parent.name}/{npy.name}: "
+             f"{nb/1e6:.1f}→{fb/1e6:.1f} MB ({fb*100/nb:.0f}%)")
+
+    if trash_npy:
+        if Path(TRASH_CMD).exists():
+            try:
+                subprocess.run([TRASH_CMD, str(npy)], check=True)
+            except subprocess.CalledProcessError as e:
+                log.warning(f"trash {npy.name} failed: {e}")
+        else:
+            log.warning(f"no {TRASH_CMD}; not trashing {npy.name}")
+    return True
+
+
+def sweep_once(root: Path, *, camera: str, trash_npy: bool,
+               last_age_s: float, log: logging.Logger) -> tuple[int, int]:
+    """Return (converted, candidates) for this sweep."""
+    n_conv = 0
+    n_cand = 0
+    now = time.time()
+    # night/<night>/HH/ — exactly two levels deep
+    for hh_dir in sorted(root.glob("*/*")):
+        if not hh_dir.is_dir():
+            continue
+        npys = sorted(hh_dir.glob("*.npy"))
+        if not npys:
+            continue
+        # All but last: safe to convert (a newer .npy exists)
+        for npy in npys[:-1]:
+            if npy.with_suffix(".fits.fz").exists():
+                continue
+            n_cand += 1
+            if convert_one(npy, camera=camera, trash_npy=trash_npy,
+                           log=log):
+                n_conv += 1
+        # Last one: only convert if old (daemon stopped writing)
+        last = npys[-1]
+        if last.with_suffix(".fits.fz").exists():
+            continue
+        try:
+            age = now - last.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if age > last_age_s:
+            n_cand += 1
+            if convert_one(last, camera=camera, trash_npy=trash_npy,
+                           log=log):
+                n_conv += 1
+    return n_conv, n_cand
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("root", type=Path,
+                    help="root dir to sweep (e.g. ~/starcam-frames/night/)")
+    ap.add_argument("--camera", default="starcam",
+                    help="logical camera name for FITS CAMERA header")
+    ap.add_argument("--trash-npy", action="store_true",
+                    help="trash .npy via super/bin/trash after success "
+                         "(default: keep)")
+    ap.add_argument("--sleep-s", type=float, default=30,
+                    help="seconds between sweeps (default 30)")
+    ap.add_argument("--last-age-s", type=float, default=10,
+                    help="require last .npy in each HH dir be older than "
+                         "this before converting (default 10 s)")
+    ap.add_argument("--once", action="store_true",
+                    help="run one sweep and exit")
+    args = ap.parse_args()
+
+    log = setup_logging()
+
+    if not args.root.exists():
+        log.error(f"root does not exist: {args.root}")
+        return 2
+
+    log.info(f"to-fits-sweep starting: root={args.root} "
+             f"camera={args.camera} trash_npy={args.trash_npy} "
+             f"sleep_s={args.sleep_s} last_age_s={args.last_age_s}")
+
+    stopped = False
+    def stop(_s, _f):
+        nonlocal stopped
+        stopped = True
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    while not stopped:
+        t0 = time.time()
+        n_conv, n_cand = sweep_once(
+            args.root, camera=args.camera,
+            trash_npy=args.trash_npy,
+            last_age_s=args.last_age_s, log=log)
+        elapsed = time.time() - t0
+        if n_cand > 0 or args.once:
+            log.info(f"sweep: {n_conv}/{n_cand} converted "
+                     f"in {elapsed:.1f}s")
+        if args.once:
+            return 0
+        # Sleep in 1s chunks so SIGTERM is responsive
+        slept = 0.0
+        while slept < args.sleep_s and not stopped:
+            time.sleep(min(1.0, args.sleep_s - slept))
+            slept += 1.0
+
+    log.info("to-fits-sweep stopped cleanly")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
