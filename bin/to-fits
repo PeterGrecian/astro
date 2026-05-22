@@ -132,18 +132,46 @@ def gather(paths: list[Path], min_age_s: int) -> list[Path]:
     return out
 
 
+EXAMPLES = """\
+Examples:
+  to-fits ~/starcam-frames/night/2026-05-21/
+      → convert all .npy in that night recursively; trash .npy on success
+
+  to-fits ~/starcam-frames/night/2026-05-21/ --keep-npy
+      → same but keep the .npy alongside the .fits.fz (safer first run)
+
+  to-fits ~/starcam-frames/night/2026-05-21/22/1779404330189.npy
+      → convert a single file
+
+  to-fits ~/starcam-frames/night/2026-05-22/ --min-age-s 600
+      → convert only .npy files older than 10 min (avoid mid-write races
+        when the daemon is actively writing)
+
+  to-fits --dry-run ~/starcam-frames/night/2026-05-21/
+      → just report what would be done
+
+Idempotent: existing .fits.fz are skipped (same basename, same dir).
+Empirical compression ratio: 30–41% (10 MB .npy → 3–4 MB .fits.fz).
+"""
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("paths", nargs="+", type=Path,
-                    help="Directories or .npy files")
+                    help="directories or .npy files")
     ap.add_argument("--camera", default="starcam",
-                    help="Logical camera name → CAMERA header (default: starcam)")
+                    help="logical camera name → FITS CAMERA header "
+                         "(default: starcam)")
     ap.add_argument("--dry-run", action="store_true",
-                    help="Print what would be done; write nothing")
+                    help="print what would be done; write nothing")
     ap.add_argument("--keep-npy", action="store_true",
-                    help="Don't trash the .npy after writing .fits.fz")
+                    help="don't trash the .npy after writing .fits.fz")
     ap.add_argument("--min-age-s", type=int, default=0,
-                    help="Skip .npy files newer than N seconds (avoid "
+                    help="skip .npy files newer than N seconds (avoid "
                          "mid-write races; e.g. 600 = 10 min)")
     args = ap.parse_args()
 

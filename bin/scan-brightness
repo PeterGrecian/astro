@@ -51,9 +51,33 @@ def epoch_ms_from_name(p: Path) -> int | None:
         return None
 
 
+EXAMPLES = """\
+Examples:
+  scan-brightness ~/starcam-frames/night/2026-05-21
+      → writes ~/starcam-frames/night/2026-05-21/brightness.csv
+
+  scan-brightness ~/starcam-frames/night/2026-05-21 --limit 50
+      → smoke test on the first 50 frames
+
+  scan-brightness ~/starcam-frames/night/2026-05-21 --npy
+      → scan .npy files instead of .fits.fz (slower, larger reads)
+
+  scan-brightness ~/starcam-frames/night/2026-05-21 --out /tmp/b.csv
+      → write to a specific path
+
+Walks <night-dir>/HH/*.fits.fz recursively. Output CSV columns:
+  epoch_ms, iso_utc, filename, mean, median, p95, max, bright_pixels
+"""
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("night_dir", type=Path)
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("night_dir", type=Path,
+                    help="night directory containing HH/*.fits.fz")
     ap.add_argument("--out", type=Path, default=None,
                     help="output CSV (default: <night-dir>/brightness.csv)")
     ap.add_argument("--npy", action="store_true",

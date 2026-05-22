@@ -64,15 +64,39 @@ def in_window(iso: str, sm: int, em: int, wraps: bool) -> bool:
     return sm <= m < em
 
 
+EXAMPLES = """\
+Examples:
+  photon-sum --csv ~/starcam-frames/night/2026-05-21/brightness.csv \\
+             --window 22:30-03:00
+      → reproduce last session's photon_dark50 (default pct=50)
+        outputs: photon_2230_0300_p50.npy + .jpg
+
+  photon-sum --csv .../brightness.csv --window 22:30-03:00 --pct 25
+      → only the darkest 25% (cleaner, fewer frames, less SNR)
+
+  photon-sum --csv .../brightness.csv --window 00:00-01:00 \\
+             --out-prefix midnight --target-median 80
+      → 1-hour window, custom output name, brighter JPG
+
+Window wraps midnight automatically if end < start.
+The .npy contains the full int64 accumulator; the .jpg is a linear stretch.
+"""
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--csv", required=True, type=Path)
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--csv", required=True, type=Path,
+                    help="brightness CSV from scan-brightness")
     ap.add_argument("--window", required=True,
                     help="UTC range as HH:MM-HH:MM (may wrap midnight)")
     ap.add_argument("--pct", type=float, default=50,
                     help="keep darkest N%% of frames in window (default 50)")
     ap.add_argument("--out-prefix", default=None,
-                    help="output basename (default: photon_<window>_<pct>)")
+                    help="output basename (default: photon_<window>_p<pct>)")
     ap.add_argument("--target-median", type=int, default=50,
                     help="JPG stretch target median grey 0–255 (default 50)")
     args = ap.parse_args()

@@ -72,14 +72,42 @@ def naive_bright_count(arr: np.ndarray) -> int:
     return n - 1  # exclude background
 
 
+EXAMPLES = """\
+Examples:
+  source-count frame.fits.fz
+      → run image2xy on the raw (mixed-Bayer) frame; count sources
+
+  source-count frame.fits.fz --bayer-channel G1
+      → extract just the G1 sub-plane first (often finds more stars
+        because the Bayer pattern doesn't confuse the source extractor)
+
+  source-count frame.fits.fz --bayer-channel G1 --keep-out
+      → keep the .xyls source list for inspection / feeding to solve-field
+
+Verdict ladder:
+   < 10 sources    → too few; solve-field will fail
+   10–30           → marginal; try --scale-low/high hints
+   30–200          → comfortable
+   > 200           → great OR hot-pixel contaminated (check naive ratio)
+
+Used as a pre-flight check before plate-solving. If single frames don't
+make threshold, stack frames first (derot-stack) and re-run on the stack.
+"""
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("fits_file", type=Path)
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("fits_file", type=Path,
+                    help="FITS file (.fits or .fits.fz)")
     ap.add_argument("--bayer-channel", choices=["G1", "G2", "R", "B"],
-                    help="Extract one Bayer sub-plane first "
+                    help="extract one Bayer sub-plane first "
                          "(default: use raw mixed-channel frame)")
     ap.add_argument("--keep-out", action="store_true",
-                    help="Keep the .xyls source-list file image2xy writes")
+                    help="keep the .xyls source-list file image2xy writes")
     args = ap.parse_args()
 
     if not args.fits_file.exists():
