@@ -87,20 +87,31 @@ def main() -> int:
     ap.add_argument("--background", type=Path, default=None,
                     help="optional background image for the overlay "
                          "(default: --in)")
-    ap.add_argument("--threshold", type=int, default=40,
-                    help="binary threshold for bright-pixel mask (0-255)")
-    ap.add_argument("--min-arc-pixels", type=int, default=80,
-                    help="discard components smaller than this (hot pixels)")
-    ap.add_argument("--elongation-min", type=float, default=5.0,
-                    help="discard non-elongated blobs (eigenvalue ratio)")
-    ap.add_argument("--ignore-bottom-frac", type=float, default=0.30,
+    ap.add_argument("--threshold", type=int, default=200,
+                    help="binary threshold for bright-pixel mask (0-255). "
+                         "Empirically 200 picks out star arcs from a "
+                         "stretched photon_dark50 without dragging in noise.")
+    ap.add_argument("--min-arc-pixels", type=int, default=400,
+                    help="discard components smaller than this. Long star "
+                         "arcs are ≥400 px; smaller blobs are hot pixels "
+                         "or arc fragments.")
+    ap.add_argument("--elongation-min", type=float, default=15.0,
+                    help="discard non-elongated blobs (eigenvalue ratio). "
+                         "Star arcs ≥15; aircraft trails, satellite tracks, "
+                         "and accidental linear noise much higher.")
+    ap.add_argument("--ignore-bottom-frac", type=float, default=0.20,
                     help="ignore arcs whose centroid is in the bottom N "
-                         "fraction of the frame (horizon glow / window)")
-    ap.add_argument("--ignore-right-frac", type=float, default=0.10,
+                         "fraction of the frame (gutter / horizon glow)")
+    ap.add_argument("--ignore-right-frac", type=float, default=0.0,
                     help="ignore arcs whose centroid is in the right N "
-                         "fraction of the frame")
-    ap.add_argument("--max-iter", type=int, default=10,
-                    help="max outlier-rejection iterations")
+                         "fraction of the frame (set 0.0 if pole is on the "
+                         "right; arcs there give the best pole-direction "
+                         "constraint)")
+    ap.add_argument("--max-iter", type=int, default=1,
+                    help="max outlier-rejection iterations. With the "
+                         "stricter defaults, 1 is usually enough; the "
+                         "noise arcs were already excluded by the strict "
+                         "filter.")
     ap.add_argument("--reject-k", type=float, default=2.5,
                     help="reject arcs whose |residual| > k × median |residual|")
     args = ap.parse_args()
