@@ -6,10 +6,9 @@ writes (the daemon writes to puppy via NFS from the Pi), so we sweep
 instead. The cadence is fast enough that latency is unimportant.
 
 Safety rule (per HH dir):
-  - All .npy except the **last** are safe to convert (a newer one
-    exists, so this one's write is complete).
-  - The last .npy is only converted if its mtime is >10 s old
-    (= daemon has stopped writing this dir).
+  - A .npy is safe to convert IFF its size equals the canonical
+    complete size (--expected-size, default 10077824 bytes =
+    2592×1944 uint16). Anything smaller is mid-write.
   - Skip any .npy whose .fits.fz already exists (idempotent).
 
 Sweep frequency is set by --sleep-s (default 30 s). NFS dir listings
@@ -38,20 +37,24 @@ from astropy.io import fits
 EXAMPLES = """\
 Examples:
   to-fits-sweep ~/starcam-frames/night/
-      → sweep every 30 s; convert all .npy with no .fits.fz next to them
-        (keep .npy by default)
+      → sweep every 30 s; convert all complete (10077824 B) .npy with
+        no .fits.fz next to them (keep .npy by default)
 
   to-fits-sweep ~/starcam-frames/night/ --trash-npy
       → also trash the .npy after each successful .fits.fz write
 
-  to-fits-sweep ~/starcam-frames/night/ --sleep-s 10 --last-age-s 30
-      → tighter cadence; require last-file age 30 s before converting it
-
   to-fits-sweep ~/starcam-frames/night/ --once
       → run a single sweep and exit (useful for cron / manual cleanup)
 
+  to-fits-sweep ~/starcam-frames/night/ --expected-size 0
+      → disable size check (use legacy 'all but last' rule + 10 s age
+        on last; only useful if frame size changes)
+
 Run as a service: see astro/services/to-fits-sweep.service.
 """
+
+# 2592 cols × 1944 rows × 2 bytes (uint16) + 128 byte npy header
+DEFAULT_EXPECTED_SIZE = 10_077_824
 
 
 TRASH_CMD = os.path.expanduser("~/super/bin/trash")
@@ -140,39 +143,45 @@ def convert_one(npy: Path, *, camera: str, trash_npy: bool,
 
 
 def sweep_once(root: Path, *, camera: str, trash_npy: bool,
-               last_age_s: float, log: logging.Logger) -> tuple[int, int]:
+               expected_size: int, last_age_s: float,
+               log: logging.Logger) -> tuple[int, int]:
     """Return (converted, candidates) for this sweep."""
     n_conv = 0
     n_cand = 0
+    n_partial = 0
     now = time.time()
     # night/<night>/HH/ — exactly two levels deep
     for hh_dir in sorted(root.glob("*/*")):
         if not hh_dir.is_dir():
             continue
         npys = sorted(hh_dir.glob("*.npy"))
-        if not npys:
-            continue
-        # All but last: safe to convert (a newer .npy exists)
-        for npy in npys[:-1]:
+        for npy in npys:
             if npy.with_suffix(".fits.fz").exists():
                 continue
+            try:
+                sz = npy.stat().st_size
+            except FileNotFoundError:
+                continue
+            if expected_size > 0:
+                # Size-based completeness check
+                if sz != expected_size:
+                    n_partial += 1
+                    continue
+            else:
+                # Legacy fallback: skip last unless old
+                if npy is npys[-1]:
+                    try:
+                        age = now - npy.stat().st_mtime
+                    except FileNotFoundError:
+                        continue
+                    if age <= last_age_s:
+                        continue
             n_cand += 1
             if convert_one(npy, camera=camera, trash_npy=trash_npy,
                            log=log):
                 n_conv += 1
-        # Last one: only convert if old (daemon stopped writing)
-        last = npys[-1]
-        if last.with_suffix(".fits.fz").exists():
-            continue
-        try:
-            age = now - last.stat().st_mtime
-        except FileNotFoundError:
-            continue
-        if age > last_age_s:
-            n_cand += 1
-            if convert_one(last, camera=camera, trash_npy=trash_npy,
-                           log=log):
-                n_conv += 1
+    if n_partial > 0:
+        log.info(f"({n_partial} partial .npy waiting to complete)")
     return n_conv, n_cand
 
 
@@ -191,9 +200,14 @@ def main() -> int:
                          "(default: keep)")
     ap.add_argument("--sleep-s", type=float, default=30,
                     help="seconds between sweeps (default 30)")
+    ap.add_argument("--expected-size", type=int,
+                    default=DEFAULT_EXPECTED_SIZE,
+                    help=f"complete .npy size in bytes "
+                         f"(default {DEFAULT_EXPECTED_SIZE} = 2592×1944 uint16). "
+                         f"Set 0 to disable size check.")
     ap.add_argument("--last-age-s", type=float, default=10,
-                    help="require last .npy in each HH dir be older than "
-                         "this before converting (default 10 s)")
+                    help="if --expected-size=0, age threshold for "
+                         "last .npy in each dir (default 10 s)")
     ap.add_argument("--once", action="store_true",
                     help="run one sweep and exit")
     args = ap.parse_args()
@@ -206,7 +220,8 @@ def main() -> int:
 
     log.info(f"to-fits-sweep starting: root={args.root} "
              f"camera={args.camera} trash_npy={args.trash_npy} "
-             f"sleep_s={args.sleep_s} last_age_s={args.last_age_s}")
+             f"sleep_s={args.sleep_s} "
+             f"expected_size={args.expected_size}")
 
     stopped = False
     def stop(_s, _f):
@@ -220,6 +235,7 @@ def main() -> int:
         n_conv, n_cand = sweep_once(
             args.root, camera=args.camera,
             trash_npy=args.trash_npy,
+            expected_size=args.expected_size,
             last_age_s=args.last_age_s, log=log)
         elapsed = time.time() - t0
         if n_cand > 0 or args.once:
