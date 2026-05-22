@@ -75,11 +75,24 @@ Examples:
       → only the darkest 25% (cleaner, fewer frames, less SNR)
 
   photon-sum --csv .../brightness.csv --window 00:00-01:00 \\
-             --out-prefix midnight --target-median 80
-      → 1-hour window, custom output name, brighter JPG
+             --out-prefix midnight --stretch-lo 60 --stretch-hi 99.9
+      → 1-hour window, custom output name, more aggressive stretch
+        (only the very top 0.1% mapped to white = arcs vs floor)
+
+  photon-sum --csv .../brightness.csv --window 22:30-03:00 \\
+             --target-median 50
+      → legacy linear stretch (median → grey 50). Use only for
+        reproducing pre-2026-05-22 outputs.
 
 Window wraps midnight automatically if end < start.
-The .npy contains the full int64 accumulator; the .jpg is a linear stretch.
+
+The default percentile stretch puts p50 at black and p99.5 at white
+— maps the noise floor to black so faint arcs are visible. This is
+what made last session's photon_dark50.jpg work; the early
+'median → grey 50' linear stretch crushed the data.
+
+The .npy contains the full int64 accumulator (lossless, ~40 MB).
+The .jpg is 8-bit with the stretch applied.
 """
 
 
@@ -97,8 +110,15 @@ def main() -> int:
                     help="keep darkest N%% of frames in window (default 50)")
     ap.add_argument("--out-prefix", default=None,
                     help="output basename (default: photon_<window>_p<pct>)")
-    ap.add_argument("--target-median", type=int, default=50,
-                    help="JPG stretch target median grey 0–255 (default 50)")
+    ap.add_argument("--stretch-lo", type=float, default=50,
+                    help="lower-bound percentile for JPG stretch (default 50; "
+                         "this is mapped to black). Higher = darker, more contrast.")
+    ap.add_argument("--stretch-hi", type=float, default=99.5,
+                    help="upper-bound percentile for JPG stretch (default 99.5; "
+                         "this is mapped to white)")
+    ap.add_argument("--target-median", type=int, default=0,
+                    help="[DEPRECATED] legacy 'median → grey N' stretch. "
+                         "If non-zero, overrides --stretch-lo/hi.")
     args = ap.parse_args()
 
     if not args.csv.exists():
@@ -150,12 +170,25 @@ def main() -> int:
     np.save(out_npy, acc)
     print(f"wrote {out_npy} ({os.path.getsize(out_npy)/1e6:.1f} MB)")
 
-    med = float(np.median(acc.astype(np.float32)))
-    scale = args.target_median / max(1.0, med)
-    print(f"stretch: median {med:.1f} → grey {args.target_median} "
-          f"(scale {scale:.4f})")
-    img8 = np.clip(acc.astype(np.float32) * scale,
-                   0, 255).astype(np.uint8)
+    acc_f = acc.astype(np.float32)
+    if args.target_median > 0:
+        # legacy: median → target grey
+        med = float(np.median(acc_f))
+        scale = args.target_median / max(1.0, med)
+        print(f"stretch (legacy): median {med:.1f} → grey "
+              f"{args.target_median} (scale {scale:.4f})")
+        img8 = np.clip(acc_f * scale, 0, 255).astype(np.uint8)
+    else:
+        lo = float(np.percentile(acc_f, args.stretch_lo))
+        hi = float(np.percentile(acc_f, args.stretch_hi))
+        print(f"stretch: p{args.stretch_lo}={lo:.1f} → black, "
+              f"p{args.stretch_hi}={hi:.1f} → white")
+        if hi <= lo:
+            print("  (warning: hi <= lo; image will be flat)")
+            hi = lo + 1
+        img8 = np.clip(
+            (acc_f - lo) * 255.0 / (hi - lo),
+            0, 255).astype(np.uint8)
     cv2.imwrite(str(out_jpg), img8, [cv2.IMWRITE_JPEG_QUALITY, 92])
     print(f"wrote {out_jpg} ({os.path.getsize(out_jpg)/1024:.0f} KB)")
     return 0
