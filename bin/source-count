@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""source-count — quick "is plate-solving plausible?" diagnostic.
+
+Runs astrometry.net's image2xy source extractor on a FITS file and
+reports how many stars-or-star-like objects it found. As a rule of
+thumb:
+
+    <  10  sources  → plate-solving will fail
+    10–30 sources   → marginal; tell solve-field the rough scale
+    30–100 sources  → comfortable
+    >  100 sources  → either great or hot-pixel-contaminated
+
+The script also runs a basic sanity check by comparing the source count
+to a naive "bright pixel group" count. If image2xy finds many more
+sources than there are bright clusters, the image is hot-pixel-heavy
+and you should mask before plate-solving.
+
+Usage:
+    source-count <fits-file>
+    source-count --keep-out <fits-file>   # don't delete the xy table
+    source-count <fits-file> --bayer-channel G1
+        # take just one Bayer sub-plane (default: just use raw frame
+        # as-is, which mixes channels but is faster and usually fine)
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+def load_frame(path: Path, bayer_channel: str | None) -> np.ndarray:
+    with fits.open(path) as h:
+        # CompImageHDU or PrimaryHDU — find the 2D image
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                arr = hdu.data
+                break
+        else:
+            raise SystemExit("no 2D image found in FITS")
+    if bayer_channel is None:
+        return arr
+    # SGBRG pattern: row 0 cols 0,1 = G1,B; row 1 cols 0,1 = R,G2
+    if bayer_channel == "G1":
+        return arr[0::2, 0::2]
+    if bayer_channel == "B":
+        return arr[0::2, 1::2]
+    if bayer_channel == "R":
+        return arr[1::2, 0::2]
+    if bayer_channel == "G2":
+        return arr[1::2, 1::2]
+    raise SystemExit(f"unknown bayer channel: {bayer_channel}")
+
+
+def naive_bright_count(arr: np.ndarray) -> int:
+    """Count connected components above p99.5 — crude but fast.
+
+    Used as a sanity check against image2xy. If image2xy finds many
+    more sources than bright clusters exist, the image is full of
+    spurious detections (hot pixels, noise).
+    """
+    import cv2
+    cutoff = np.percentile(arr, 99.5)
+    bright = (arr > cutoff).astype(np.uint8)
+    n, _ = cv2.connectedComponents(bright)
+    return n - 1  # exclude background
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("fits_file", type=Path)
+    ap.add_argument("--bayer-channel", choices=["G1", "G2", "R", "B"],
+                    help="Extract one Bayer sub-plane first "
+                         "(default: use raw mixed-channel frame)")
+    ap.add_argument("--keep-out", action="store_true",
+                    help="Keep the .xyls source-list file image2xy writes")
+    args = ap.parse_args()
+
+    if not args.fits_file.exists():
+        print(f"no such file: {args.fits_file}", file=sys.stderr)
+        return 2
+
+    # If we need a bayer channel, write a temporary FITS with just that
+    # plane so image2xy sees a cleaner signal.
+    if args.bayer_channel:
+        plane = load_frame(args.fits_file, args.bayer_channel)
+        tmpdir = Path(tempfile.mkdtemp(prefix="source-count-"))
+        plane_fits = tmpdir / "plane.fits"
+        fits.PrimaryHDU(data=plane.astype(np.float32)).writeto(plane_fits)
+        target = plane_fits
+        print(f"using bayer channel {args.bayer_channel}: "
+              f"{plane.shape} ({plane.dtype})")
+    else:
+        target = args.fits_file
+        plane = load_frame(args.fits_file, None)
+
+    print(f"frame stats: mean={plane.mean():.1f} max={int(plane.max())} "
+          f"std={plane.std():.1f}")
+
+    # Run image2xy
+    out_xyls = target.with_suffix(".xyls")
+    if out_xyls.exists():
+        out_xyls.unlink()
+    cmd = ["image2xy", "-o", str(out_xyls), str(target)]
+    print(f"running: {' '.join(cmd)}")
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print("image2xy failed:", r.stderr, file=sys.stderr)
+        return 1
+
+    # Read the xy table and report
+    with fits.open(out_xyls) as h:
+        xy = h[1].data
+    n_sources = len(xy)
+
+    naive = naive_bright_count(plane)
+    print()
+    print(f"image2xy sources: {n_sources}")
+    print(f"naive bright count (p99.5 connected): {naive}")
+    print()
+    if n_sources < 10:
+        print("VERDICT: too few. plate-solving will almost certainly fail.")
+    elif n_sources < 30:
+        print("VERDICT: marginal. try solve-field with --scale-low/high "
+              "hints and --downsample 2.")
+    elif n_sources < 200:
+        print("VERDICT: comfortable. solve-field should work.")
+    else:
+        if n_sources > 5 * naive:
+            print("VERDICT: many sources but likely hot-pixel contaminated. "
+                  "Mask hot pixels before plate-solving.")
+        else:
+            print("VERDICT: plenty of sources. solve-field should work easily.")
+
+    if not args.keep_out:
+        if out_xyls.exists():
+            out_xyls.unlink()
+    else:
+        print(f"\nsource list at: {out_xyls}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
