@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""arc-walk — find the celestial pole from star arcs.
+
+Takes the photon-sum image (a stretched JPG of the dark-frame
+accumulator), thresholds to bright pixels, finds connected components,
+filters by elongation (eigenvalue ratio of position covariance), and
+fits the pole as the consensus intersection of arc-perpendicular
+bisectors.
+
+Iteratively rejects outlier arcs (whose bisector misses the consensus
+by more than k × median residual) and re-fits until stable.
+
+Reports:
+  pole pixel position (may be off-frame)
+  number of arcs that survived rejection
+  residual statistics (median, std, max)
+  inferred latitude options at several pixel scales
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+
+EXAMPLES = """\
+Examples:
+  arc-walk --in photon_2230_0300_p50.jpg --out arc_walk.jpg
+      → standard arc detection; pole reported on stdout
+
+  arc-walk --in stretched.jpg --out arc_walk.jpg --threshold 30
+      → lower threshold = more arcs, more noise
+
+  arc-walk --in stretched.jpg --out arc_walk.jpg \\
+           --ignore-bottom-frac 0.4 --ignore-right-frac 0.2
+      → mask out a larger horizon glow / window-frame region
+
+  arc-walk --in stretched.jpg --out arc_walk.jpg \\
+           --background photon_2230_0300_p50.jpg
+      → overlay arc bisectors and pole marker on the original photon-sum
+
+The pole is fitted as the point with minimum weighted sum-of-squared
+distance to all arc perpendicular bisectors. Weights are arc length.
+"""
+
+
+def fit_pole(arcs):
+    A, b, w = [], [], []
+    for a in arcs:
+        tx, ty = a["tangent"]
+        cx, cy = a["centroid"]
+        A.append([tx, ty])
+        b.append(tx * cx + ty * cy)
+        w.append(a["length"])
+    A = np.array(A)
+    b = np.array(b)
+    W = np.diag(w)
+    lhs = A.T @ W @ A
+    rhs = A.T @ W @ b
+    pole = np.linalg.solve(lhs, rhs)
+    return float(pole[0]), float(pole[1])
+
+
+def residuals(arcs, px, py):
+    out = []
+    for a in arcs:
+        tx, ty = a["tangent"]
+        cx, cy = a["centroid"]
+        c = tx * cx + ty * cy
+        out.append(tx * px + ty * py - c)
+    return np.array(out)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--in", dest="in_path", required=True, type=Path,
+                    help="stretched photon-sum JPG (8-bit greyscale)")
+    ap.add_argument("--out", required=True, type=Path,
+                    help="output visualisation JPG")
+    ap.add_argument("--background", type=Path, default=None,
+                    help="optional background image for the overlay "
+                         "(default: --in)")
+    ap.add_argument("--threshold", type=int, default=40,
+                    help="binary threshold for bright-pixel mask (0-255)")
+    ap.add_argument("--min-arc-pixels", type=int, default=80,
+                    help="discard components smaller than this (hot pixels)")
+    ap.add_argument("--elongation-min", type=float, default=5.0,
+                    help="discard non-elongated blobs (eigenvalue ratio)")
+    ap.add_argument("--ignore-bottom-frac", type=float, default=0.30,
+                    help="ignore arcs whose centroid is in the bottom N "
+                         "fraction of the frame (horizon glow / window)")
+    ap.add_argument("--ignore-right-frac", type=float, default=0.10,
+                    help="ignore arcs whose centroid is in the right N "
+                         "fraction of the frame")
+    ap.add_argument("--max-iter", type=int, default=10,
+                    help="max outlier-rejection iterations")
+    ap.add_argument("--reject-k", type=float, default=2.5,
+                    help="reject arcs whose |residual| > k × median |residual|")
+    args = ap.parse_args()
+
+    img = cv2.imread(str(args.in_path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        sys.stderr.write(f"cannot read {args.in_path}\n")
+        return 2
+    H, W = img.shape
+    print(f"loaded {args.in_path}  {W}x{H}")
+
+    _, binary = cv2.threshold(img, args.threshold, 255, cv2.THRESH_BINARY)
+    n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+
+    arcs = []
+    y_cutoff = int(H * (1.0 - args.ignore_bottom_frac))
+    x_cutoff = int(W * (1.0 - args.ignore_right_frac))
+    for i in range(1, n_cc):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < args.min_arc_pixels:
+            continue
+        ys, xs = np.where(labels == i)
+        pts = np.column_stack([xs.astype(np.float64), ys.astype(np.float64)])
+        centroid = pts.mean(axis=0)
+        if centroid[1] > y_cutoff or centroid[0] > x_cutoff:
+            continue
+        centred = pts - centroid
+        cov = np.cov(centred.T)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        eigvals = eigvals[::-1]
+        eigvecs = eigvecs[:, ::-1]
+        elong = eigvals[0] / max(eigvals[1], 1e-3)
+        if elong < args.elongation_min:
+            continue
+        long_axis = eigvecs[:, 0]
+        short_axis = eigvecs[:, 1]
+        projs = centred @ long_axis
+        p0 = pts[np.argmin(projs)]
+        p1 = pts[np.argmax(projs)]
+        length = float(projs.max() - projs.min())
+        arcs.append({"n": area, "elong": elong, "centroid": centroid,
+                     "tangent": long_axis, "normal": short_axis,
+                     "p0": p0, "p1": p1, "length": length})
+    print(f"after location/elong filter: {len(arcs)} arcs")
+
+    if len(arcs) < 3:
+        sys.stderr.write(f"too few arcs ({len(arcs)}) — adjust thresholds\n")
+        return 1
+
+    # Iterative outlier rejection
+    kept = list(arcs)
+    for it in range(args.max_iter):
+        if len(kept) < 3:
+            print(f"too few arcs ({len(kept)})"); break
+        pcx, pcy = fit_pole(kept)
+        res = residuals(kept, pcx, pcy)
+        med_abs = float(np.median(np.abs(res)))
+        cutoff = args.reject_k * med_abs
+        new_kept = [a for a, r in zip(kept, res) if abs(r) <= cutoff]
+        print(f"iter {it}: {len(kept)} arcs  pole=({pcx:.0f},{pcy:.0f})  "
+              f"|res| median={med_abs:.1f}  cutoff={cutoff:.1f}  "
+              f"keep={len(new_kept)}")
+        if len(new_kept) == len(kept):
+            break
+        kept = new_kept
+
+    pole_x, pole_y = fit_pole(kept)
+    final_res = residuals(kept, pole_x, pole_y)
+    print(f"\nFINAL pole: ({pole_x:.0f}, {pole_y:.0f}) "
+          f"from {len(kept)} arcs")
+    print(f"  residuals: median={np.median(final_res):.1f}  "
+          f"std={final_res.std():.1f}  "
+          f"max|.|={np.max(np.abs(final_res)):.1f}")
+
+    # Latitude back-out
+    fcx, fcy = W / 2, H / 2
+    dist = ((pole_x - fcx)**2 + (pole_y - fcy)**2)**0.5
+    print(f"  distance frame-centre → pole: {dist:.0f} px")
+    print(f"  pixel-scale latitude options (assuming pole-to-zenith angle):")
+    for asec_pp in (74, 88, 100, 110):
+        ang = dist * asec_pp / 3600
+        print(f"    @ {asec_pp} arcsec/px → {ang:.1f}° from zenith "
+              f"(lat = {90 - ang:.1f}°)")
+
+    # Render diagnostic overlay
+    bg_path = args.background or args.in_path
+    bg = cv2.imread(str(bg_path))
+    if bg is None:
+        bg = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if bg.shape[:2] != (H, W):
+        bg = cv2.resize(bg, (W, H))
+    extend_top = max(0, int(-pole_y) + 100) if pole_y < 0 else 0
+    extend_bot = max(0, int(pole_y - H) + 100) if pole_y > H else 0
+    extend_left = max(0, int(-pole_x) + 100) if pole_x < 0 else 0
+    extend_right = max(0, int(pole_x - W) + 100) if pole_x > W else 0
+    ch, cw = H + extend_top + extend_bot, W + extend_left + extend_right
+    canvas = np.zeros((ch, cw, 3), dtype=np.uint8)
+    canvas[extend_top:extend_top + H, extend_left:extend_left + W] = bg
+
+    def to_c(p):
+        return (int(p[0]) + extend_left, int(p[1]) + extend_top)
+
+    kept_set = set(id(a) for a in kept)
+    for a in arcs:
+        nx, ny = a["normal"]
+        L = ch + cw
+        e0 = (a["centroid"][0] + nx * L, a["centroid"][1] + ny * L)
+        e1 = (a["centroid"][0] - nx * L, a["centroid"][1] - ny * L)
+        col = (180, 220, 180) if id(a) in kept_set else (60, 60, 120)
+        cv2.line(canvas, to_c(e0), to_c(e1), col, 1, cv2.LINE_AA)
+        cv2.circle(canvas, to_c(a["p0"]), 4, (50, 200, 255), -1)
+        cv2.circle(canvas, to_c(a["p1"]), 4, (50, 200, 255), -1)
+
+    pp = to_c((pole_x, pole_y))
+    cv2.circle(canvas, pp, 40, (0, 255, 0), 3)
+    cv2.line(canvas, (pp[0] - 80, pp[1]), (pp[0] + 80, pp[1]),
+             (0, 255, 0), 2)
+    cv2.line(canvas, (pp[0], pp[1] - 80), (pp[0], pp[1] + 80),
+             (0, 255, 0), 2)
+    cv2.putText(canvas,
+                f"pole ({pole_x:.0f}, {pole_y:.0f})  "
+                f"[{len(kept)}/{len(arcs)} arcs]",
+                (pp[0] + 50, pp[1] - 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 2, cv2.LINE_AA)
+
+    cv2.imwrite(str(args.out), canvas, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    print(f"\nwrote {args.out} ({cw}x{ch})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""derot-stack — rotation-compensated stack of frames around the pole.
+
+For each frame in a time window, rotate around the celestial pole so
+the stars align with the reference frame. Then sum. Stars become
+points (well, mini-arcs until lens distortion is fitted); cloud,
+light leak, sensor banding smear out.
+
+Pole position from arc-walk. Sidereal rate is 7.2921e-5 rad/s; sign
+of the rotation depends on which way the camera faces. If stars
+SMEAR rather than sharpen, flip --omega-rad-s to its negative.
+
+Reads .fits.fz (or .npy with auto-detect).
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+
+
+EXAMPLES = """\
+Examples:
+  derot-stack --csv ~/starcam-frames/night/2026-05-21/brightness.csv \\
+              --window 22:30-03:00 \\
+              --pole-x 1919 --pole-y -218 \\
+              --out derot_stack.jpg
+      → reproduce last session's derotation with known pole
+
+  derot-stack --csv .../brightness.csv --window 22:30-03:00 \\
+              --pole-x 1919 --pole-y -218 \\
+              --omega-rad-s -7.2921e-5 --out derot.jpg
+      → flip rotation sign (if stars smear with default)
+
+  derot-stack --csv .../brightness.csv --window 22:30-03:00 \\
+              --pole-x 1919 --pole-y -218 \\
+              --downsample 2 --out derot_half.jpg
+      → half-res, 4× faster (good for parameter exploration)
+
+  derot-stack --csv .../brightness.csv --window 22:30-03:00 \\
+              --pole-x 1919 --pole-y -218 \\
+              --hot-mask hot_pixels.npy --out derot.jpg
+      → zero hot pixels before warp (much cleaner stack)
+
+  derot-stack --csv .../brightness.csv --window 22:30-03:00 \\
+              --pole-x 1919 --pole-y -218 --save-npy stack.npy \\
+              --out derot.jpg
+      → also save the int64 accumulator for downstream tools
+
+Pole position from arc-walk. Use --downsample 2 or 4 to iterate fast
+while exploring (pole_x, pole_y, ω); switch to --downsample 1 for the
+final clean stack.
+"""
+
+
+SIDEREAL_RAD_S = 7.2921e-5
+
+
+def load_frame(path: Path) -> np.ndarray:
+    if path.suffix == ".npy":
+        return np.load(path)
+    with fits.open(path, memmap=False) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data.copy()
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def parse_window(s: str) -> tuple[int, int, bool]:
+    a, b = s.split("-")
+    def to_min(x):
+        h, m = x.split(":")
+        return int(h) * 60 + int(m)
+    sm, em = to_min(a), to_min(b)
+    return sm, em, em <= sm
+
+
+def in_window(iso: str, sm: int, em: int, wraps: bool) -> bool:
+    dt = datetime.fromisoformat(iso)
+    m = dt.hour * 60 + dt.minute
+    if wraps:
+        return m >= sm or m < em
+    return sm <= m < em
+
+
+def epoch_ms_from(fn: str) -> int:
+    return int(Path(fn).name.split(".", 1)[0])
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--csv", required=True, type=Path,
+                    help="brightness CSV from scan-brightness")
+    ap.add_argument("--window", required=True,
+                    help="UTC range as HH:MM-HH:MM (may wrap midnight)")
+    ap.add_argument("--pole-x", type=float, required=True,
+                    help="pole pixel X (from arc-walk, may be off-frame)")
+    ap.add_argument("--pole-y", type=float, required=True,
+                    help="pole pixel Y (from arc-walk, may be off-frame)")
+    ap.add_argument("--omega-rad-s", type=float, default=SIDEREAL_RAD_S,
+                    help=f"sidereal rate (default sky rate "
+                         f"{SIDEREAL_RAD_S:.4e} rad/s; flip sign if smear)")
+    ap.add_argument("--pct", type=float, default=50,
+                    help="keep darkest N%% of frames in window (default 50)")
+    ap.add_argument("--hot-mask", type=Path, default=None,
+                    help="optional boolean .npy hot-pixel mask "
+                         "(zeroed before stacking)")
+    ap.add_argument("--out", required=True, type=Path,
+                    help="output JPG (extended canvas if pole is off-frame)")
+    ap.add_argument("--save-npy", type=Path, default=None,
+                    help="optional .npy of the raw int64 accumulator")
+    ap.add_argument("--target-median", type=int, default=50,
+                    help="JPG stretch target median grey 0–255 (default 50)")
+    ap.add_argument("--downsample", type=int, default=1,
+                    help="reduce resolution by this factor (1, 2, 4)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="cap on number of frames stacked (0 = no cap)")
+    args = ap.parse_args()
+
+    if not args.csv.exists():
+        sys.stderr.write(f"no csv: {args.csv}\n")
+        return 2
+
+    sm, em, wraps = parse_window(args.window)
+
+    # Filter + sort
+    rows = []
+    with open(args.csv) as f:
+        for r in csv.DictReader(f):
+            if in_window(r["iso_utc"], sm, em, wraps):
+                rows.append((r["filename"], float(r["mean"]),
+                             r["iso_utc"]))
+    print(f"in window {args.window} UTC: {len(rows)}")
+    if not rows:
+        return 1
+    rows.sort(key=lambda r: r[1])
+    k = int(len(rows) * args.pct / 100)
+    selected = sorted(rows[:k], key=lambda r: r[2])
+    if args.limit and args.limit < len(selected):
+        step = max(1, len(selected) // args.limit)
+        selected = selected[::step][:args.limit]
+    print(f"using darkest {args.pct}% = {len(selected)} frames")
+
+    ref_epoch_ms = epoch_ms_from(selected[0][0])
+    print(f"reference epoch_ms: {ref_epoch_ms} ({selected[0][2]})")
+
+    hot_mask = None
+    if args.hot_mask:
+        hot_mask = np.load(args.hot_mask)
+        print(f"hot mask: {hot_mask.shape} {int(hot_mask.sum())} px")
+
+    # Probe first frame for shape
+    first = load_frame(Path(selected[0][0]))
+    H_full, W_full = first.shape
+    H = H_full // args.downsample
+    W = W_full // args.downsample
+    acc = np.zeros((H, W), dtype=np.int64)
+    pole = (args.pole_x / args.downsample,
+            args.pole_y / args.downsample)
+    print(f"out shape: {H}x{W}  pole-out: "
+          f"({pole[0]:.1f}, {pole[1]:.1f})")
+
+    t0 = time.time()
+    for i, (fn, _, _) in enumerate(selected):
+        arr = load_frame(Path(fn))
+        if hot_mask is not None:
+            arr = arr.copy()
+            arr[hot_mask] = 0
+        if args.downsample > 1:
+            arr = cv2.resize(arr, (W, H),
+                             interpolation=cv2.INTER_AREA)
+        epoch_ms = epoch_ms_from(fn)
+        dt_s = (epoch_ms - ref_epoch_ms) / 1000.0
+        angle_rad = -args.omega_rad_s * dt_s
+        angle_deg = float(np.degrees(angle_rad))
+        M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+        rotated = cv2.warpAffine(
+            arr.astype(np.float32), M, (W, H),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        acc += rotated.astype(np.int64)
+        if i == 0 or i % 200 == 0:
+            elapsed = time.time() - t0
+            rate = (i + 1) / max(0.001, elapsed)
+            print(f"  [{i}/{len(selected)}] dt={dt_s:8.1f}s "
+                  f"angle={angle_deg:8.3f}° acc_max={int(acc.max())} "
+                  f"({rate:.1f} fps)", flush=True)
+    print(f"summed in {time.time() - t0:.0f}s")
+    print(f"acc: min={int(acc.min())} max={int(acc.max())} "
+          f"median={int(np.median(acc))}")
+
+    if args.save_npy:
+        np.save(args.save_npy, acc)
+        print(f"saved {args.save_npy}")
+
+    # Stretch
+    med = float(np.median(acc.astype(np.float32)))
+    scale = args.target_median / max(1.0, med)
+    img8 = np.clip(acc.astype(np.float32) * scale,
+                   0, 255).astype(np.uint8)
+
+    # Extend canvas if pole is off-frame
+    px, py = pole
+    extend_top = max(0, int(-py) + 80) if py < 0 else 0
+    extend_bot = max(0, int(py - H) + 80) if py > H else 0
+    extend_left = max(0, int(-px) + 80) if px < 0 else 0
+    extend_right = max(0, int(px - W) + 80) if px > W else 0
+    canvas_h = H + extend_top + extend_bot
+    canvas_w = W + extend_left + extend_right
+    canvas = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
+    canvas[extend_top:extend_top + H,
+           extend_left:extend_left + W] = img8
+    canvas_bgr = cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
+    pp = (int(px + extend_left), int(py + extend_top))
+    cv2.circle(canvas_bgr, pp, 30, (0, 255, 0), 2)
+    cv2.line(canvas_bgr, (pp[0] - 60, pp[1]),
+             (pp[0] + 60, pp[1]), (0, 255, 0), 1)
+    cv2.line(canvas_bgr, (pp[0], pp[1] - 60),
+             (pp[0], pp[1] + 60), (0, 255, 0), 1)
+    cv2.putText(canvas_bgr,
+                f"pole ({px * args.downsample:.0f}, "
+                f"{py * args.downsample:.0f})",
+                (pp[0] + 40, pp[1] - 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2,
+                cv2.LINE_AA)
+
+    cv2.imwrite(str(args.out), canvas_bgr,
+                [cv2.IMWRITE_JPEG_QUALITY, 92])
+    print(f"wrote {args.out} "
+          f"({os.path.getsize(args.out) / 1024:.0f} KB) "
+          f"canvas {canvas_w}x{canvas_h}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
