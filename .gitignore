@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.fits
+*.fits.fz
+*.npy
+*.jpg
+*.png
+*.log
+tmp/
+
+# data + working dirs
+2026-*/
+img/
