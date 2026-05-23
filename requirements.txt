@@ -2,3 +2,7 @@ numpy
 astropy
 fitsio
 opencv-python-headless
+Pillow
+boto3
+matplotlib
+watchdog

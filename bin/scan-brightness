@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """scan-brightness — per-frame brightness stats for a night.
 
-Walks every .fits.fz (or .npy if requested) in a night dir, emits a
-CSV row per frame. Cheap to re-slice later for outlier hunts and
-"give me the darkest N% in this window" queries.
+Walks every HH/ subdir under a night dir and writes a `brightness.csv`
+*inside each HH dir* with one row per frame. Re-running is cheap: if
+the CSV already has a row for every frame in the dir, it's skipped;
+otherwise only the missing frames are measured and appended.
 
 CSV columns:
     epoch_ms, iso_utc, filename, mean, median, p95, max, bright_pixels
@@ -11,17 +12,19 @@ CSV columns:
 Where `bright_pixels` = count of pixels >= 500 (a "something hot in this
 frame" signal — saturated stars, aircraft lights, hot pixels).
 
+By default both .fits.fz (→ brightness.csv) and .npy (→ brightnessnpy.csv)
+are scanned. Use --only fits or --only npy to restrict.
+
 Usage:
-    scan-brightness <night-dir>                        # default → night.csv
-    scan-brightness <night-dir> --out my.csv
-    scan-brightness <night-dir> --npy                  # read .npy not .fits.fz
+    scan-brightness <night-dir>
+    scan-brightness <night-dir> --only fits            # only .fits.fz
+    scan-brightness <night-dir> --only npy             # only .npy
     scan-brightness <night-dir> --limit 100            # smoke test
 """
 from __future__ import annotations
 
 import argparse
 import csv
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -54,20 +57,107 @@ def epoch_ms_from_name(p: Path) -> int | None:
 EXAMPLES = """\
 Examples:
   scan-brightness ~/starcam-frames/night/2026-05-21
-      → writes ~/starcam-frames/night/2026-05-21/brightness.csv
+      → writes <night>/HH/brightness.csv for each hour dir
 
   scan-brightness ~/starcam-frames/night/2026-05-21 --limit 50
-      → smoke test on the first 50 frames
+      → smoke test on at most 50 frames per hour dir
 
-  scan-brightness ~/starcam-frames/night/2026-05-21 --npy
-      → scan .npy files instead of .fits.fz (slower, larger reads)
+  scan-brightness ~/starcam-frames/night/2026-05-21 --only npy
+      → scan .npy files only (→ brightnessnpy.csv)
 
-  scan-brightness ~/starcam-frames/night/2026-05-21 --out /tmp/b.csv
-      → write to a specific path
+  scan-brightness ~/starcam-frames/night/2026-05-21 --only fits
+      → scan .fits.fz only (→ brightness.csv)
 
-Walks <night-dir>/HH/*.fits.fz recursively. Output CSV columns:
+CSV columns:
   epoch_ms, iso_utc, filename, mean, median, p95, max, bright_pixels
 """
+
+
+HEADER = ["epoch_ms", "iso_utc", "filename",
+          "mean", "median", "p95", "max", "bright_pixels"]
+
+
+def read_done(csv_path: Path) -> set[str]:
+    """Return set of filenames already present in the CSV (basename)."""
+    if not csv_path.exists():
+        return set()
+    done: set[str] = set()
+    with open(csv_path, newline="") as f:
+        r = csv.reader(f)
+        try:
+            header = next(r)
+        except StopIteration:
+            return done
+        if header != HEADER:
+            # Unknown format — treat as empty and overwrite header on append.
+            return done
+        for row in r:
+            if len(row) >= 3:
+                done.add(Path(row[2]).name)
+    return done
+
+
+def measure(fn: Path):
+    arr = load_frame(fn)
+    epoch_ms = epoch_ms_from_name(fn)
+    if epoch_ms is None:
+        return None
+    iso = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).isoformat()
+    mean = float(arr.mean())
+    median = float(np.median(arr))
+    p95 = float(np.percentile(arr, 95))
+    mx = int(arr.max())
+    bright = int((arr >= 500).sum())
+    return [epoch_ms, iso, str(fn), f"{mean:.3f}",
+            f"{median:.1f}", f"{p95:.1f}", mx, bright]
+
+
+def process_hour_dir(hour_dir: Path, ext: str, csv_name: str,
+                     limit: int) -> None:
+    csv_path = hour_dir / csv_name
+    # Create CSV (with header) before counting, so it exists from the off.
+    if not csv_path.exists() or csv_path.stat().st_size == 0:
+        with open(csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(HEADER)
+
+    files = sorted(hour_dir.glob(ext))
+    if not files:
+        print(f"{hour_dir}: no {ext} frames", flush=True)
+        return
+    done = read_done(csv_path)
+
+    if len(done) == len(files) and all(f.name in done for f in files):
+        print(f"{hour_dir}: {len(files)} {ext}, csv complete — skip",
+              flush=True)
+        return
+
+    todo = [f for f in files if f.name not in done]
+    if limit:
+        todo = todo[:limit]
+    print(f"{hour_dir}: {len(files)} {ext}, {len(done)} done, "
+          f"{len(todo)} to measure → {csv_path.name}", flush=True)
+
+    t0 = time.time()
+    with open(csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        for i, fn in enumerate(todo):
+            try:
+                row = measure(fn)
+            except Exception as e:
+                print(f"  [{i}] FAIL {fn}: {e}", file=sys.stderr)
+                continue
+            if row is None:
+                continue
+            w.writerow(row)
+            if i == 0 or i % 200 == 0:
+                elapsed = time.time() - t0
+                rate = (i + 1) / max(0.001, elapsed)
+                eta = (len(todo) - i - 1) / max(0.001, rate)
+                print(f"  [{i}/{len(todo)}] {fn.name} "
+                      f"mean={row[3]} max={row[6]} bright={row[7]} "
+                      f"({rate:.1f} fps, ETA {eta/60:.1f} min)",
+                      flush=True)
+    print(f"  wrote {csv_path} in {time.time()-t0:.1f}s", flush=True)
 
 
 def main() -> int:
@@ -78,58 +168,27 @@ def main() -> int:
     )
     ap.add_argument("night_dir", type=Path,
                     help="night directory containing HH/*.fits.fz")
-    ap.add_argument("--out", type=Path, default=None,
-                    help="output CSV (default: <night-dir>/brightness.csv)")
-    ap.add_argument("--npy", action="store_true",
-                    help="scan .npy instead of .fits.fz")
+    ap.add_argument("--only", choices=["fits", "npy"], default=None,
+                    help="scan only one format (default: both)")
     ap.add_argument("--limit", type=int, default=0,
-                    help="cap (0 = no cap)")
+                    help="per-hour cap on new measurements (0 = no cap)")
     args = ap.parse_args()
 
-    ext = "*.npy" if args.npy else "*.fits.fz"
-    files = sorted(args.night_dir.rglob(ext))
-    print(f"{len(files)} {ext} frames in {args.night_dir}", flush=True)
-    if args.limit:
-        files = files[:args.limit]
-        print(f"limited to {len(files)}", flush=True)
-    if not files:
+    # (glob pattern, csv filename) per format we'll scan
+    formats: list[tuple[str, str]] = []
+    if args.only in (None, "fits"):
+        formats.append(("*.fits.fz", "brightness.csv"))
+    if args.only in (None, "npy"):
+        formats.append(("*.npy", "brightnessnpy.csv"))
+
+    hour_dirs = sorted(d for d in args.night_dir.iterdir() if d.is_dir())
+    if not hour_dirs:
+        print(f"no subdirectories in {args.night_dir}", file=sys.stderr)
         return 1
 
-    out_path = args.out or (args.night_dir / "brightness.csv")
-    print(f"writing → {out_path}")
-
-    t0 = time.time()
-    with open(out_path, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["epoch_ms", "iso_utc", "filename",
-                    "mean", "median", "p95", "max", "bright_pixels"])
-        for i, fn in enumerate(files):
-            try:
-                arr = load_frame(fn)
-            except Exception as e:
-                print(f"  [{i}] FAIL {fn}: {e}", file=sys.stderr)
-                continue
-            epoch_ms = epoch_ms_from_name(fn)
-            if epoch_ms is None:
-                continue
-            iso = datetime.fromtimestamp(
-                epoch_ms / 1000, tz=timezone.utc).isoformat()
-            mean = float(arr.mean())
-            median = float(np.median(arr))
-            p95 = float(np.percentile(arr, 95))
-            mx = int(arr.max())
-            bright = int((arr >= 500).sum())
-            w.writerow([epoch_ms, iso, str(fn), f"{mean:.3f}",
-                        f"{median:.1f}", f"{p95:.1f}", mx, bright])
-            if i == 0 or i % 200 == 0:
-                elapsed = time.time() - t0
-                rate = (i + 1) / max(0.001, elapsed)
-                eta = (len(files) - i - 1) / max(0.001, rate)
-                print(f"  [{i}/{len(files)}] {fn.name} "
-                      f"mean={mean:.1f} max={mx} bright={bright} "
-                      f"({rate:.1f} fps, ETA {eta/60:.1f} min)",
-                      flush=True)
-    print(f"wrote {out_path} in {time.time()-t0:.1f}s", flush=True)
+    for hd in hour_dirs:
+        for ext, csv_name in formats:
+            process_hour_dir(hd, ext, csv_name, args.limit)
     return 0
 
 

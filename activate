@@ -1,0 +1,32 @@
+# Source this file to enter "astro mode":
+#   source ~/astro/activate
+#
+# Activates the astro venv and puts ~/astro/bin on PATH.
+
+if [ -n "${BASH_SOURCE[0]}" ] && [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    echo "astro: this file must be sourced, not executed" >&2
+    echo "  source ~/astro/activate" >&2
+    exit 1
+fi
+
+_astro_root="$HOME/astro"
+
+if [ ! -f "$_astro_root/.venv/bin/activate" ]; then
+    echo "astro: no venv at $_astro_root/.venv — create one with:" >&2
+    echo "  python3 -m venv $_astro_root/.venv && \\" >&2
+    echo "  source $_astro_root/.venv/bin/activate && \\" >&2
+    echo "  pip install -r $_astro_root/requirements.txt" >&2
+    unset _astro_root
+    return 1
+fi
+
+# shellcheck disable=SC1091
+source "$_astro_root/.venv/bin/activate"
+
+case ":$PATH:" in
+    *":$_astro_root/bin:"*) ;;
+    *) export PATH="$_astro_root/bin:$PATH" ;;
+esac
+
+unset _astro_root
+echo "astro mode: venv active, ~/astro/bin on PATH"
