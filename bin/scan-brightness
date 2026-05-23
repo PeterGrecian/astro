@@ -12,13 +12,13 @@ CSV columns:
 Where `bright_pixels` = count of pixels >= 500 (a "something hot in this
 frame" signal — saturated stars, aircraft lights, hot pixels).
 
-By default both .fits.fz (→ brightness.csv) and .npy (→ brightnessnpy.csv)
-are scanned. Use --only fits or --only npy to restrict.
+Default: scans .fits.fz → brightness.csv. Use --format npy (or both) to
+also/instead measure raw .npy frames (→ brightnessnpy.csv).
 
 Usage:
     scan-brightness <night-dir>
-    scan-brightness <night-dir> --only fits            # only .fits.fz
-    scan-brightness <night-dir> --only npy             # only .npy
+    scan-brightness <night-dir> --format npy           # only .npy
+    scan-brightness <night-dir> --format both          # both formats
     scan-brightness <night-dir> --limit 100            # smoke test
 """
 from __future__ import annotations
@@ -62,11 +62,11 @@ Examples:
   scan-brightness ~/starcam-frames/night/2026-05-21 --limit 50
       → smoke test on at most 50 frames per hour dir
 
-  scan-brightness ~/starcam-frames/night/2026-05-21 --only npy
+  scan-brightness ~/starcam-frames/night/2026-05-21 --format npy
       → scan .npy files only (→ brightnessnpy.csv)
 
-  scan-brightness ~/starcam-frames/night/2026-05-21 --only fits
-      → scan .fits.fz only (→ brightness.csv)
+  scan-brightness ~/starcam-frames/night/2026-05-21 --format both
+      → scan both .fits.fz and .npy
 
 CSV columns:
   epoch_ms, iso_utc, filename, mean, median, p95, max, bright_pixels
@@ -168,17 +168,18 @@ def main() -> int:
     )
     ap.add_argument("night_dir", type=Path,
                     help="night dir containing HH/*.fits.fz, OR a single HH dir")
-    ap.add_argument("--only", choices=["fits", "npy"], default=None,
-                    help="scan only one format (default: both)")
+    ap.add_argument("--format", choices=["fits", "npy", "both"],
+                    default="fits",
+                    help="which frame format to scan (default: fits)")
     ap.add_argument("--limit", type=int, default=0,
                     help="per-hour cap on new measurements (0 = no cap)")
     args = ap.parse_args()
 
     # (glob pattern, csv filename) per format we'll scan
     formats: list[tuple[str, str]] = []
-    if args.only in (None, "fits"):
+    if args.format in ("fits", "both"):
         formats.append(("*.fits.fz", "brightness.csv"))
-    if args.only in (None, "npy"):
+    if args.format in ("npy", "both"):
         formats.append(("*.npy", "brightnessnpy.csv"))
 
     # If the arg looks like an HH dir (contains frames directly), treat it
