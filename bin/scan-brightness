@@ -167,7 +167,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("night_dir", type=Path,
-                    help="night directory containing HH/*.fits.fz")
+                    help="night dir containing HH/*.fits.fz, OR a single HH dir")
     ap.add_argument("--only", choices=["fits", "npy"], default=None,
                     help="scan only one format (default: both)")
     ap.add_argument("--limit", type=int, default=0,
@@ -181,7 +181,14 @@ def main() -> int:
     if args.only in (None, "npy"):
         formats.append(("*.npy", "brightnessnpy.csv"))
 
-    hour_dirs = sorted(d for d in args.night_dir.iterdir() if d.is_dir())
+    # If the arg looks like an HH dir (contains frames directly), treat it
+    # as a single hour; otherwise treat as a night dir of HH subdirs.
+    has_frames = any(args.night_dir.glob("*.fits.fz")) or \
+        any(args.night_dir.glob("*.npy"))
+    if has_frames:
+        hour_dirs = [args.night_dir]
+    else:
+        hour_dirs = sorted(d for d in args.night_dir.iterdir() if d.is_dir())
     if not hour_dirs:
         print(f"no subdirectories in {args.night_dir}", file=sys.stderr)
         return 1
