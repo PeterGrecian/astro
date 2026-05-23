@@ -166,8 +166,9 @@ def main() -> int:
         epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("night_dir", type=Path,
-                    help="night dir containing HH/*.fits.fz, OR a single HH dir")
+    ap.add_argument("night_dir", type=Path, nargs="?", default=Path.cwd(),
+                    help="night dir containing HH/*.fits.fz, OR a single HH dir "
+                         "(default: cwd)")
     ap.add_argument("--format", choices=["fits", "npy", "both"],
                     default="fits",
                     help="which frame format to scan (default: fits)")
