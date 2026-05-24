@@ -118,12 +118,14 @@ while [ "$ITER" -lt "$MAX_ITERS" ]; do
     fi
     echo "$FIT_OUT" | tail -20
 
-    # Parse the "recommended" line — both fitters emit one.
-    REC=$(echo "$FIT_OUT" | grep -E '^recommended ' | tail -1)
-    NEW_PX=$(echo "$REC" | grep -oE -- '--pole-x [-0-9.]+' | awk '{print $2}')
-    NEW_PY=$(echo "$REC" | grep -oE -- '--pole-y [-0-9.]+' | awk '{print $2}')
-    NEW_K1=$(echo "$REC" | grep -oE -- '--k1 [-0-9.]+' | awk '{print $2}')
-    NEW_K2=$(echo "$REC" | grep -oE -- '--k2 [-0-9.]+' | awk '{print $2}')
+    # Parse the "recommended" line — both fitters emit one. Use `|| true`
+    # because set -e would otherwise kill the script when k1/k2 are
+    # absent (fit-pole doesn't emit them).
+    REC=$(echo "$FIT_OUT" | grep -E '^recommended ' | tail -1 || true)
+    NEW_PX=$(echo "$REC" | grep -oE -- '--pole-x [-0-9.]+' | awk '{print $2}' || true)
+    NEW_PY=$(echo "$REC" | grep -oE -- '--pole-y [-0-9.]+' | awk '{print $2}' || true)
+    NEW_K1=$(echo "$REC" | grep -oE -- '--k1 [-0-9.]+' | awk '{print $2}' || true)
+    NEW_K2=$(echo "$REC" | grep -oE -- '--k2 [-0-9.]+' | awk '{print $2}' || true)
     [ -n "$NEW_PX" ] && [ -n "$NEW_PY" ] || { echo "fitter gave no pole" >&2; exit 3; }
 
     MOVE=$(python3 -c "import math; print(math.hypot($NEW_PX - $PX, $NEW_PY - $PY))")
