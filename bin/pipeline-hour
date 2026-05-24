@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# pipeline-hour — full single-hour pipeline from raw .fits.fz to a
+# converged derotated stack with discovered stars.
+#
+# Stages (each skipped if its output exists, unless --force):
+#   1. bin-frames     <hh> → <hh>b/
+#   2. scan-brightness <hh>b/
+#   3. sum-frames     <hh>b/ → sum.fits.fz
+#   4. hot-pixel-mask --sweep on sum
+#   5. find-candidates round 0 (raw frames + 4% hot mask)
+#
+# Then loop (max 6 iterations):
+#   6. fit-pole using current candidates + current pole
+#   7. derot-patches with new pole → updated derot stack
+#   8. find-candidates on the derot stack (grid 50)
+#   stop when pole moves <1 binned px between iterations
+#
+# Defaults to the legacy-good pole from the 2026-05-23/02 dataset;
+# override per-night with --pole-x/--pole-y if camera has moved.
+#
+# Usage:
+#   pipeline-hour <hh-dir>
+#   pipeline-hour <hh-dir> --pole-x 905.5 --pole-y 50.4
+#   pipeline-hour <hh-dir> --force
+set -euo pipefail
+
+POLE_X=905.5
+POLE_Y=50.4
+FRAMES=100
+TOP=10
+PATCH=50
+FORCE=0
+MAX_ITERS=6
+MIN_MOVE=1.0
+
+usage() { sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; }
+
+HH=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --pole-x) POLE_X="$2"; shift 2;;
+        --pole-y) POLE_Y="$2"; shift 2;;
+        --frames) FRAMES="$2"; shift 2;;
+        --top)    TOP="$2";    shift 2;;
+        --patch)  PATCH="$2";  shift 2;;
+        --force)  FORCE=1;     shift;;
+        --max-iters) MAX_ITERS="$2"; shift 2;;
+        -h|--help) usage; exit 0;;
+        *) if [ -z "$HH" ]; then HH="$1"; shift
+           else echo "extra arg: $1" >&2; exit 2; fi;;
+    esac
+done
+
+[ -n "$HH" ] || { usage; exit 2; }
+HH="${HH%/}"
+[ -d "$HH" ] || { echo "no such dir: $HH" >&2; exit 2; }
+HHB="${HH}b"
+PARENT="$(dirname "$HH")"
+
+step() { printf '\n=== %s ===\n' "$*"; }
+skip() { printf '  skip (exists): %s\n' "$1"; }
+need() {
+    if [ "$FORCE" = "1" ] || [ ! -e "$1" ]; then return 0; fi
+    skip "$1"; return 1
+}
+
+# 1. bin
+step "1. bin-frames → $HHB"
+if need "$HHB/0001.fits.fz"; then
+    bin-frames "$HH" "$HHB"
+fi
+
+# 2. brightness CSV (for streak-sum and other CSV consumers; not used here)
+step "2. scan-brightness $HHB"
+if need "$HHB/brightness.csv"; then
+    scan-brightness "$HHB"
+fi
+
+# 3. sum
+step "3. sum-frames $HHB"
+if need "$HHB/sum.fits.fz"; then
+    sum-frames "$HHB"
+fi
+
+# 4. hot-pixel mask sweep
+step "4. hot-pixel-mask --sweep"
+if need "$HHB/hot-pixels-starcam-4pct.fits.fz"; then
+    hot-pixel-mask "$HHB/sum.fits.fz" --sweep --out-dir "$HHB"
+fi
+
+# 5. find-candidates round 0 (raw frames, 100-px grid, 4% mask)
+step "5. find-candidates (raw frames, grid 100)"
+if need "$HHB/candidates.csv"; then
+    find-candidates "$HHB" --grid 100 \
+        --mask "$HHB/hot-pixels-starcam-4pct.fits.fz" --top-cells
+fi
+
+# Bootstrap loop
+PX="$POLE_X"; PY="$POLE_Y"
+ITER=0
+while [ "$ITER" -lt "$MAX_ITERS" ]; do
+    ITER=$((ITER + 1))
+    step "iter $ITER: fit-pole around ($PX, $PY)"
+    # Capture refined pole from fit-pole output line "recommended --pole-x X --pole-y Y"
+    FIT_OUT=$(fit-pole "$HHB" --pole-x "$PX" --pole-y "$PY" \
+        --frames "$FRAMES" --patch "$PATCH" --top "$TOP" --refine 2>&1)
+    echo "$FIT_OUT" | tail -20
+    NEW=$(echo "$FIT_OUT" | grep -oE 'recommended --pole-x [-0-9.]+ --pole-y [-0-9.]+' \
+        | tail -1 | awk '{print $3, $5}')
+    NEW_PX=$(echo "$NEW" | awk '{print $1}')
+    NEW_PY=$(echo "$NEW" | awk '{print $2}')
+    [ -n "$NEW_PX" ] && [ -n "$NEW_PY" ] || { echo "fit-pole gave no pole" >&2; exit 3; }
+
+    MOVE=$(python3 -c "import math; print(math.hypot($NEW_PX - $PX, $NEW_PY - $PY))")
+    printf '  pole moved %.2f binned px ((%s,%s) → (%s,%s))\n' \
+        "$MOVE" "$PX" "$PY" "$NEW_PX" "$NEW_PY"
+
+    PX="$NEW_PX"; PY="$NEW_PY"
+
+    step "iter $ITER: derot-patches + save stack"
+    OUT_DIR="$HHB/patches-iter$ITER"
+    derot-patches "$HHB" --pole-x "$PX" --pole-y "$PY" \
+        --frames "$FRAMES" --patch "$PATCH" --top "$TOP" \
+        --out-dir "$OUT_DIR" 2>&1 | tail -5
+
+    # Rename derot stack so find-candidates doesn't skip it.
+    mv "$OUT_DIR/stack-derot.fits.fz" "$OUT_DIR/derot.fits.fz" 2>/dev/null || true
+
+    step "iter $ITER: find-candidates on derot stack"
+    find-candidates "$OUT_DIR" --grid 50 --top-cells \
+        --out "$HHB/candidates.csv" 2>&1 | tail -25
+
+    # Convergence check
+    if python3 -c "import sys; sys.exit(0 if $MOVE < $MIN_MOVE else 1)"; then
+        printf '\n=== converged after %d iterations: pole=(%s, %s) ===\n' \
+            "$ITER" "$PX" "$PY"
+        break
+    fi
+done
+
+if [ "$ITER" -ge "$MAX_ITERS" ]; then
+    printf '\n=== stopped at max-iters=%d, pole=(%s, %s) ===\n' \
+        "$MAX_ITERS" "$PX" "$PY"
+fi
+
+printf '\nFinal pole: --pole-x %s --pole-y %s\n' "$PX" "$PY"
+printf 'Outputs in: %s\n' "$HHB"
