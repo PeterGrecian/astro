@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Run scan-brightness on the HH dir that just finished.
+#
+# Night rolls over at noon Europe/London (per astro/CLAUDE.md). So at
+# 12:01–23:01 the HH dir lives under today's night; at 00:01–11:01 it
+# lives under yesterday's. Compute one hour ago in London time and
+# slot it into the right night dir.
+#
+# Wired in by services/scan-brightness.{service,timer}; safe to run
+# by hand any time (scan-brightness itself is idempotent).
+set -euo pipefail
+
+ROOT="${STARCAM_ROOT:-$HOME/starcam-frames/night}"
+
+prev_iso=$(TZ=Europe/London date -d '1 hour ago' +%Y-%m-%dT%H)
+night=${prev_iso%T*}   # YYYY-MM-DD
+hh=${prev_iso#*T}      # HH
+
+# Before noon the hour belongs to yesterday's night dir.
+if [ "$hh" -lt 12 ]; then
+    night=$(TZ=Europe/London date -d "$night - 1 day" +%Y-%m-%d)
+fi
+
+target="$ROOT/$night/$hh"
+if [ ! -d "$target" ]; then
+    echo "scan-brightness-prev-hour: no such dir: $target" >&2
+    exit 0
+fi
+
+source "$HOME/astro/.venv/bin/activate"
+exec "$HOME/astro/bin/scan-brightness" "$target"

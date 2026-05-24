@@ -1,0 +1,9 @@
+[Unit]
+Description=astro: scan brightness for the HH dir that just finished
+
+[Service]
+Type=oneshot
+User=peter
+ExecStart=/home/peter/astro/bin/scan-brightness-prev-hour
+StandardOutput=journal
+StandardError=journal

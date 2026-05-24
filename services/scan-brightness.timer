@@ -1,0 +1,10 @@
+[Unit]
+Description=astro: trigger scan-brightness at one minute past every hour
+
+[Timer]
+# Fire at HH:01 in the system local time
+OnCalendar=*-*-* *:01:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
