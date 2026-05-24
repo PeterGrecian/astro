@@ -35,6 +35,27 @@ into a load-bearing choice; delete done items.
 - [ ] Decide camera identifier convention (`back`, `front`, `sky`, `experimental`). Reflect in path layout: `~/<cam>-frames/night/<night-dir>/HH/`.
 - [ ] Per-camera config: gain, exposure, lens, sensor, Bayer pattern.
 
+## Multi-night stacking (deferred — let the per-night pipeline mature first)
+
+- [ ] `derot-week` — extension of `derot-night` that walks multiple
+      night dirs, derotates by `omega × (epoch_ms - epoch_0) / 3000`
+      so frames from different nights stack onto a common rotated
+      reference. Stars near the pole stack perfectly; stars away
+      from the pole accumulate only when above the horizon.
+- [ ] **Lens distortion dominates atmospheric refraction** — when
+      we start pulling refraction signal out of multi-night stacks
+      it'll be a big deal, but first the per-frame distortion model
+      (k1, k2 from `fit-geometry`) needs to be solidly fitting. The
+      residual after a good distortion fit will be where we look
+      for refraction effects.
+- [ ] **Camera position drifts sometimes, possibly with
+      temperature.** Within one night the pole moves <30 binned px
+      (see pipeline-poles.csv across hours). Between nights it can
+      jump (we've seen ~50 px shifts after physical repositioning).
+      Multi-night stacks need a per-night pole, not a global one.
+      A `fit-pole-multinight` would estimate per-night pole + a
+      single shared distortion (k1, k2 are sensor properties).
+
 ## Disposable scratch
 
 - Old per-`/tmp/` scripts (streak_window.py, streak_clean.py, streak_lum.py, run_streaks.sh) — port the useful patterns into `bin/` if needed, don't ressurrect the originals. They were /tmp violations; lesson logged.
