@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""hot-pixel-mask — derive a sensor hot-pixel mask from a sum image.
+
+Hot pixels are stuck bright every frame, so they stack to far more
+than the mean of the sum image. Threshold `sum > k * mean` flags
+them. Output is a uint8 FITS bitmap (1 = hot, 0 = ok).
+
+The mask is a SENSOR property — derive it once from a long-enough
+sum (one full hour is plenty) and reuse it across nights. Re-derive
+only if the sensor changes or every few months.
+
+Usage:
+    hot-pixel-mask <sum.fits.fz>                    # writes calib + jpg
+    hot-pixel-mask <sum.fits.fz> --k 4              # tune threshold
+    hot-pixel-mask <sum.fits.fz> --camera starcam   # sets calib filename
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def load_sum(path: Path) -> tuple[np.ndarray, int | None]:
+    """Return (image, RAWMAX-if-present). Prefer the true accumulator
+    max from the header over the clipped uint16 pixels."""
+    with fits.open(path) as h:
+        hdu = next(x for x in h if x.data is not None and x.data.ndim == 2)
+        return hdu.data, hdu.header.get("RAWMAX")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("sum", type=Path, help="input sum.fits.fz from sum-frames")
+    ap.add_argument("--k", type=float, default=4.0,
+                    help="threshold = k * mean(sum); higher = stricter")
+    ap.add_argument("--camera", default="starcam",
+                    help="camera name, used in output filename")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output mask path (default: "
+                         "~/astro/calib/hot-pixels-<camera>.fits.fz)")
+    ap.add_argument("--jpg", type=Path, default=None,
+                    help="overlay jpg path (default: alongside --out)")
+    args = ap.parse_args()
+
+    img, raw_max = load_sum(args.sum)
+    img32 = img.astype(np.uint32)
+    mean = float(img32.mean())
+    threshold = args.k * mean
+    print(f"sum: shape={img.shape} mean={mean:.1f} "
+          f"max(stored)={int(img32.max())} "
+          f"max(raw)={raw_max if raw_max is not None else 'n/a'}")
+    print(f"threshold: {args.k} x mean = {threshold:.1f}")
+
+    mask = (img32 > threshold).astype(np.uint8)
+    n_hot = int(mask.sum())
+    pct = 100.0 * n_hot / mask.size
+    print(f"hot pixels: {n_hot} ({pct:.4f}%)")
+
+    out = args.out or (Path.home() / "astro" / "calib"
+                       / f"hot-pixels-{args.camera}.fits.fz")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=mask, compression_type="RICE_1")
+    comp.header["CAMERA"] = args.camera
+    comp.header["KTHRESH"] = (args.k, "threshold = k * mean(sum)")
+    comp.header["NHOT"] = (n_hot, "count of hot pixels")
+    comp.header["SRCSUM"] = (str(args.sum), "sum image this mask was derived from")
+    fits.HDUList([primary, comp]).writeto(out, overwrite=True)
+    print(f"wrote {out}")
+
+    # Overlay jpg: bright = hot pixel, dim = sum p99-stretched background.
+    jpg = args.jpg or out.with_suffix("").with_suffix(".jpg")
+    bg = img32.astype(np.float32)
+    lo, hi = float(np.percentile(bg, 50)), float(np.percentile(bg, 99))
+    bg_u8 = np.clip((bg - lo) / max(hi - lo, 1.0), 0, 1) * 180
+    overlay = bg_u8.astype(np.uint8)
+    overlay[mask == 1] = 255
+    Image.fromarray(overlay).save(jpg, quality=90)
+    print(f"wrote {jpg}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
