@@ -143,6 +143,18 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"writing patches → {out_dir}")
 
+    # Save the full derotated stack — useful for find-candidates round 2.
+    stack_path = out_dir / "stack-derot.fits.fz"
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=raw_acc.astype(np.int32),
+                             compression_type="RICE_1")
+    comp.header["NFRAMES"] = (len(fns), "frames derotated and summed")
+    comp.header["POLEX"] = (args.pole_x, "binned pole x")
+    comp.header["POLEY"] = (args.pole_y, "binned pole y")
+    comp.header["OMEGA"] = (args.omega, "radians per frame")
+    fits.HDUList([primary, comp]).writeto(stack_path, overwrite=True)
+    print(f"  saved full derot stack → {stack_path}")
+
     H, W = raw_acc.shape
     half = args.patch // 2
 
