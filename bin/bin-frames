@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""bin-frames — 2x2 sum-bin .fits.fz frames, renumber 0001..N.
+
+Reads .fits.fz from <src>, writes them 2x2 sum-binned to <dst> with
+sequential 4-digit filenames. Sum-binning preserves photon count;
+the dtype is uint16 (each bin sums ~4 x ≤1023 = ~4092, well within
+range; clipped to 65535 just in case).
+
+Original metadata kept in headers:
+  DATE-OBS  ISO UTC of source frame
+  EPOCH_MS  epoch ms of source frame (carried)
+  SRCFILE   original filename (e.g. 1779588002219.fits.fz)
+  FRAMEIDX  0-based index within this run
+  BIN       2 (binning factor)
+
+Usage:
+    bin-frames <src-dir> <dst-dir>
+    bin-frames ~/starcam-frames/night/2026-05-23/02 \\
+               ~/starcam-frames/night/2026-05-23/02b
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+def load_frame(path: Path) -> tuple[np.ndarray, dict]:
+    with fits.open(path) as h:
+        hdu = next(x for x in h if x.data is not None and x.data.ndim == 2)
+        return hdu.data, dict(hdu.header)
+
+
+def bin2x2_sum(img: np.ndarray) -> np.ndarray:
+    H, W = img.shape
+    H2, W2 = H - H % 2, W - W % 2
+    binned = (img[:H2, :W2].astype(np.uint32)
+              .reshape(H2 // 2, 2, W2 // 2, 2)
+              .sum(axis=(1, 3)))
+    return np.clip(binned, 0, 65535).astype(np.uint16)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("src", type=Path, help="source dir of .fits.fz")
+    ap.add_argument("dst", type=Path, help="destination dir for binned + renumbered output")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="cap on frames (0 = no cap)")
+    args = ap.parse_args()
+
+    fns = sorted(args.src.glob("*.fits.fz"))
+    fns = [f for f in fns if f.name not in ("sum.fits.fz", "motion.fits.fz")
+           and not f.name.startswith("stack")]
+    if args.limit:
+        fns = fns[:args.limit]
+    if not fns:
+        print(f"no .fits.fz in {args.src}", file=sys.stderr)
+        return 1
+
+    args.dst.mkdir(parents=True, exist_ok=True)
+    print(f"binning {len(fns)} frames {args.src} → {args.dst}")
+
+    for i, src in enumerate(fns):
+        img, src_hdr = load_frame(src)
+        binned = bin2x2_sum(img)
+
+        primary = fits.PrimaryHDU()
+        comp = fits.CompImageHDU(data=binned, compression_type="RICE_1")
+        # Carry forward useful fields from the source.
+        for key in ("DATE-OBS", "EPOCH_MS", "BAYERPAT", "EXPTIME",
+                    "GAIN", "INSTRUME", "TELESCOP", "CAMERA"):
+            if key in src_hdr:
+                comp.header[key] = src_hdr[key]
+        comp.header["SRCFILE"] = src.name
+        comp.header["FRAMEIDX"] = i
+        comp.header["BIN"] = 2
+
+        out = args.dst / f"{i+1:04d}.fits.fz"
+        fits.HDUList([primary, comp]).writeto(out, overwrite=True)
+
+        if i == 0 or (i + 1) % 200 == 0 or i == len(fns) - 1:
+            print(f"  [{i+1}/{len(fns)}] {src.name} → {out.name}  "
+                  f"{img.shape} → {binned.shape}",
+                  flush=True)
+
+    print(f"wrote {len(fns)} frames to {args.dst}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
