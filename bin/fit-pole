@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""fit-pole — optimise pole location by maximising derot patch sharpness.
+
+For each of N candidate cells from candidates.csv, derotate F
+consecutive frames about a trial pole, sum into a patch, and score
+the patch by sharpness = peak / mean. Sum sharpness across all cells.
+
+Coarse: grid scan around the seed pole.
+Fine: Nelder-Mead refinement from the grid best.
+
+The sharpness landscape is well-behaved for cells containing real
+stars; cells with no real star contribute roughly constant noise, so
+they don't bias the fit much.
+
+Usage:
+    fit-pole <dir>
+    fit-pole <dir> --pole-x 822 --pole-y -159 --range 60 --grid 7
+    fit-pole <dir> --frames 100 --patch 50 --top 10
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from scipy.optimize import minimize
+
+
+def load_frame(path: Path) -> np.ndarray:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def top_cells_with_peak(csv_path: Path, n: int):
+    sums = {}
+    first_peak = {}
+    with open(csv_path) as f:
+        r = csv.DictReader(f)
+        for row in r:
+            k = (int(row["cell_x"]), int(row["cell_y"]))
+            sums[k] = sums.get(k, 0) + int(row["peak_value"])
+            if k not in first_peak:
+                first_peak[k] = (int(row["peak_x"]), int(row["peak_y"]))
+    ranked = sorted(sums.items(), key=lambda kv: -kv[1])[:n]
+    return [(cx, cy, *first_peak[(cx, cy)]) for (cx, cy), _ in ranked]
+
+
+def derotate(img: np.ndarray, pole: tuple[float, float],
+             angle_deg: float) -> np.ndarray:
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img, M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def score_pole(pole: tuple[float, float],
+               imgs: list[np.ndarray],
+               angles_deg: list[float],
+               cells: list[tuple[int, int, int, int]],
+               patch: int) -> float:
+    """Sum-of-sharpness-ratios across all cells. Higher is better."""
+    h, w = imgs[0].shape
+    # Derotate every frame once, sum.
+    acc = np.zeros((h, w), dtype=np.float32)
+    for img, ang in zip(imgs, angles_deg):
+        acc += derotate(img, pole, ang)
+
+    half = patch // 2
+    score = 0.0
+    for cx, cy, px, py in cells:
+        x0 = max(0, px - half)
+        y0 = max(0, py - half)
+        x1 = min(w, px - half + patch)
+        y1 = min(h, py - half + patch)
+        p = acc[y0:y1, x0:x1]
+        if p.size == 0:
+            continue
+        mean = float(p.mean())
+        if mean <= 0:
+            continue
+        score += float(p.max()) / mean
+    return score
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path, help="binned frames dir")
+    ap.add_argument("--candidates", type=Path, default=None)
+    ap.add_argument("--pole-x", type=float, default=822.0)
+    ap.add_argument("--pole-y", type=float, default=-159.0)
+    ap.add_argument("--range", type=float, default=60.0,
+                    help="grid scan extent ± from seed (binned px)")
+    ap.add_argument("--grid", type=int, default=7,
+                    help="grid samples per axis (so grid² evaluations)")
+    ap.add_argument("--frames", type=int, default=100,
+                    help="frames to derot per score")
+    ap.add_argument("--patch", type=int, default=50)
+    ap.add_argument("--top", type=int, default=10,
+                    help="top-N candidate cells to optimise against")
+    ap.add_argument("--omega", type=float, default=-0.000219,
+                    help="rotation rate (rad/frame); sign matches camera")
+    ap.add_argument("--refine", action="store_true",
+                    help="also run Nelder-Mead from the grid best")
+    args = ap.parse_args()
+
+    cand_csv = args.candidates or (args.dir / "candidates.csv")
+    if not cand_csv.exists():
+        print(f"missing {cand_csv}", file=sys.stderr)
+        return 1
+    cells = top_cells_with_peak(cand_csv, args.top)
+    print(f"top {len(cells)} cells will be scored")
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name not in ("sum.fits.fz", "motion.fits.fz")
+           and not f.name.startswith(("stack", "hot-pixels"))]
+    fns = fns[:args.frames]
+    print(f"loading {len(fns)} frames into memory…")
+    imgs = [load_frame(fn).astype(np.float32) for fn in fns]
+    angles_deg = [float(np.degrees(i * args.omega)) for i in range(len(fns))]
+
+    seed_score = score_pole((args.pole_x, args.pole_y), imgs, angles_deg,
+                            cells, args.patch)
+    print(f"seed pole ({args.pole_x},{args.pole_y}): score={seed_score:.2f}")
+
+    # Grid scan
+    xs = np.linspace(args.pole_x - args.range,
+                     args.pole_x + args.range, args.grid)
+    ys = np.linspace(args.pole_y - args.range,
+                     args.pole_y + args.range, args.grid)
+    best = (seed_score, args.pole_x, args.pole_y)
+    print(f"\ngrid scan {args.grid}x{args.grid} over "
+          f"±{args.range} binned px:")
+    print("    x \\ y  " + "  ".join(f"{y:7.1f}" for y in ys))
+    for x in xs:
+        row = []
+        for y in ys:
+            s = score_pole((x, y), imgs, angles_deg, cells, args.patch)
+            row.append(s)
+            if s > best[0]:
+                best = (s, float(x), float(y))
+        print(f"  {x:7.1f}  " + "  ".join(f"{s:7.2f}" for s in row))
+    print(f"\ngrid best: pole=({best[1]:.1f},{best[2]:.1f}) "
+          f"score={best[0]:.2f} (seed={seed_score:.2f}, "
+          f"+{100*(best[0]-seed_score)/seed_score:.1f}%)")
+
+    if args.refine:
+        print("\nNelder-Mead refinement from grid best…")
+        def f(p):
+            return -score_pole((float(p[0]), float(p[1])),
+                               imgs, angles_deg, cells, args.patch)
+        res = minimize(f, x0=[best[1], best[2]], method="Nelder-Mead",
+                       options={"xatol": 0.5, "fatol": 0.1, "disp": True})
+        rx, ry = float(res.x[0]), float(res.x[1])
+        rscore = -float(res.fun)
+        print(f"refined:  pole=({rx:.2f},{ry:.2f})  score={rscore:.2f}")
+        print(f"\nrecommended --pole-x {rx:.1f} --pole-y {ry:.1f}")
+    else:
+        print(f"\nrecommended --pole-x {best[1]:.1f} --pole-y {best[2]:.1f}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

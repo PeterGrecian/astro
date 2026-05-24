@@ -88,8 +88,9 @@ def main() -> int:
                     help="patch size in binned px (square)")
     ap.add_argument("--top", type=int, default=20,
                     help="top-N cells from candidates.csv")
-    ap.add_argument("--omega", type=float, default=0.000219,
-                    help="rotation rate in radians per frame (sidereal × 3s)")
+    ap.add_argument("--omega", type=float, default=-0.000219,
+                    help="rotation rate in radians per frame (sidereal × 3s); "
+                         "sign matches image-coord CCW convention for this camera")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="output dir for patches (default: <dir>/patches)")
     args = ap.parse_args()
