@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""motion-stack — directional matched-filter stack using known pole.
+
+Idea: stars move along tangent circles about the celestial pole. At
+sidereal rate over a 3-s exposure they barely move; over 6 s (skip
+stride 2) they move ~1 px at image centre, more at the edges.
+
+For each frame N in [start+2, end-2], for each pixel p, compute the
+local tangent unit vector t at p (perpendicular to p - pole, in the
+sky-rotation direction). Then sample a 7-pixel stencil along t:
+
+    response[p] = frame[N][p]
+                + sum_{k=1..3} frame[N+2][p + k*t]
+                + sum_{k=1..3} frame[N-2][p - k*t]
+
+A real star at p has been at p-k*t in the past pair-frame and will be
+at p+k*t in the future pair-frame, so all 7 samples carry its
+photons; non-moving things (hot pixels, LED leak) only contribute at
+the centre. Accumulator = sum of per-pixel responses across all
+triples in the input dir.
+
+The implementation uses cv2.remap to do the stencil offsets vectorised
+across the whole image — one remap per stencil offset, not a Python
+loop per pixel.
+
+Usage:
+    motion-stack <HH-dir>
+    motion-stack <HH-dir> --pole-x 1900 --pole-y -200
+    motion-stack <HH-dir> --stride 3 --kernel-len 4
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def load_frame(path: Path) -> np.ndarray:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def tangent_unit_field(shape: tuple[int, int],
+                       pole: tuple[float, float]) -> tuple[np.ndarray, np.ndarray]:
+    """Per-pixel unit tangent vector pointing along the rotation
+    direction (sky rotates CCW about the pole in y-down image coords
+    becomes CW; convention: rotate the radius +90 deg => tangent =
+    (-ry, rx) / |r|)."""
+    h, w = shape
+    ys, xs = np.indices((h, w), dtype=np.float32)
+    rx = xs - pole[0]
+    ry = ys - pole[1]
+    r = np.hypot(rx, ry)
+    r = np.where(r < 1e-6, 1e-6, r)
+    tx = -ry / r
+    ty = rx / r
+    return tx, ty
+
+
+def remap_shift(img: np.ndarray, dx: np.ndarray, dy: np.ndarray) -> np.ndarray:
+    """Return img sampled at (x+dx, y+dy) for every pixel.
+    cv2.remap takes the source-pixel coordinates per output pixel."""
+    h, w = img.shape
+    ys, xs = np.indices((h, w), dtype=np.float32)
+    map_x = (xs + dx).astype(np.float32)
+    map_y = (ys + dy).astype(np.float32)
+    return cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_NEAREST,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path,
+                    help="directory containing .fits.fz frames")
+    ap.add_argument("--pole-x", type=float, default=1900.0,
+                    help="celestial pole x in image px (legacy default 1900)")
+    ap.add_argument("--pole-y", type=float, default=-200.0,
+                    help="celestial pole y in image px (legacy default -200)")
+    ap.add_argument("--stride", type=int, default=2,
+                    help="pair stride: use frames N-S, N, N+S (default 2)")
+    ap.add_argument("--kernel-len", type=int, default=3,
+                    help="samples either side of centre along tangent (3 → 7 total)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output FITS path (default: <dir>/motion.fits.fz)")
+    ap.add_argument("--jpg", type=Path, default=None,
+                    help="output jpg path (default: <dir>/motion.jpg)")
+    ap.add_argument("--stretch-lo", type=float, default=50.0,
+                    help="black-point percentile (default 50)")
+    ap.add_argument("--stretch-hi", type=float, default=99.5,
+                    help="white-point percentile (default 99.5)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="cap on number of triples (0 = no cap)")
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns if f.name not in ("sum.fits.fz", "motion.fits.fz")
+           and not f.name.startswith("stack")]
+    if len(fns) < 2 * args.stride + 1:
+        print(f"need at least {2 * args.stride + 1} frames; got {len(fns)}",
+              file=sys.stderr)
+        return 1
+
+    triples = list(range(args.stride, len(fns) - args.stride))
+    if args.limit:
+        triples = triples[:args.limit]
+    print(f"{len(fns)} frames, {len(triples)} triples; "
+          f"stride={args.stride}, kernel_len={args.kernel_len}, "
+          f"pole=({args.pole_x},{args.pole_y})")
+
+    first = load_frame(fns[0])
+    h, w = first.shape
+
+    tx, ty = tangent_unit_field((h, w), (args.pole_x, args.pole_y))
+
+    acc = np.zeros((h, w), dtype=np.int64)
+
+    # Sliding window: hold frame[N-S], frame[N], frame[N+S] as float32
+    # to avoid reloading. With stride=2 we keep 3 deque slots.
+    cache: dict[int, np.ndarray] = {}
+    def get(i: int) -> np.ndarray:
+        if i not in cache:
+            cache[i] = load_frame(fns[i]).astype(np.float32)
+        return cache[i]
+
+    t0 = time.time()
+    for idx, n in enumerate(triples):
+        prev = get(n - args.stride)
+        curr = get(n)
+        nxt = get(n + args.stride)
+
+        # response = curr + sum_k nxt(p + k*t) + sum_k prev(p - k*t)
+        resp = curr.copy()
+        for k in range(1, args.kernel_len + 1):
+            resp += remap_shift(nxt, k * tx, k * ty)
+            resp += remap_shift(prev, -k * tx, -k * ty)
+        acc += resp.astype(np.int64)
+
+        # Evict frames we no longer need (anything index < n - stride+1).
+        for key in list(cache.keys()):
+            if key < n - args.stride + 1:
+                del cache[key]
+
+        if idx == 0 or (idx + 1) % 50 == 0 or idx == len(triples) - 1:
+            elapsed = time.time() - t0
+            rate = (idx + 1) / max(0.001, elapsed)
+            print(f"  [{idx+1}/{len(triples)}] acc max={int(acc.max())} "
+                  f"({rate:.1f} fps)", flush=True)
+
+    print(f"acc: min={int(acc.min())} max={int(acc.max())} "
+          f"mean={float(acc.mean()):.1f}")
+
+    out_fits = args.out or (args.dir / "motion.fits.fz")
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=acc.astype(np.int32),
+                             compression_type="RICE_1")
+    comp.header["NFRAMES"] = (len(fns), "input frames")
+    comp.header["NTRIPLE"] = (len(triples), "triples accumulated")
+    comp.header["STRIDE"] = args.stride
+    comp.header["KERNLEN"] = args.kernel_len
+    comp.header["POLEX"] = args.pole_x
+    comp.header["POLEY"] = args.pole_y
+    fits.HDUList([primary, comp]).writeto(out_fits, overwrite=True)
+    print(f"wrote {out_fits}")
+
+    # JPG with percentile stretch.
+    out_jpg = args.jpg or (args.dir / "motion.jpg")
+    lo = float(np.percentile(acc, args.stretch_lo))
+    hi = float(np.percentile(acc, args.stretch_hi))
+    if hi <= lo:
+        hi = lo + 1.0
+    print(f"stretch: p{args.stretch_lo}={lo:.0f} → black, "
+          f"p{args.stretch_hi}={hi:.0f} → white")
+    norm = np.clip((acc - lo) / (hi - lo), 0, 1)
+    u8 = (norm * 255).astype(np.uint8)
+    Image.fromarray(u8).save(out_jpg, quality=92)
+    print(f"wrote {out_jpg}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
