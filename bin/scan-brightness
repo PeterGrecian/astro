@@ -45,13 +45,25 @@ def load_frame(path: Path) -> np.ndarray:
     raise SystemExit(f"no 2D image in {path}")
 
 
+def epoch_ms_from_header(path: Path) -> int | None:
+    """Fallback: read EPOCH_MS from FITS header (binned/renumbered files)."""
+    try:
+        with fits.open(path) as h:
+            for hdu in h:
+                if "EPOCH_MS" in hdu.header:
+                    return int(hdu.header["EPOCH_MS"])
+    except Exception:
+        return None
+    return None
+
+
 def epoch_ms_from_name(p: Path) -> int | None:
     # Strip ALL extensions: 1779404330189.fits.fz → 1779404330189
     name = p.name.split(".", 1)[0]
     try:
         return int(name)
     except ValueError:
-        return None
+        return epoch_ms_from_header(p)
 
 
 EXAMPLES = """\
