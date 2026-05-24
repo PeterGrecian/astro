@@ -103,6 +103,11 @@ def main() -> int:
                     help="white-point percentile (default 99.5)")
     ap.add_argument("--limit", type=int, default=0,
                     help="cap on number of triples (0 = no cap)")
+    ap.add_argument("--hot-mask", type=Path,
+                    default=Path.home() / "astro" / "calib"
+                    / "hot-pixels-starcam.fits.fz",
+                    help="hot-pixel bitmap; masked pixels are zeroed in "
+                         "every frame before stacking (default: starcam calib)")
     args = ap.parse_args()
 
     fns = sorted(args.dir.glob("*.fits.fz"))
@@ -123,6 +128,21 @@ def main() -> int:
     first = load_frame(fns[0])
     h, w = first.shape
 
+    keep = np.ones((h, w), dtype=np.float32)
+    if args.hot_mask and args.hot_mask.exists():
+        with fits.open(args.hot_mask) as hm:
+            mask_hdu = next(x for x in hm
+                            if x.data is not None and x.data.ndim == 2)
+            hot = mask_hdu.data
+        if hot.shape != (h, w):
+            print(f"hot-mask shape {hot.shape} != frame {(h, w)}; ignoring",
+                  file=sys.stderr)
+        else:
+            keep = (hot == 0).astype(np.float32)
+            print(f"hot-mask: {int((hot != 0).sum())} pixels zeroed per frame")
+    else:
+        print("hot-mask: none applied")
+
     tx, ty = tangent_unit_field((h, w), (args.pole_x, args.pole_y))
 
     acc = np.zeros((h, w), dtype=np.int64)
@@ -132,7 +152,7 @@ def main() -> int:
     cache: dict[int, np.ndarray] = {}
     def get(i: int) -> np.ndarray:
         if i not in cache:
-            cache[i] = load_frame(fns[i]).astype(np.float32)
+            cache[i] = load_frame(fns[i]).astype(np.float32) * keep
         return cache[i]
 
     t0 = time.time()
