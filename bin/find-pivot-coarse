@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""find-pivot-coarse — initial pivot estimate from arc fitting on raw stack.
+
+Reads a raw (non-derotated) sum-stack, finds elongated bright blobs
+that look like star arcs, fits a circle to each, and reports the
+intersection (= rotation pivot estimate). Designed to seed the
+sharpness optimiser; not expected to be exact.
+
+Pipeline:
+  threshold → connected components → drop dots & big blobs → fit
+  circle (algebraic) per arc → average centres.
+
+Usage:
+    find-pivot-coarse                       # reads ~/astro/sim/stack-raw.fits.fz
+    find-pivot-coarse --stack <path>
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+
+
+def fit_circle(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float, float]:
+    """Algebraic circle fit (Kasa method): minimise sum of
+    (x^2 + y^2 + Dx + Ey + F)^2. Returns (cx, cy, r)."""
+    A = np.column_stack([xs, ys, np.ones_like(xs)])
+    b = -(xs * xs + ys * ys)
+    sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+    D, E, F = sol
+    cx, cy = -D / 2.0, -E / 2.0
+    r = np.sqrt(max(0.0, cx * cx + cy * cy - F))
+    return cx, cy, r
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("--stack", type=Path,
+                    default=Path.home() / "astro" / "sim" / "stack-raw.fits.fz",
+                    help="path to raw stack .fits.fz")
+    ap.add_argument("--thresh", type=int, default=900,
+                    help="ADU threshold for arc-pixel candidates")
+    ap.add_argument("--min-area", type=int, default=5,
+                    help="ignore connected components smaller than this")
+    ap.add_argument("--max-area", type=int, default=200,
+                    help="ignore components larger than this (clumps of hots)")
+    ap.add_argument("--min-elongation", type=float, default=2.5,
+                    help="(major/minor axis); reject round blobs (hot pixels)")
+    args = ap.parse_args()
+
+    with fits.open(args.stack) as h:
+        hdu = next(x for x in h if x.data is not None and x.data.ndim == 2)
+        img = hdu.data
+    print(f"stack: {img.shape} dtype={img.dtype} max={int(img.max())}")
+
+    mask = (img >= args.thresh).astype(np.uint8)
+    # Close gaps so adjacent star-arc pixels merge into a single blob
+    # while isolated noise pixels stay isolated. Kernel size 3 bridges
+    # 1-pixel gaps; larger would start glueing noise to arcs.
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    n_lab, labels, stats, _ = cv2.connectedComponentsWithStats(closed, 8)
+    print(f"threshold {args.thresh}: {int(mask.sum())} pixels above, "
+          f"{int(closed.sum())} after closing, {n_lab - 1} components")
+
+    centres: list[tuple[float, float, float, int]] = []  # (cx, cy, r, area)
+    for lab in range(1, n_lab):
+        area = int(stats[lab, cv2.CC_STAT_AREA])
+        if area < args.min_area or area > args.max_area:
+            continue
+        ys, xs = np.where(labels == lab)
+        # Elongation via PCA on the pixel cloud.
+        pts = np.column_stack([xs, ys]).astype(np.float32)
+        if len(pts) < 3:
+            continue
+        cov = np.cov(pts.T)
+        eigvals = np.sort(np.linalg.eigvalsh(cov))[::-1]
+        if eigvals[1] < 1e-6:
+            elong = float("inf")
+        else:
+            elong = float(np.sqrt(eigvals[0] / eigvals[1]))
+        if elong < args.min_elongation:
+            print(f"  skip blob area={area} elong={elong:.2f} (too round)")
+            continue
+        cx, cy, r = fit_circle(xs.astype(float), ys.astype(float))
+        print(f"  arc: area={area} elong={elong:.2f} "
+              f"centre=({cx:.2f},{cy:.2f}) r={r:.2f}")
+        centres.append((cx, cy, r, area))
+
+    if not centres:
+        print("no arcs found — try lowering --thresh", file=sys.stderr)
+        return 1
+
+    cxs = np.array([c[0] for c in centres])
+    cys = np.array([c[1] for c in centres])
+    pivot_x = float(np.mean(cxs))
+    pivot_y = float(np.mean(cys))
+    sx = float(np.std(cxs))
+    sy = float(np.std(cys))
+    print(f"\npivot estimate: ({pivot_x:.2f}, {pivot_y:.2f})  "
+          f"±({sx:.2f}, {sy:.2f}) over {len(centres)} arc(s)")
+
+    # If the source has a truth pivot in the FITS, compare.
+    sim_dir = args.stack.parent
+    truth = sim_dir / "truth.txt"
+    if truth.exists():
+        for line in truth.read_text().splitlines():
+            if line.startswith("pivot="):
+                print(f"truth pivot:    {line.split('=', 1)[1]}")
+                break
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""derot-sim — stack sim frames raw and/or derotated.
+
+Two complementary stacks from the same data:
+
+  raw    : sum frames as-is. Stars trace arcs, hot pixels become
+           bright dots (10x), random noise stays single-frame.
+           Use to FIND ARCS and IDENTIFY HOT PIXELS for masking.
+
+  derot  : undo each frame's ANGLEDEG rotation about (PIVOTX, PIVOTY)
+           before summing. Stars collapse to bright points (10x),
+           hot pixels trace small arcs, random noise stays single-frame.
+           Use to FIND STARS.
+
+Defaults to writing both:
+    <in>/stack-raw.fits.fz
+    <in>/stack-derot.fits.fz
+
+Usage:
+    derot-sim                       # both stacks, ~/astro/sim/
+    derot-sim --mode derot          # derotated only
+    derot-sim --mode raw            # raw only
+    derot-sim --in <dir>
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+
+
+def derotate(img: np.ndarray, pivot: tuple[float, float],
+             angle_deg: float) -> np.ndarray:
+    """Rotate `img` by -angle_deg about pivot, nearest-neighbour."""
+    h, w = img.shape
+    # sim-frames uses math-convention rotation (y-up CCW positive); cv2
+    # rotates CCW in image coords (y-down), which is the *opposite*
+    # direction. So to undo a sim angle of +A we pass +A to cv2, not -A.
+    M = cv2.getRotationMatrix2D(pivot, angle_deg, 1.0)
+    out = cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                         flags=cv2.INTER_NEAREST,
+                         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return out.astype(img.dtype)
+
+
+def write_stack(path: Path, accum: np.ndarray, nframes: int,
+                kind: str) -> None:
+    stack_u16 = np.clip(accum, 0, 65535).astype(np.uint16)
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=stack_u16, compression_type="RICE_1")
+    comp.header["NFRAMES"] = (nframes, "frames summed")
+    comp.header["STACKKND"] = (kind, "raw or derot")
+    fits.HDUList([primary, comp]).writeto(path, overwrite=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("--in", dest="in_dir", type=Path,
+                    default=Path.home() / "astro" / "sim",
+                    help="input directory of sim .fits.fz frames")
+    ap.add_argument("--mode", choices=["raw", "derot", "both"],
+                    default="both",
+                    help="which stack(s) to produce (default: both)")
+    args = ap.parse_args()
+
+    fns = sorted(args.in_dir.glob("*.fits.fz"))
+    fns = [f for f in fns if not f.name.startswith("stack")]
+    if not fns:
+        print(f"no .fits.fz in {args.in_dir}", file=sys.stderr)
+        return 1
+
+    do_raw = args.mode in ("raw", "both")
+    do_derot = args.mode in ("derot", "both")
+
+    raw_accum: np.ndarray | None = None
+    derot_accum: np.ndarray | None = None
+
+    for fn in fns:
+        with fits.open(fn) as h:
+            hdu = next(x for x in h if x.data is not None and x.data.ndim == 2)
+            img = hdu.data
+            hdr = hdu.header
+            angle = float(hdr["ANGLEDEG"])
+            pivot = (float(hdr["PIVOTX"]), float(hdr["PIVOTY"]))
+        if do_raw:
+            raw_accum = (img.astype(np.uint32) if raw_accum is None
+                         else raw_accum + img.astype(np.uint32))
+        if do_derot:
+            d = derotate(img, pivot, angle)
+            derot_accum = (d.astype(np.uint32) if derot_accum is None
+                           else derot_accum + d.astype(np.uint32))
+        print(f"  {fn.name}  angle={angle:6.2f}")
+
+    if do_raw and raw_accum is not None:
+        out = args.in_dir / "stack-raw.fits.fz"
+        write_stack(out, raw_accum, len(fns), "raw")
+        n_lit = int((raw_accum > 0).sum())
+        print(f"\nraw stack:   {n_lit} lit pixels, peak={int(raw_accum.max())} ADU → {out.name}")
+
+    if do_derot and derot_accum is not None:
+        out = args.in_dir / "stack-derot.fits.fz"
+        write_stack(out, derot_accum, len(fns), "derot")
+        n_lit = int((derot_accum > 0).sum())
+        print(f"derot stack: {n_lit} lit pixels, peak={int(derot_accum.max())} ADU → {out.name}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

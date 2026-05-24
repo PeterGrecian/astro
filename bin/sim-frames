@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""sim-frames — synthesise a tiny star-trail dataset for pipeline testing.
+
+Generates N small frames, each containing a single bright star whose
+position is the previous frame's position rotated by `step_deg` about
+an off-centre pivot. Noise-free, background zero. Frames are written
+as .fits.fz with realistic timestamps (10 minutes apart by default).
+
+The point is fast feedback: the pipeline can stack, detect the arc,
+recover the rotation, and we know exactly what the right answer is.
+
+Default scenario:
+  - 100x100 px
+  - 10 frames, 10 minutes apart (a 100-min "night")
+  - star at (70, 50) in frame 0
+  - pivot at (40, 40), 20 degrees total rotation (2 deg / frame)
+
+Usage:
+    sim-frames                              # defaults, writes to ~/astro/sim/
+    sim-frames --out ~/astro/sim/run1
+    sim-frames --frames 20 --total-deg 40
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+def render_frame(size: int, star_positions: list[tuple[float, float]],
+                 brightness: int = 1000,
+                 noise_pixels: int = 0,
+                 noise_brightness: int = 1000,
+                 rng: np.random.Generator | None = None) -> np.ndarray:
+    """Paint single-pixel stars + optional random noise pixels."""
+    img = np.zeros((size, size), dtype=np.uint16)
+    for x, y in star_positions:
+        xi, yi = int(round(x)), int(round(y))
+        if 0 <= xi < size and 0 <= yi < size:
+            img[yi, xi] = brightness
+    if noise_pixels > 0:
+        if rng is None:
+            rng = np.random.default_rng()
+        ys = rng.integers(0, size, size=noise_pixels)
+        xs = rng.integers(0, size, size=noise_pixels)
+        img[ys, xs] = noise_brightness
+    return img
+
+
+def place_stars(size: int, n: int, pivot: tuple[float, float],
+                seed: int) -> list[tuple[float, float]]:
+    """Pick n star positions, well separated from each other and pivot.
+
+    Rejection sampling: minimum distance from pivot = size/5 (so they
+    trace a visible arc), minimum mutual distance = size/4.
+    """
+    rng = np.random.default_rng(seed + 7)
+    cx, cy = pivot
+    min_r = size / 5.0
+    min_sep = size / 4.0
+    margin = size / 10.0
+    placed: list[tuple[float, float]] = []
+    for _ in range(500):
+        if len(placed) >= n:
+            break
+        x = float(rng.uniform(margin, size - margin))
+        y = float(rng.uniform(margin, size - margin))
+        if np.hypot(x - cx, y - cy) < min_r:
+            continue
+        if any(np.hypot(x - px, y - py) < min_sep for px, py in placed):
+            continue
+        placed.append((x, y))
+    if len(placed) < n:
+        raise SystemExit(f"could not place {n} stars in {size}x{size} "
+                         f"(only {len(placed)})")
+    return placed
+
+
+def pick_hot_pixels(size: int, n: int,
+                    seed: int) -> list[tuple[int, int]]:
+    """Pick n fixed (x, y) positions for stuck-bright sensor pixels."""
+    rng = np.random.default_rng(seed)
+    return [(int(rng.integers(0, size)), int(rng.integers(0, size)))
+            for _ in range(n)]
+
+
+def rotate_point(x: float, y: float, cx: float, cy: float,
+                 deg: float) -> tuple[float, float]:
+    rad = np.deg2rad(deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dx, dy = x - cx, y - cy
+    return cx + c * dx - s * dy, cy + s * dx + c * dy
+
+
+def distort_point(x: float, y: float, size: int,
+                  k: float) -> tuple[float, float]:
+    """Apply radial pincushion distortion to one point.
+
+    r_distorted = r * (1 + k * r_norm**2)  where r is from image centre
+    and r_norm = r / (size/2). Positive k = pincushion (corners pushed
+    out), negative k = barrel. Small |k| (e.g. 0.05) is realistic.
+    """
+    if k == 0.0:
+        return x, y
+    cx, cy = size / 2.0, size / 2.0
+    dx, dy = x - cx, y - cy
+    r = np.hypot(dx, dy)
+    if r == 0.0:
+        return x, y
+    r_norm = r / (size / 2.0)
+    scale = 1.0 + k * r_norm * r_norm
+    return cx + dx * scale, cy + dy * scale
+
+
+def write_fits_fz(path: Path, img: np.ndarray, header_kw: dict) -> None:
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=img, compression_type="RICE_1")
+    for k, v in header_kw.items():
+        comp.header[k] = v
+    fits.HDUList([primary, comp]).writeto(path, overwrite=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("--out", type=Path,
+                    default=Path.home() / "astro" / "sim",
+                    help="output directory (default: ~/astro/sim)")
+    ap.add_argument("--size", type=int, default=100,
+                    help="frame size in px (square)")
+    ap.add_argument("--frames", type=int, default=10,
+                    help="number of frames")
+    ap.add_argument("--total-deg", type=float, default=20.0,
+                    help="total rotation across the whole sequence (deg)")
+    ap.add_argument("--minutes-per-frame", type=float, default=10.0,
+                    help="simulated time gap between frames")
+    ap.add_argument("--stars", type=int, default=2,
+                    help="number of stars (placed deterministically by --seed, "
+                         "well-separated from pivot and each other)")
+    ap.add_argument("--pivot-x", type=float, default=40.0)
+    ap.add_argument("--pivot-y", type=float, default=40.0)
+    ap.add_argument("--brightness", type=int, default=1000)
+    ap.add_argument("--noise", type=int, default=0,
+                    help="random hot pixels per frame (0 = noise-free)")
+    ap.add_argument("--noise-brightness", type=int, default=1000,
+                    help="ADU for each noise pixel")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="RNG seed for noise (reproducible)")
+    ap.add_argument("--hot", type=int, default=0,
+                    help="fixed always-bright pixels (same location every frame)")
+    ap.add_argument("--hot-brightness", type=int, default=1000,
+                    help="ADU for each hot pixel")
+    ap.add_argument("--pincushion", type=float, default=0.0,
+                    help="radial distortion coefficient k "
+                         "(positive=pincushion, negative=barrel; "
+                         "try 0.05 for mild realistic distortion)")
+    ap.add_argument("--epoch-ms-start", type=int,
+                    default=1_700_000_000_000,
+                    help="start timestamp (ms since epoch)")
+    args = ap.parse_args()
+
+    args.out.mkdir(parents=True, exist_ok=True)
+
+    step_deg = args.total_deg / max(1, args.frames - 1)
+    step_ms = int(args.minutes_per_frame * 60_000)
+
+    stars0 = place_stars(args.size, args.stars,
+                         (args.pivot_x, args.pivot_y), args.seed)
+
+    print(f"sim: {args.frames} x {args.size}x{args.size}, "
+          f"{step_deg:.3f} deg/frame about ({args.pivot_x},{args.pivot_y})")
+    for j, (sx, sy) in enumerate(stars0):
+        print(f"  star {j}: starts at ({sx:.2f},{sy:.2f})")
+    print(f"  → {args.out}")
+
+    # Write a small manifest so the truth is recoverable.
+    manifest = args.out / "truth.txt"
+    with open(manifest, "w") as f:
+        f.write(f"size={args.size}\n")
+        f.write(f"frames={args.frames}\n")
+        f.write(f"total_deg={args.total_deg}\n")
+        f.write(f"step_deg={step_deg}\n")
+        f.write(f"minutes_per_frame={args.minutes_per_frame}\n")
+        f.write(f"pivot=({args.pivot_x},{args.pivot_y})\n")
+        f.write(f"brightness={args.brightness}\n")
+        f.write(f"pincushion={args.pincushion}\n")
+        f.write(f"epoch_ms_start={args.epoch_ms_start}\n")
+        for j, (sx, sy) in enumerate(stars0):
+            f.write(f"star_{j}={sx},{sy}\n")
+    print(f"  manifest: {manifest}")
+
+    rng = np.random.default_rng(args.seed)
+    hot = pick_hot_pixels(args.size, args.hot, args.seed + 1) if args.hot else []
+    if hot:
+        print(f"  hot pixels: {hot}")
+
+    for i in range(args.frames):
+        angle = i * step_deg
+        # Rotate every star about the pivot (sky-truth coords).
+        rotated = [rotate_point(sx, sy, args.pivot_x, args.pivot_y, angle)
+                   for sx, sy in stars0]
+        # Lens distortion is fixed and applied AFTER sky rotation.
+        distorted = [distort_point(rx, ry, args.size, args.pincushion)
+                     for rx, ry in rotated]
+        img = render_frame(args.size, distorted, args.brightness,
+                           noise_pixels=args.noise,
+                           noise_brightness=args.noise_brightness,
+                           rng=rng)
+        for hx, hy in hot:
+            img[hy, hx] = args.hot_brightness
+        epoch_ms = args.epoch_ms_start + i * step_ms
+        path = args.out / f"{epoch_ms}.fits.fz"
+        header = {
+            "SIM": True,
+            "ANGLEDEG": (angle, "rotation from frame 0 (deg)"),
+            "PIVOTX": (args.pivot_x, "rotation pivot x (px)"),
+            "PIVOTY": (args.pivot_y, "rotation pivot y (px)"),
+            "NSTARS": (args.stars, "number of simulated stars"),
+            "DISTORTK": (args.pincushion, "radial distortion coefficient k"),
+        }
+        # Record each star's distorted position in the header for diagnostics.
+        for j, (xd, yd) in enumerate(distorted):
+            header[f"STAR{j}X"] = (float(xd), f"star {j} distorted x (px)")
+            header[f"STAR{j}Y"] = (float(yd), f"star {j} distorted y (px)")
+        write_fits_fz(path, img, header)
+        positions_str = " ".join(f"({xd:.1f},{yd:.1f})"
+                                 for xd, yd in distorted)
+        print(f"  {path.name}  angle={angle:6.2f}  {positions_str}")
+
+    print(f"done — {args.frames} frames in {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

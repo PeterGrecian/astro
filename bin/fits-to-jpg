@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""fits-to-jpg — quick visual dump of .fits.fz frames as .jpg.
+
+For eyeballing tiny sim frames where Siril is overkill. Linear stretch
+from min..max per frame (or fixed if --vmax given), grayscale, scaled
+up by --scale for visibility.
+
+Usage:
+    fits-to-jpg                       # ~/astro/sim/*.fits.fz → same dir
+    fits-to-jpg --in <dir> --scale 8
+    fits-to-jpg --vmax 1000           # fixed white-point across frames
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def stretch(img: np.ndarray, vmin: float | None,
+            vmax: float | None) -> np.ndarray:
+    lo = float(img.min()) if vmin is None else vmin
+    hi = float(img.max()) if vmax is None else vmax
+    if hi <= lo:
+        hi = lo + 1.0
+    norm = (img.astype(np.float32) - lo) / (hi - lo)
+    norm = np.clip(norm, 0.0, 1.0)
+    return (norm * 255).astype(np.uint8)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("--in", dest="in_dir", type=Path,
+                    default=Path.home() / "astro" / "sim",
+                    help="input directory of .fits.fz")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output directory (default: same as input)")
+    ap.add_argument("--scale", type=int, default=4,
+                    help="upscale factor (nearest-neighbour)")
+    ap.add_argument("--vmin", type=float, default=None,
+                    help="black point (default: per-frame min)")
+    ap.add_argument("--vmax", type=float, default=None,
+                    help="white point (default: per-frame max)")
+    args = ap.parse_args()
+
+    out_dir = args.out or args.in_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    fns = sorted(args.in_dir.glob("*.fits.fz"))
+    if not fns:
+        print(f"no .fits.fz in {args.in_dir}", file=sys.stderr)
+        return 1
+
+    for fn in fns:
+        with fits.open(fn) as h:
+            hdu = next(x for x in h if x.data is not None and x.data.ndim == 2)
+            img = hdu.data
+        u8 = stretch(img, args.vmin, args.vmax)
+        if args.scale > 1:
+            h_, w_ = u8.shape
+            u8 = np.array(Image.fromarray(u8).resize(
+                (w_ * args.scale, h_ * args.scale),
+                Image.NEAREST))
+        out_path = out_dir / (fn.name.replace(".fits.fz", ".jpg"))
+        Image.fromarray(u8).save(out_path, quality=92)
+        print(f"  {fn.name} → {out_path.name}  "
+              f"({img.shape[1]}x{img.shape[0]} → {u8.shape[1]}x{u8.shape[0]})")
+
+    print(f"done — {len(fns)} jpgs in {out_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

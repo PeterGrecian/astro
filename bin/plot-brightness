@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""plot-brightness — overlay log2(median brightness) vs time-of-day.
+
+Reads per-HH brightness.csv files produced by scan-brightness, groups
+rows by night (noon-noon, Europe/London), and plots one line per night
+on a shared 12:00 → 12:00 x-axis.
+
+Usage:
+    plot-brightness <night-dir> [<night-dir> ...]
+    plot-brightness <parent-dir>            # auto-discovers night dirs
+    plot-brightness --out path.png ...
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+LONDON = ZoneInfo("Europe/London")
+
+
+def load_night(night_dir: Path) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return (times_local, mean_arr) for all brightness.csv under night_dir.
+
+    Times are Europe/London datetimes; mean is float ADU. (Mean rather
+    than median because median collapses to 0 on dark-sky frames where
+    >50% of pixels are sub-LSB — mean still tracks signal from stars
+    and the bright tail.)
+    """
+    rows: list[tuple[datetime, float]] = []
+    for csv_path in sorted(night_dir.rglob("brightness.csv")):
+        with open(csv_path) as f:
+            r = csv.DictReader(f)
+            for row in r:
+                try:
+                    t_utc = datetime.fromisoformat(row["iso_utc"])
+                    if t_utc.tzinfo is None:
+                        t_utc = t_utc.replace(tzinfo=timezone.utc)
+                    val = float(row["mean"])
+                except (KeyError, ValueError):
+                    continue
+                rows.append((t_utc.astimezone(LONDON), val))
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x[0])
+    times = np.array([r[0] for r in rows])
+    vals = np.array([r[1] for r in rows], dtype=float)
+    return times, vals
+
+
+def to_noon_axis(times: np.ndarray, anchor_date) -> np.ndarray:
+    """Map real datetimes to a shared 12:00→12:00 axis anchored on anchor_date.
+
+    A time of 14:00 on night N becomes anchor_date 14:00.
+    A time of 03:00 on night N+1 becomes (anchor_date + 1 day) 03:00.
+    """
+    out = np.empty(len(times), dtype=object)
+    anchor_noon = datetime.combine(anchor_date, time(12, 0), tzinfo=LONDON)
+    next_noon = anchor_noon + timedelta(days=1)
+    for i, t in enumerate(times):
+        # Hour-of-day relative to noon
+        if t.hour >= 12:
+            # Same calendar day as the "night N" start
+            out[i] = anchor_noon.replace(hour=t.hour, minute=t.minute,
+                                         second=t.second)
+        else:
+            out[i] = next_noon.replace(hour=t.hour, minute=t.minute,
+                                       second=t.second)
+    return out
+
+
+def discover_nights(arg: Path) -> list[Path]:
+    """If arg looks like a parent dir of night dirs, return its children;
+    otherwise return [arg]."""
+    if any(arg.rglob("brightness.csv")) and not (arg / "brightness.csv").exists():
+        # Has CSVs somewhere below. Treat immediate subdirs as nights if
+        # the arg itself doesn't look like a night dir (no HH children
+        # with frames directly under it).
+        children = sorted(d for d in arg.iterdir()
+                          if d.is_dir() and any(d.rglob("brightness.csv")))
+        # If the arg itself is a night dir (has HH/brightness.csv directly),
+        # children of arg are HH dirs not nights — return [arg].
+        if children and all(
+                any(c.glob("brightness.csv")) for c in children):
+            # children are HH dirs of a single night
+            return [arg]
+        return children or [arg]
+    return [arg]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("paths", type=Path, nargs="+",
+                    help="night dirs, or a parent dir of nights")
+    ap.add_argument("--out", type=Path,
+                    default=Path(__file__).resolve().parent.parent
+                    / "brightness.png",
+                    help="output PNG (default: <repo>/brightness.png)")
+    args = ap.parse_args()
+
+    night_dirs: list[Path] = []
+    for p in args.paths:
+        night_dirs.extend(discover_nights(p))
+    night_dirs = sorted(set(night_dirs))
+    if not night_dirs:
+        print("no night dirs found", file=sys.stderr)
+        return 1
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    anchor_date = datetime(2000, 1, 1).date()  # arbitrary; only shape matters
+    colors = plt.cm.viridis(np.linspace(0.15, 0.85, len(night_dirs)))
+
+    plotted = 0
+    for nd, color in zip(night_dirs, colors):
+        loaded = load_night(nd)
+        if loaded is None:
+            print(f"  {nd}: no data, skipping", file=sys.stderr)
+            continue
+        times, vals = loaded
+        xs = to_noon_axis(times, anchor_date)
+        # Mask sub-1 values so log2 stays defined without flooring the floor.
+        ys = np.where(vals > 0, np.log2(np.maximum(vals, 1e-3)), np.nan)
+        ax.scatter(xs, ys, label=nd.name, color=color, s=2, linewidths=0)
+        print(f"  {nd}: {len(times)} frames, "
+              f"mean range {vals.min():.3f}..{vals.max():.1f}")
+        plotted += 1
+
+    if not plotted:
+        print("no data plotted", file=sys.stderr)
+        return 1
+
+    ax.set_xlabel("local time (Europe/London, GMT/BST)")
+    ax.set_ylabel("log2(mean ADU)")
+    ax.set_title(f"starcam median brightness — {plotted} night(s)")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(True, alpha=0.2)
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    # 22:00 (night N) → 04:00 (next morning)
+    ax.set_xlim(datetime.combine(anchor_date, time(22, 0), tzinfo=LONDON),
+                datetime.combine(anchor_date + timedelta(days=1),
+                                 time(4, 0), tzinfo=LONDON))
+    fig.autofmt_xdate()
+
+    plt.tight_layout()
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(args.out, dpi=120)
+    print(f"wrote {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
