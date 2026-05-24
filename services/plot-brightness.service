@@ -1,0 +1,9 @@
+[Unit]
+Description=astro: render the all-nights brightness plot
+
+[Service]
+Type=oneshot
+User=peter
+ExecStart=/bin/bash -c 'source $HOME/astro/.venv/bin/activate && $HOME/astro/bin/plot-brightness $HOME/starcam-frames/night/ --out $HOME/starcam-frames/brightness.png'
+StandardOutput=journal
+StandardError=journal
