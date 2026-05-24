@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""derot-night — derotate every binned frame in a night to a common reference.
+
+Reads pipeline-poles.csv for the night, takes the median of the
+converged poles (they should agree to ±tens of px when the camera
+hasn't moved). Iterates over every <HHb>/*.fits.fz, computes the
+rotation angle from frame 0 of the entire night, derotates, and
+sums into one accumulator.
+
+Output:
+  <night>/all-night-derot.fits.fz
+  <night>/all-night-derot.jpg   (p50→p99.5 stretch)
+
+Usage:
+    derot-night <night-dir>
+    derot-night <night-dir> --pole-x 910 --pole-y 20   # override pole
+    derot-night <night-dir> --omega -0.000219           # default
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def load_frame(path: Path) -> tuple[np.ndarray, int | None]:
+    """Return (image, epoch_ms or None)."""
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                epoch = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(epoch) if epoch is not None else None
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def median_pole_from_csv(csv_path: Path) -> tuple[float, float] | None:
+    """Median of all ok-rows' (pole_x, pole_y)."""
+    xs, ys = [], []
+    with open(csv_path) as f:
+        r = csv.DictReader(f)
+        for row in r:
+            if row.get("status") != "ok":
+                continue
+            try:
+                xs.append(float(row["pole_x"]))
+                ys.append(float(row["pole_y"]))
+            except (KeyError, ValueError):
+                continue
+    if not xs:
+        return None
+    return float(np.median(xs)), float(np.median(ys))
+
+
+def derotate(img: np.ndarray, pole: tuple[float, float],
+             angle_deg: float) -> np.ndarray:
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("night", type=Path, help="night dir, e.g. .../2026-05-23")
+    ap.add_argument("--pole-x", type=float, default=None,
+                    help="override pole x (default: median from pipeline-poles.csv)")
+    ap.add_argument("--pole-y", type=float, default=None,
+                    help="override pole y (default: median from pipeline-poles.csv)")
+    ap.add_argument("--omega", type=float, default=-0.000219,
+                    help="rad/frame (3s sidereal × sign for image-coord CCW)")
+    ap.add_argument("--stretch-lo", type=float, default=50.0)
+    ap.add_argument("--stretch-hi", type=float, default=99.5)
+    args = ap.parse_args()
+
+    poles_csv = args.night / "pipeline-poles.csv"
+    if args.pole_x is not None and args.pole_y is not None:
+        pole = (args.pole_x, args.pole_y)
+        print(f"using override pole=({pole[0]:.1f},{pole[1]:.1f})")
+    else:
+        med = median_pole_from_csv(poles_csv)
+        if med is None:
+            print(f"no usable poles in {poles_csv}", file=sys.stderr)
+            return 1
+        pole = med
+        print(f"median pole from pipeline-poles.csv: "
+              f"({pole[0]:.1f},{pole[1]:.1f})")
+
+    # Walk all <HHb>/*.fits.fz in time order (sorted by epoch_ms).
+    hh_dirs = sorted(d for d in args.night.iterdir()
+                     if d.is_dir() and d.name.endswith("b"))
+    if not hh_dirs:
+        print(f"no <HH>b dirs under {args.night}", file=sys.stderr)
+        return 1
+
+    items: list[tuple[int, Path]] = []
+    for hh in hh_dirs:
+        for fn in hh.glob("[0-9]*.fits.fz"):
+            # peek epoch via header (skip sum/motion/stack)
+            if fn.name in ("sum.fits.fz", "motion.fits.fz") or \
+               fn.name.startswith(("stack", "hot-pixels")):
+                continue
+            try:
+                with fits.open(fn) as h:
+                    for hdu in h:
+                        if "EPOCH_MS" in hdu.header:
+                            items.append((int(hdu.header["EPOCH_MS"]), fn))
+                            break
+            except Exception:
+                continue
+    items.sort(key=lambda t: t[0])
+    print(f"{len(items)} frames across {len(hh_dirs)} hour dirs")
+
+    if not items:
+        return 1
+
+    epoch0_ms = items[0][0]
+    # 3 seconds per frame in the camera; use the inter-frame index based
+    # on time, not file index, to handle gaps across hour boundaries.
+    # angle_deg(i) = degrees( ((epoch_ms_i - epoch_ms_0) / 3000) * omega )
+
+    h, w = load_frame(items[0][1])[0].shape
+    acc = np.zeros((h, w), dtype=np.float64)
+    t0 = time.time()
+
+    for i, (epoch_ms, fn) in enumerate(items):
+        img, _ = load_frame(fn)
+        frames_from_start = (epoch_ms - epoch0_ms) / 3000.0
+        angle_deg = float(np.degrees(frames_from_start * args.omega))
+        acc += derotate(img, pole, angle_deg)
+        if i == 0 or (i + 1) % 500 == 0 or i == len(items) - 1:
+            elapsed = time.time() - t0
+            rate = (i + 1) / max(0.001, elapsed)
+            eta = (len(items) - i - 1) / max(0.001, rate)
+            print(f"  [{i+1}/{len(items)}] {fn.parent.name}/{fn.name} "
+                  f"angle={angle_deg:7.2f} ({rate:.1f} fps, ETA {eta/60:.1f} min)",
+                  flush=True)
+
+    print(f"\nstack: min={acc.min():.0f} max={acc.max():.0f} "
+          f"mean={acc.mean():.1f}")
+
+    out_fits = args.night / "all-night-derot.fits.fz"
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=acc.astype(np.int32),
+                             compression_type="RICE_1")
+    comp.header["NFRAMES"] = (len(items), "frames derotated and summed")
+    comp.header["POLEX"] = pole[0]
+    comp.header["POLEY"] = pole[1]
+    comp.header["OMEGA"] = args.omega
+    comp.header["EPOCH0"] = (epoch0_ms, "ms epoch of first frame")
+    fits.HDUList([primary, comp]).writeto(out_fits, overwrite=True)
+    print(f"wrote {out_fits}")
+
+    lo = float(np.percentile(acc, args.stretch_lo))
+    hi = float(np.percentile(acc, args.stretch_hi))
+    if hi <= lo:
+        hi = lo + 1.0
+    norm = np.clip((acc - lo) / (hi - lo), 0, 1)
+    u8 = (norm * 255).astype(np.uint8)
+    out_jpg = args.night / "all-night-derot.jpg"
+    Image.fromarray(u8).save(out_jpg, quality=92)
+    print(f"wrote {out_jpg} (p{args.stretch_lo}={lo:.0f} → "
+          f"p{args.stretch_hi}={hi:.0f})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
