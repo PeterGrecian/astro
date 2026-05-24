@@ -39,18 +39,57 @@ def load_frame(path: Path) -> np.ndarray:
 
 def derotate(img: np.ndarray, pole: tuple[float, float],
              angle_deg: float) -> np.ndarray:
-    """Rotate img by `angle_deg` about `pole` (image-coord CCW).
-
-    Sign convention: we want to undo a sky-rotation that moved the
-    star from frame 0's position to frame N's position. Sky rotates
-    in one direction; we apply the opposite. Caller passes the
-    desired CCW angle to apply directly.
-    """
+    """Rotate img by `angle_deg` about `pole` (image-coord CCW)."""
     h, w = img.shape
     M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
     return cv2.warpAffine(img.astype(np.float32), M, (w, h),
                           flags=cv2.INTER_LINEAR,
                           borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def derotate_with_distortion(img: np.ndarray, pole: tuple[float, float],
+                             angle_deg: float, k1: float, k2: float,
+                             maps_cache: dict) -> np.ndarray:
+    """Derotate in undistorted space (matches fit-geometry's model).
+
+    For each output pixel (xo, yo):
+        undistort to (xu, yu)
+        rotate by angle_deg about pole
+        re-distort → input sample point (xs, ys)
+    Sample input at (xs, ys).
+    """
+    h, w = img.shape
+    cx, cy = w / 2.0, h / 2.0
+    R = np.hypot(cx, cy)
+
+    key = (h, w, float(k1), float(k2))
+    if key not in maps_cache:
+        ys_g, xs_g = np.indices((h, w), dtype=np.float32)
+        dx = xs_g - cx
+        dy = ys_g - cy
+        rn = np.hypot(dx, dy) / R
+        s = 1.0 + k1 * rn**2 + k2 * rn**4
+        maps_cache[key] = (cx + dx * s, cy + dy * s)
+    xu, yu = maps_cache[key]
+
+    rad = np.deg2rad(angle_deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dxp = xu - pole[0]
+    dyp = yu - pole[1]
+    xur = pole[0] + c * dxp - s * dyp
+    yur = pole[1] + s * dxp + c * dyp
+
+    dxr = xur - cx
+    dyr = yur - cy
+    rnr = np.hypot(dxr, dyr) / R
+    sr = 1.0 + k1 * rnr**2 + k2 * rnr**4
+    inv = 1.0 / sr
+    xs = (cx + dxr * inv).astype(np.float32)
+    ys_o = (cy + dyr * inv).astype(np.float32)
+
+    return cv2.remap(img.astype(np.float32), xs, ys_o,
+                     interpolation=cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
 def top_cells_with_peak(csv_path: Path, n: int
@@ -91,6 +130,10 @@ def main() -> int:
     ap.add_argument("--omega", type=float, default=-0.000219,
                     help="rotation rate in radians per frame (sidereal × 3s); "
                          "sign matches image-coord CCW convention for this camera")
+    ap.add_argument("--k1", type=float, default=0.0,
+                    help="radial distortion k1 (default 0 = no distortion)")
+    ap.add_argument("--k2", type=float, default=0.0,
+                    help="radial distortion k2 (default 0 = no distortion)")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="output dir for patches (default: <dir>/patches)")
     args = ap.parse_args()
@@ -121,11 +164,19 @@ def main() -> int:
 
     pole = (args.pole_x, args.pole_y)
 
+    use_distortion = args.k1 != 0.0 or args.k2 != 0.0
+    if use_distortion:
+        print(f"using distortion model k1={args.k1} k2={args.k2}")
     print("derotating all frames once into a stack...")
+    maps_cache: dict = {}
     stack: np.ndarray | None = None
     for i, fn in enumerate(fns):
         img = load_frame(fn).astype(np.float32)
-        derot = derotate(img, pole, angles_deg[i])
+        if use_distortion:
+            derot = derotate_with_distortion(img, pole, angles_deg[i],
+                                             args.k1, args.k2, maps_cache)
+        else:
+            derot = derotate(img, pole, angles_deg[i])
         stack = derot if stack is None else stack + derot
         if i == 0 or (i + 1) % 20 == 0 or i == len(fns) - 1:
             print(f"  [{i+1}/{len(fns)}] {fn.name}", flush=True)

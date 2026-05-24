@@ -27,12 +27,14 @@ set -euo pipefail
 POLE_X=905.5
 POLE_Y=50.4
 FRAMES=100
-FINAL_FRAMES=0       # 0 = use all frames available
+FRAMES_GEOM=300        # longer baseline for fit-geometry
+FINAL_FRAMES=0         # 0 = use all frames available
 TOP=10
 PATCH=50
 FORCE=0
 MAX_ITERS=10
 MIN_MOVE=1.0
+GEOM_AFTER_ITER=2      # iters 1..N use fit-pole; iters >N use fit-geometry
 
 usage() { sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; }
 
@@ -97,31 +99,45 @@ if need "$HHB/candidates.csv"; then
         --mask "$HHB/hot-pixels-starcam-4pct.fits.fz" --top-cells
 fi
 
-# Bootstrap loop
+# Bootstrap loop. Iters 1..GEOM_AFTER_ITER use fit-pole (3D, fast).
+# Iters > GEOM_AFTER_ITER use fit-geometry (5D, also fits k1/k2).
 PX="$POLE_X"; PY="$POLE_Y"
+K1="0.0"; K2="0.0"
 ITER=0
 while [ "$ITER" -lt "$MAX_ITERS" ]; do
     ITER=$((ITER + 1))
-    step "iter $ITER: fit-pole around ($PX, $PY)"
-    # Capture refined pole from fit-pole output line "recommended --pole-x X --pole-y Y"
-    FIT_OUT=$(fit-pole "$HHB" --pole-x "$PX" --pole-y "$PY" \
-        --frames "$FRAMES" --patch "$PATCH" --top "$TOP" --refine 2>&1)
+    if [ "$ITER" -le "$GEOM_AFTER_ITER" ]; then
+        step "iter $ITER: fit-pole around ($PX, $PY)"
+        FIT_OUT=$(fit-pole "$HHB" --pole-x "$PX" --pole-y "$PY" \
+            --frames "$FRAMES" --patch "$PATCH" --top "$TOP" --refine 2>&1)
+    else
+        step "iter $ITER: fit-geometry around ($PX, $PY) k1=$K1 k2=$K2"
+        FIT_OUT=$(fit-geometry "$HHB" --pole-x "$PX" --pole-y "$PY" \
+            --k1 "$K1" --k2 "$K2" \
+            --frames "$FRAMES_GEOM" --patch "$PATCH" --top "$TOP" 2>&1)
+    fi
     echo "$FIT_OUT" | tail -20
-    NEW=$(echo "$FIT_OUT" | grep -oE 'recommended --pole-x [-0-9.]+ --pole-y [-0-9.]+' \
-        | tail -1 | awk '{print $3, $5}')
-    NEW_PX=$(echo "$NEW" | awk '{print $1}')
-    NEW_PY=$(echo "$NEW" | awk '{print $2}')
-    [ -n "$NEW_PX" ] && [ -n "$NEW_PY" ] || { echo "fit-pole gave no pole" >&2; exit 3; }
+
+    # Parse the "recommended" line — both fitters emit one.
+    REC=$(echo "$FIT_OUT" | grep -E '^recommended ' | tail -1)
+    NEW_PX=$(echo "$REC" | grep -oE -- '--pole-x [-0-9.]+' | awk '{print $2}')
+    NEW_PY=$(echo "$REC" | grep -oE -- '--pole-y [-0-9.]+' | awk '{print $2}')
+    NEW_K1=$(echo "$REC" | grep -oE -- '--k1 [-0-9.]+' | awk '{print $2}')
+    NEW_K2=$(echo "$REC" | grep -oE -- '--k2 [-0-9.]+' | awk '{print $2}')
+    [ -n "$NEW_PX" ] && [ -n "$NEW_PY" ] || { echo "fitter gave no pole" >&2; exit 3; }
 
     MOVE=$(python3 -c "import math; print(math.hypot($NEW_PX - $PX, $NEW_PY - $PY))")
     printf '  pole moved %.2f binned px ((%s,%s) → (%s,%s))\n' \
         "$MOVE" "$PX" "$PY" "$NEW_PX" "$NEW_PY"
 
     PX="$NEW_PX"; PY="$NEW_PY"
+    [ -n "$NEW_K1" ] && K1="$NEW_K1"
+    [ -n "$NEW_K2" ] && K2="$NEW_K2"
 
-    step "iter $ITER: derot-patches + save stack"
+    step "iter $ITER: derot-patches + save stack (k1=$K1 k2=$K2)"
     OUT_DIR="$HHB/patches-iter$ITER"
     derot-patches "$HHB" --pole-x "$PX" --pole-y "$PY" \
+        --k1 "$K1" --k2 "$K2" \
         --frames "$FRAMES" --patch "$PATCH" --top "$TOP" \
         --out-dir "$OUT_DIR" 2>&1 | tail -5
 
@@ -145,7 +161,7 @@ if [ "$ITER" -ge "$MAX_ITERS" ]; then
         "$MAX_ITERS" "$PX" "$PY"
 fi
 
-printf '\nFinal pole: --pole-x %s --pole-y %s\n' "$PX" "$PY"
+printf '\nFinal pole: --pole-x %s --pole-y %s --k1 %s --k2 %s\n' "$PX" "$PY" "$K1" "$K2"
 
 # Final full-hour derotated stack using the converged pole.
 step "final derot stack (all frames in hour)"
@@ -153,6 +169,7 @@ ALL=$(ls -1 "$HHB"/[0-9]*.fits.fz 2>/dev/null | wc -l)
 N="$FINAL_FRAMES"; [ "$N" = "0" ] && N="$ALL"
 FINAL_DIR="$HHB/final"
 derot-patches "$HHB" --pole-x "$PX" --pole-y "$PY" \
+    --k1 "$K1" --k2 "$K2" \
     --frames "$N" --patch "$PATCH" --top "$TOP" \
     --out-dir "$FINAL_DIR" 2>&1 | tail -5
 mv "$FINAL_DIR/stack-derot.fits.fz" "$FINAL_DIR/derot.fits.fz" 2>/dev/null || true
