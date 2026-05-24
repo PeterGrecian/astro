@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# pipeline-night — run pipeline-hour on every viable HH dir of a night.
+#
+# Walks <night>/{19,20,21,22,23,00,01,02,03} in time order. For each
+# HH dir present:
+#   - skip if the binned brightness.csv mean exceeds --sky-threshold
+#     (sky too bright for stars; default 100 ADU)
+#   - otherwise call pipeline-hour, seeding the pole from the
+#     previous hour's converged pole (so iterations converge faster)
+#
+# Writes a per-night log at <night>/pipeline.log and a small summary
+# CSV <night>/pipeline-poles.csv: hh, pole_x, pole_y, mean.
+#
+# Usage:
+#   pipeline-night <night-dir>
+#   pipeline-night <night-dir> --pole-x 905.5 --pole-y 50.4
+#   pipeline-night <night-dir> --sky-threshold 80 --max-iters 6
+set -euo pipefail
+
+POLE_X=905.5
+POLE_Y=50.4
+SKY_THRESH=100
+MAX_ITERS=10
+FORCE=0
+EXTRA_ARGS=()
+
+usage() { sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; }
+
+NIGHT=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --pole-x) POLE_X="$2"; shift 2;;
+        --pole-y) POLE_Y="$2"; shift 2;;
+        --sky-threshold) SKY_THRESH="$2"; shift 2;;
+        --max-iters) MAX_ITERS="$2"; shift 2;;
+        --force) FORCE=1; shift;;
+        -h|--help) usage; exit 0;;
+        *) if [ -z "$NIGHT" ]; then NIGHT="$1"; shift
+           else echo "extra arg: $1" >&2; exit 2; fi;;
+    esac
+done
+
+[ -n "$NIGHT" ] || { usage; exit 2; }
+NIGHT="${NIGHT%/}"
+[ -d "$NIGHT" ] || { echo "no such dir: $NIGHT" >&2; exit 2; }
+
+LOG="$NIGHT/pipeline.log"
+SUMMARY="$NIGHT/pipeline-poles.csv"
+
+# Header (overwrite each run; per-iter outputs live in <HH>b/)
+echo "hh,started_utc,mean,pole_x,pole_y,status" > "$SUMMARY"
+
+step() { printf '\n=== %s ===\n' "$*" | tee -a "$LOG"; }
+
+# Hour processing order: darkest hour first (cleanest data → most
+# reliable pole), then propagate that pole to brighter hours.
+# Read mean brightness from each hour's brightness.csv if present;
+# fall back to alphabetical for hours without one.
+declare -A HH_MEAN
+ORDER_FILE=$(mktemp)
+for cand in "$NIGHT"/[0-2][0-9]; do
+    [ -d "$cand" ] || continue
+    h="$(basename "$cand")"
+    if [ -f "$cand/brightness.csv" ]; then
+        m=$(awk -F, 'NR>1 {s+=$4; n++} END{if(n>0) print s/n; else print 9999}' \
+            "$cand/brightness.csv")
+    else
+        m=9999
+    fi
+    HH_MEAN["$h"]="$m"
+    printf '%s %s\n' "$m" "$h" >> "$ORDER_FILE"
+done
+ORDER=($(sort -n "$ORDER_FILE" | awk '{print $2}'))
+rm -f "$ORDER_FILE"
+echo "hour order (darkest first): ${ORDER[*]}"
+
+PX="$POLE_X"; PY="$POLE_Y"
+for HH in "${ORDER[@]}"; do
+    HH_DIR="$NIGHT/$HH"
+    [ -d "$HH_DIR" ] || continue
+    HHB="$NIGHT/${HH}b"
+
+    step "hour $HH (seed pole=$PX,$PY)"
+    # Read mean brightness if scan-brightness has run; otherwise we run
+    # bin+scan via pipeline-hour anyway, but for the gating decision we
+    # need an estimate quickly. Use the existing un-binned brightness.csv
+    # if present.
+    MEAN="?"
+    if [ -f "$HH_DIR/brightness.csv" ]; then
+        MEAN=$(awk -F, 'NR>1 {s+=$4; n++} END{if(n>0) printf "%.1f", s/n; else print "?"}' \
+            "$HH_DIR/brightness.csv")
+    fi
+    NOW=$(date -u +%FT%TZ)
+
+    if [ "$MEAN" != "?" ] && python3 -c "import sys; sys.exit(0 if $MEAN > $SKY_THRESH else 1)"; then
+        printf '  skip: mean %.1f > sky-threshold %s ADU\n' \
+            "$MEAN" "$SKY_THRESH" | tee -a "$LOG"
+        echo "$HH,$NOW,$MEAN,,,skipped-bright" >> "$SUMMARY"
+        continue
+    fi
+
+    PIPE_ARGS=(--pole-x "$PX" --pole-y "$PY" --max-iters "$MAX_ITERS")
+    [ "$FORCE" = "1" ] && PIPE_ARGS+=(--force)
+
+    if pipeline-hour "$HH_DIR" "${PIPE_ARGS[@]}" 2>&1 | tee -a "$LOG"; then
+        # Parse the final pole line: "Final pole: --pole-x X --pole-y Y"
+        NEW=$(grep -E '^Final pole:' "$LOG" | tail -1 \
+            | awk '{print $4, $6}')
+        NEW_PX=$(echo "$NEW" | awk '{print $1}')
+        NEW_PY=$(echo "$NEW" | awk '{print $2}')
+        if [ -n "$NEW_PX" ] && [ -n "$NEW_PY" ]; then
+            PX="$NEW_PX"; PY="$NEW_PY"
+            echo "$HH,$NOW,$MEAN,$PX,$PY,ok" >> "$SUMMARY"
+        else
+            echo "$HH,$NOW,$MEAN,,,no-pole-parsed" >> "$SUMMARY"
+        fi
+    else
+        echo "$HH,$NOW,$MEAN,,,failed" >> "$SUMMARY"
+    fi
+done
+
+printf '\n=== night complete: %s ===\n' "$NIGHT" | tee -a "$LOG"
+printf 'summary: %s\n' "$SUMMARY"
+column -s, -t "$SUMMARY"

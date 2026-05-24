@@ -27,6 +27,7 @@ set -euo pipefail
 POLE_X=905.5
 POLE_Y=50.4
 FRAMES=100
+FINAL_FRAMES=0       # 0 = use all frames available
 TOP=10
 PATCH=50
 FORCE=0
@@ -45,6 +46,7 @@ while [ $# -gt 0 ]; do
         --patch)  PATCH="$2";  shift 2;;
         --force)  FORCE=1;     shift;;
         --max-iters) MAX_ITERS="$2"; shift 2;;
+        --final-frames) FINAL_FRAMES="$2"; shift 2;;
         -h|--help) usage; exit 0;;
         *) if [ -z "$HH" ]; then HH="$1"; shift
            else echo "extra arg: $1" >&2; exit 2; fi;;
@@ -144,4 +146,16 @@ if [ "$ITER" -ge "$MAX_ITERS" ]; then
 fi
 
 printf '\nFinal pole: --pole-x %s --pole-y %s\n' "$PX" "$PY"
+
+# Final full-hour derotated stack using the converged pole.
+step "final derot stack (all frames in hour)"
+ALL=$(ls -1 "$HHB"/[0-9]*.fits.fz 2>/dev/null | wc -l)
+N="$FINAL_FRAMES"; [ "$N" = "0" ] && N="$ALL"
+FINAL_DIR="$HHB/final"
+derot-patches "$HHB" --pole-x "$PX" --pole-y "$PY" \
+    --frames "$N" --patch "$PATCH" --top "$TOP" \
+    --out-dir "$FINAL_DIR" 2>&1 | tail -5
+mv "$FINAL_DIR/stack-derot.fits.fz" "$FINAL_DIR/derot.fits.fz" 2>/dev/null || true
+printf '\nFinal full-hour stack: %s/derot.fits.fz (%d frames)\n' "$FINAL_DIR" "$N"
+
 printf 'Outputs in: %s\n' "$HHB"
