@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""fit-geometry — joint fit of pole + omega + radial distortion (k1, k2).
+
+Same sharpness objective as fit-pole, but with five free parameters:
+    pole_x, pole_y, omega, k1, k2
+
+Distortion model: each pixel (x, y) is mapped to undistorted (x', y')
+relative to the image centre (cx, cy) via:
+    r  = hypot(x - cx, y - cy) / R     # normalised radius, R = half-diag
+    s  = 1 + k1*r^2 + k2*r^4
+    x' = cx + (x - cx) * s
+    y' = cy + (y - cy) * s
+
+The derotation is applied in undistorted space. Output pixels are
+sampled from the input frame at the distorted positions corresponding
+to the rotated undistorted coordinates.
+
+Optimisation: Nelder-Mead in 5D from --pole-x/--pole-y seed,
+omega=-0.000219, k1=0, k2=0 (no distortion to start). Sub-optimal
+in noisy regions but converges in tens of evaluations.
+
+Usage:
+    fit-geometry <dir> --pole-x 905.5 --pole-y 50.4
+    fit-geometry <dir> --frames 200 --top 15 --refine-only
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from scipy.optimize import minimize
+
+
+def load_frame(path: Path) -> np.ndarray:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def top_cells_with_peak(csv_path: Path, n: int):
+    sums = {}
+    first_peak = {}
+    with open(csv_path) as f:
+        r = csv.DictReader(f)
+        for row in r:
+            k = (int(row["cell_x"]), int(row["cell_y"]))
+            sums[k] = sums.get(k, 0) + int(row["peak_value"])
+            if k not in first_peak:
+                first_peak[k] = (int(row["peak_x"]), int(row["peak_y"]))
+    ranked = sorted(sums.items(), key=lambda kv: -kv[1])[:n]
+    return [(cx, cy, *first_peak[(cx, cy)]) for (cx, cy), _ in ranked]
+
+
+def derot_with_distortion(img: np.ndarray, pole: tuple[float, float],
+                          angle_deg: float, k1: float, k2: float,
+                          maps_cache: dict) -> np.ndarray:
+    """Derotate `img` by `angle_deg` about `pole` in undistorted space.
+
+    For each output pixel (xo, yo):
+        undistort to (xu, yu)
+        rotate about pole by angle_deg → (xur, yur)
+        re-distort → input sample point (xs, ys)
+    Then sample input at (xs, ys).
+
+    The undistort/redistort maps are constant per (k1, k2); cached.
+    """
+    h, w = img.shape
+    cx, cy = w / 2.0, h / 2.0
+    R = np.hypot(cx, cy)
+
+    key = (h, w, float(k1), float(k2))
+    if key not in maps_cache:
+        ys_g, xs_g = np.indices((h, w), dtype=np.float32)
+        dx = xs_g - cx
+        dy = ys_g - cy
+        rn = np.hypot(dx, dy) / R
+        s = 1.0 + k1 * rn**2 + k2 * rn**4
+        xu = cx + dx * s
+        yu = cy + dy * s
+        maps_cache[key] = (xu, yu)
+    xu, yu = maps_cache[key]
+
+    # Rotate undistorted coords about pole by angle_deg (CCW image).
+    rad = np.deg2rad(angle_deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dxp = xu - pole[0]
+    dyp = yu - pole[1]
+    xur = pole[0] + c * dxp - s * dyp
+    yur = pole[1] + s * dxp + c * dyp
+
+    # Re-distort: invert the radial scaling. Use the same forward map by
+    # Newton iteration on r_u → r_d, but for small distortions a single
+    # step usually suffices. For our case (k tiny), we just apply the
+    # forward map a second time: it's an approximation but works while
+    # k stays small; better to fit |k| < 0.1 anyway.
+    dxr = xur - cx
+    dyr = yur - cy
+    rnr = np.hypot(dxr, dyr) / R
+    sr = 1.0 + k1 * rnr**2 + k2 * rnr**4
+    # Invert: if forward is xu = cx + dx * s(dx), then to undo we want
+    # dx = (xu - cx) / s(dx). Approximate by dividing by s(dxr).
+    inv = 1.0 / sr
+    xs = cx + dxr * inv
+    ys = cy + dyr * inv
+
+    return cv2.remap(img.astype(np.float32),
+                     xs.astype(np.float32), ys.astype(np.float32),
+                     interpolation=cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def score_geom(params, imgs, cells, patch, frame_indices):
+    pole_x, pole_y, omega, k1, k2 = params
+    # Cheap guard against blow-ups.
+    if abs(k1) > 0.5 or abs(k2) > 0.5:
+        return 1e9
+    h, w = imgs[0].shape
+    acc = np.zeros((h, w), dtype=np.float32)
+    maps_cache: dict = {}
+    for i, img in zip(frame_indices, imgs):
+        ang = float(np.degrees(i * omega))
+        acc += derot_with_distortion(img, (pole_x, pole_y), ang,
+                                     k1, k2, maps_cache)
+    half = patch // 2
+    score = 0.0
+    for cx, cy, px, py in cells:
+        x0 = max(0, px - half); y0 = max(0, py - half)
+        x1 = min(w, x0 + patch); y1 = min(h, y0 + patch)
+        p = acc[y0:y1, x0:x1]
+        if p.size == 0:
+            continue
+        m = float(p.mean())
+        if m <= 0:
+            continue
+        score += float(p.max()) / m
+    return -score  # minimise
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path)
+    ap.add_argument("--candidates", type=Path, default=None)
+    ap.add_argument("--pole-x", type=float, default=905.5)
+    ap.add_argument("--pole-y", type=float, default=50.4)
+    ap.add_argument("--omega", type=float, default=-0.000219)
+    ap.add_argument("--k1", type=float, default=0.0)
+    ap.add_argument("--k2", type=float, default=0.0)
+    ap.add_argument("--frames", type=int, default=200,
+                    help="frames to derot per score (more = slower but more precise)")
+    ap.add_argument("--top", type=int, default=15,
+                    help="top-N candidate cells")
+    ap.add_argument("--patch", type=int, default=50)
+    args = ap.parse_args()
+
+    cand_csv = args.candidates or (args.dir / "candidates.csv")
+    cells = top_cells_with_peak(cand_csv, args.top)
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name not in ("sum.fits.fz", "motion.fits.fz")
+           and not f.name.startswith(("stack", "hot-pixels"))]
+    fns = fns[:args.frames]
+    print(f"loading {len(fns)} frames; {len(cells)} cells")
+    imgs = [load_frame(fn).astype(np.float32) for fn in fns]
+    frame_indices = list(range(len(fns)))
+
+    x0 = [args.pole_x, args.pole_y, args.omega, args.k1, args.k2]
+    s0 = -score_geom(x0, imgs, cells, args.patch, frame_indices)
+    print(f"seed: pole=({x0[0]:.1f},{x0[1]:.1f}) "
+          f"omega={x0[2]:.6f} k1={x0[3]:.4f} k2={x0[4]:.4f} → score={s0:.2f}")
+
+    # Nelder-Mead with parameter scales (initial simplex size).
+    res = minimize(score_geom, x0=x0, method="Nelder-Mead",
+                   args=(imgs, cells, args.patch, frame_indices),
+                   options={"xatol": 1e-4, "fatol": 0.01, "maxiter": 400,
+                            "disp": True,
+                            "initial_simplex": np.array([
+                                x0,
+                                [x0[0]+10, x0[1],    x0[2],          x0[3],     x0[4]],
+                                [x0[0],    x0[1]+10, x0[2],          x0[3],     x0[4]],
+                                [x0[0],    x0[1],    x0[2]+1e-5,     x0[3],     x0[4]],
+                                [x0[0],    x0[1],    x0[2],          x0[3]+0.02,x0[4]],
+                                [x0[0],    x0[1],    x0[2],          x0[3],     x0[4]+0.02],
+                            ])})
+    final = res.x
+    score = -float(res.fun)
+    print(f"\nfit:  pole=({final[0]:.2f},{final[1]:.2f}) "
+          f"omega={final[2]:.7f} k1={final[3]:.5f} k2={final[4]:.5f} "
+          f"→ score={score:.2f}")
+    print(f"\nrecommended --pole-x {final[0]:.2f} --pole-y {final[1]:.2f} "
+          f"--omega {final[2]:.7f} --k1 {final[3]:.5f} --k2 {final[4]:.5f}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
