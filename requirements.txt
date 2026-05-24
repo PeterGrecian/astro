@@ -1,4 +1,5 @@
 numpy
+scipy
 astropy
 fitsio
 opencv-python-headless
