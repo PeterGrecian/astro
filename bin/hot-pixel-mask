@@ -25,12 +25,10 @@ from astropy.io import fits
 from PIL import Image
 
 
-def load_sum(path: Path) -> tuple[np.ndarray, int | None]:
-    """Return (image, RAWMAX-if-present). Prefer the true accumulator
-    max from the header over the clipped uint16 pixels."""
+def load_sum(path: Path) -> np.ndarray:
     with fits.open(path) as h:
         hdu = next(x for x in h if x.data is not None and x.data.ndim == 2)
-        return hdu.data, hdu.header.get("RAWMAX")
+        return hdu.data
 
 
 def main() -> int:
@@ -51,13 +49,12 @@ def main() -> int:
                     help="overlay jpg path (default: alongside --out)")
     args = ap.parse_args()
 
-    img, raw_max = load_sum(args.sum)
-    img32 = img.astype(np.uint32)
+    img = load_sum(args.sum)
+    img32 = img.astype(np.int64)
     mean = float(img32.mean())
     threshold = args.k * mean
     print(f"sum: shape={img.shape} mean={mean:.1f} "
-          f"max(stored)={int(img32.max())} "
-          f"max(raw)={raw_max if raw_max is not None else 'n/a'}")
+          f"max={int(img32.max())}")
     print(f"threshold: {args.k} x mean = {threshold:.1f}")
 
     mask = (img32 > threshold).astype(np.uint8)

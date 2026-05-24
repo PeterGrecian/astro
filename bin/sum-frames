@@ -70,13 +70,13 @@ def main() -> int:
     print(f"sum: min={int(acc.min())} max={int(acc.max())} "
           f"mean={float(acc.mean()):.1f}")
 
+    # Store as int32 to preserve the full accumulator range (hot pixels
+    # can sum to millions of ADU). FITS doesn't have native uint32 but
+    # int32 covers up to 2**31 = 2.1e9 — plenty for any plausible stack.
     primary = fits.PrimaryHDU()
-    comp = fits.CompImageHDU(
-        data=np.clip(acc, 0, 65535).astype(np.uint16),
-        compression_type="RICE_1")
+    comp = fits.CompImageHDU(data=acc.astype(np.int32),
+                             compression_type="RICE_1")
     comp.header["NFRAMES"] = (len(fns), "frames summed (raw)")
-    comp.header["RAWMAX"] = (int(acc.max()),
-                             "true accumulator max before clip")
     fits.HDUList([primary, comp]).writeto(out_path, overwrite=True)
     print(f"wrote {out_path}")
     return 0
