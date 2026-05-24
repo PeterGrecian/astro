@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""derot-patches — local derotated stack on small patches around candidates.
+
+For each of the top-N cells in candidates.csv, take a NxN patch
+centred on the cell's first-frame peak, derotate F consecutive
+frames back to frame 0 (using the supplied pole), sum, and write a
+jpg + a labelled mosaic.
+
+A real star at this cell should sharpen into a clean peak in the
+derotated patch. Noise stays flat. Cells whose stars sharpen
+confirm both the candidate AND the pole.
+
+Usage:
+    derot-patches <dir>
+    derot-patches <dir> --pole-x 822 --pole-y -159
+    derot-patches <dir> --frames 100 --patch 50 --top 20
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from collections import Counter
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def load_frame(path: Path) -> np.ndarray:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def derotate(img: np.ndarray, pole: tuple[float, float],
+             angle_deg: float) -> np.ndarray:
+    """Rotate img by `angle_deg` about `pole` (image-coord CCW).
+
+    Sign convention: we want to undo a sky-rotation that moved the
+    star from frame 0's position to frame N's position. Sky rotates
+    in one direction; we apply the opposite. Caller passes the
+    desired CCW angle to apply directly.
+    """
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def top_cells_with_peak(csv_path: Path, n: int
+                        ) -> list[tuple[int, int, int, int]]:
+    """Return [(cell_x, cell_y, peak_x_at_frame0, peak_y_at_frame0)] for
+    top-n cells by cumulative peak value. The peak coords are from the
+    FIRST frame seen for each cell."""
+    sums: dict[tuple[int, int], int] = {}
+    first_peak: dict[tuple[int, int], tuple[int, int]] = {}
+    with open(csv_path) as f:
+        r = csv.DictReader(f)
+        for row in r:
+            k = (int(row["cell_x"]), int(row["cell_y"]))
+            sums[k] = sums.get(k, 0) + int(row["peak_value"])
+            if k not in first_peak:
+                first_peak[k] = (int(row["peak_x"]), int(row["peak_y"]))
+    ranked = sorted(sums.items(), key=lambda kv: -kv[1])[:n]
+    return [(cx, cy, *first_peak[(cx, cy)]) for (cx, cy), _ in ranked]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path, help="binned-frames dir")
+    ap.add_argument("--candidates", type=Path, default=None,
+                    help="candidates.csv (default: <dir>/candidates.csv)")
+    ap.add_argument("--pole-x", type=float, default=822.0)
+    ap.add_argument("--pole-y", type=float, default=-159.0)
+    ap.add_argument("--frames", type=int, default=100,
+                    help="number of consecutive frames to derotate")
+    ap.add_argument("--patch", type=int, default=50,
+                    help="patch size in binned px (square)")
+    ap.add_argument("--top", type=int, default=20,
+                    help="top-N cells from candidates.csv")
+    ap.add_argument("--omega", type=float, default=0.000219,
+                    help="rotation rate in radians per frame (sidereal × 3s)")
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help="output dir for patches (default: <dir>/patches)")
+    args = ap.parse_args()
+
+    cand_csv = args.candidates or (args.dir / "candidates.csv")
+    if not cand_csv.exists():
+        print(f"missing {cand_csv}", file=sys.stderr)
+        return 1
+
+    cells = top_cells_with_peak(cand_csv, args.top)
+    print(f"top {len(cells)} cells; pole=({args.pole_x},{args.pole_y}) "
+          f"frames={args.frames} patch={args.patch}")
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name not in ("sum.fits.fz", "motion.fits.fz")
+           and not f.name.startswith(("stack", "hot-pixels"))]
+    fns = fns[:args.frames]
+    if len(fns) < args.frames:
+        print(f"only {len(fns)} frames available, requested {args.frames}",
+              file=sys.stderr)
+
+    # Pre-compute per-frame angle (degrees, CCW image-coord) needed to
+    # undo sky rotation that occurred from frame 0 to frame i.
+    # Image y is flipped vs math, so the CCW image-coord angle to undo
+    # +omega sky rotation per frame is +omega per frame (matches sim).
+    angles_deg = [float(np.degrees(i * args.omega)) for i in range(len(fns))]
+
+    pole = (args.pole_x, args.pole_y)
+
+    print("derotating all frames once into a stack...")
+    stack: np.ndarray | None = None
+    for i, fn in enumerate(fns):
+        img = load_frame(fn).astype(np.float32)
+        derot = derotate(img, pole, angles_deg[i])
+        stack = derot if stack is None else stack + derot
+        if i == 0 or (i + 1) % 20 == 0 or i == len(fns) - 1:
+            print(f"  [{i+1}/{len(fns)}] {fn.name}", flush=True)
+
+    assert stack is not None
+    raw_acc = stack
+    # Also derive a raw (no-derot) sum for comparison.
+    raw_sum: np.ndarray | None = None
+    for fn in fns:
+        d = load_frame(fn).astype(np.float32)
+        raw_sum = d if raw_sum is None else raw_sum + d
+    assert raw_sum is not None
+
+    out_dir = args.out_dir or (args.dir / "patches")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"writing patches → {out_dir}")
+
+    H, W = raw_acc.shape
+    half = args.patch // 2
+
+    # Build a single mosaic image (5 cols x ceil(top/5) rows of 2-up patches: derot|raw).
+    cols = 5
+    rows = (len(cells) + cols - 1) // cols
+    pad = 4
+    cell_w = args.patch * 2 + pad  # two patches side by side per cell
+    cell_h = args.patch + 16       # +16 for label strip
+    mosaic = np.zeros((rows * cell_h, cols * cell_w), dtype=np.uint8)
+
+    for idx, (cx, cy, px, py) in enumerate(cells):
+        # Clip patch to image bounds.
+        x0 = max(0, px - half)
+        y0 = max(0, py - half)
+        x1 = min(W, px - half + args.patch)
+        y1 = min(H, py - half + args.patch)
+        derot_patch = raw_acc[y0:y1, x0:x1]
+        raw_patch   = raw_sum[y0:y1, x0:x1]
+
+        def stretch(p: np.ndarray) -> np.ndarray:
+            lo, hi = float(np.percentile(p, 5)), float(np.percentile(p, 99.5))
+            if hi <= lo:
+                hi = lo + 1.0
+            u8 = np.clip((p - lo) / (hi - lo), 0, 1) * 255
+            return u8.astype(np.uint8)
+
+        d_u8 = stretch(derot_patch)
+        r_u8 = stretch(raw_patch)
+
+        # Pad to patch size in case of edge clip.
+        def pad_to(p, sz):
+            out = np.zeros((sz, sz), dtype=np.uint8)
+            out[:p.shape[0], :p.shape[1]] = p
+            return out
+        d_u8 = pad_to(d_u8, args.patch)
+        r_u8 = pad_to(r_u8, args.patch)
+
+        # Per-cell jpg with both panels side by side.
+        side = np.concatenate([d_u8, np.full((args.patch, pad), 60,
+                                             dtype=np.uint8), r_u8], axis=1)
+        Image.fromarray(side).save(out_dir / f"cell_{cx:02d}_{cy:02d}.jpg",
+                                   quality=92)
+
+        # Slot into mosaic.
+        r, c = divmod(idx, cols)
+        y_off = r * cell_h
+        x_off = c * cell_w
+        # Label strip: write the cell coord as ASCII row of '#'s at top.
+        # (Skipping real text rendering to avoid PIL font issues.)
+        mosaic[y_off + 16:y_off + 16 + args.patch,
+               x_off:x_off + args.patch] = d_u8
+        mosaic[y_off + 16:y_off + 16 + args.patch,
+               x_off + args.patch + pad:x_off + 2 * args.patch + pad] = r_u8
+
+        # Reporting numbers
+        d_peak = int(derot_patch.max())
+        r_peak = int(raw_patch.max())
+        d_mean = float(derot_patch.mean())
+        r_mean = float(raw_patch.mean())
+        print(f"  cell ({cx:2d},{cy:2d}) peak@frame0=({px:4d},{py:4d}): "
+              f"derot peak={d_peak:>8d} mean={d_mean:>9.1f}  "
+              f"raw peak={r_peak:>8d} mean={r_mean:>9.1f}  "
+              f"sharpness={d_peak/d_mean:.2f}× / {r_peak/r_mean:.2f}×")
+
+    Image.fromarray(mosaic).save(out_dir / "mosaic.jpg", quality=92)
+    print(f"\nmosaic: {out_dir / 'mosaic.jpg'} "
+          f"({rows}x{cols} cells, left=derot, right=raw)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
