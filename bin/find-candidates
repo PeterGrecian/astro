@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""find-candidates — brightest-pixel-per-grid-cell candidate finder.
+
+For each frame, divide the image into G x G pixel cells and pick the
+brightest pixel in each cell (skipping any pixel marked in the
+optional hot-pixel mask). These are per-frame star candidates.
+
+Aggregate across frames:
+  - "stable" candidates appear in the SAME cell across many frames
+    (probably real stars whose drift is small per frame and stay
+    inside their grid cell for several seconds)
+  - "moving" candidates appear in adjacent cells over time (real
+    stars whose arc crosses cell boundaries)
+  - "random" candidates (different cells every frame) are noise
+
+Output:
+  - CSV with one row per (frame, cell_x, cell_y, peak_x, peak_y, peak_value)
+  - Optional summary: cells that scored top-K across many frames
+
+Usage:
+    find-candidates <dir>                   # writes candidates.csv
+    find-candidates <dir> --grid 100        # 100x100 cells (default)
+    find-candidates <dir> --mask <hot.fits.fz>
+    find-candidates <dir> --limit 50        # first 50 frames only
+    find-candidates <dir> --top-cells       # also print top hottest cells
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+def load_frame(path: Path) -> np.ndarray:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def per_cell_argmax(img: np.ndarray, grid: int, hot_mask: np.ndarray | None
+                    ) -> list[tuple[int, int, int, int, int]]:
+    """Return (cell_x, cell_y, peak_x, peak_y, peak_value) per cell."""
+    H, W = img.shape
+    if hot_mask is not None and hot_mask.shape == img.shape:
+        # Effectively suppress hot pixels by setting them to a sentinel
+        # low value (-1 if dtype allows, else 0).
+        work = img.astype(np.int32)
+        work[hot_mask == 1] = -1
+    else:
+        work = img.astype(np.int32)
+    out = []
+    cy_n = (H + grid - 1) // grid
+    cx_n = (W + grid - 1) // grid
+    for cy in range(cy_n):
+        for cx in range(cx_n):
+            y0, y1 = cy * grid, min((cy + 1) * grid, H)
+            x0, x1 = cx * grid, min((cx + 1) * grid, W)
+            patch = work[y0:y1, x0:x1]
+            if patch.size == 0:
+                continue
+            i = int(patch.argmax())
+            py, px = divmod(i, patch.shape[1])
+            v = int(patch[py, px])
+            if v < 0:
+                # entire cell was hot-masked
+                continue
+            out.append((cx, cy, x0 + px, y0 + py, v))
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path, nargs="?", default=Path.cwd(),
+                    help="directory of .fits.fz frames (default: cwd)")
+    ap.add_argument("--grid", type=int, default=100,
+                    help="grid cell size in px (default 100)")
+    ap.add_argument("--mask", type=Path, default=None,
+                    help="hot-pixel FITS bitmap to exclude")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="cap on number of frames (0 = no cap)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output CSV (default: <dir>/candidates.csv)")
+    ap.add_argument("--top-cells", action="store_true",
+                    help="print top-20 cells whose brightest pixel "
+                         "exceeded the grid mean across many frames")
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name not in ("sum.fits.fz", "motion.fits.fz")
+           and not f.name.startswith(("stack", "hot-pixels"))]
+    if args.limit:
+        fns = fns[:args.limit]
+    if not fns:
+        print(f"no .fits.fz in {args.dir}", file=sys.stderr)
+        return 1
+
+    hot_mask = None
+    if args.mask and args.mask.exists():
+        with fits.open(args.mask) as h:
+            mhdu = next(x for x in h
+                        if x.data is not None and x.data.ndim == 2)
+            hot_mask = mhdu.data
+        print(f"mask: {args.mask.name} "
+              f"({int((hot_mask != 0).sum())} hot pixels)")
+
+    out_csv = args.out or (args.dir / "candidates.csv")
+    print(f"scanning {len(fns)} frames at grid={args.grid} → {out_csv}")
+
+    cell_hits: Counter[tuple[int, int]] = Counter()
+    with open(out_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "cell_x", "cell_y",
+                    "peak_x", "peak_y", "peak_value"])
+        for i, fn in enumerate(fns):
+            img = load_frame(fn)
+            cells = per_cell_argmax(img, args.grid, hot_mask)
+            if i == 0:
+                print(f"  {len(cells)} cells per frame")
+            for cx, cy, px, py, v in cells:
+                w.writerow([fn.name, cx, cy, px, py, v])
+                cell_hits[(cx, cy)] += 1
+            if i == 0 or (i + 1) % 200 == 0 or i == len(fns) - 1:
+                print(f"  [{i+1}/{len(fns)}] {fn.name}",
+                      flush=True)
+    print(f"wrote {out_csv}")
+
+    if args.top_cells:
+        # Cells with the highest cumulative peak value across frames.
+        # Re-read CSV is awkward; recompute by reloading would be slow.
+        # Instead, just show cells that were picked the most times
+        # (they get picked once per frame by definition, so this is
+        # really "how many frames had a non-empty pick in this cell").
+        # The interesting metric is sum of peak_value per cell.
+        sums: dict[tuple[int, int], int] = {}
+        with open(out_csv) as f:
+            r = csv.DictReader(f)
+            for row in r:
+                k = (int(row["cell_x"]), int(row["cell_y"]))
+                sums[k] = sums.get(k, 0) + int(row["peak_value"])
+        ranked = sorted(sums.items(), key=lambda kv: -kv[1])[:20]
+        print("\ntop 20 cells by cumulative peak value:")
+        print("  cell        sum         hits")
+        for (cx, cy), s in ranked:
+            print(f"  ({cx:3d},{cy:3d})  {s:>10,}  {cell_hits[(cx,cy)]}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
