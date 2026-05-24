@@ -30,7 +30,7 @@ FRAMES=100
 TOP=10
 PATCH=50
 FORCE=0
-MAX_ITERS=6
+MAX_ITERS=10
 MIN_MOVE=1.0
 
 usage() { sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; }
