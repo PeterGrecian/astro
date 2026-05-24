@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 User=peter
-ExecStart=/usr/bin/python3 -u /home/peter/astro/bin/to-fits-sweep /home/peter/starcam-frames/night --camera starcam
+ExecStart=/usr/bin/python3 -u /home/peter/astro/bin/to-fits-sweep /home/peter/starcam-frames/night --camera starcam --trash-npy
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
