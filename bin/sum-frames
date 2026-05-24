@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""sum-frames — raw pixel-wise sum of all .fits.fz in a directory.
+
+No derotation, no abs-diff, no time-window logic: just `acc = sum
+frame[i]` for every .fits.fz directly under the given dir. Use this
+when you want to look at "what does an hour of sky look like
+stacked" — stars trace arcs, hot pixels stack to N x, sky averages up.
+
+For abs-diff (motion-only) stacking use `streak-sum`.
+For derotated stacking (collapse arcs back to points) use `derot-sim`
+(sim) or — when the real-data derotator lands — `derotate`.
+
+Output:
+  <dir>/sum.fits.fz   uint16 clipped sum (accumulator is uint32)
+
+Usage:
+    sum-frames                              # cwd
+    sum-frames /path/to/HH
+    sum-frames /path/to/HH --out other.fits.fz
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+def load_frame(path: Path) -> np.ndarray:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path, nargs="?", default=Path.cwd(),
+                    help="directory containing .fits.fz (default: cwd)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output path (default: <dir>/sum.fits.fz)")
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns if f.name not in ("sum.fits.fz",)
+           and not f.name.startswith("stack")]
+    if not fns:
+        print(f"no .fits.fz in {args.dir}", file=sys.stderr)
+        return 1
+
+    out_path = args.out or (args.dir / "sum.fits.fz")
+    print(f"summing {len(fns)} frames from {args.dir}")
+
+    acc: np.ndarray | None = None
+    for i, fn in enumerate(fns):
+        d = load_frame(fn).astype(np.uint32)
+        acc = d if acc is None else acc + d
+        if i == 0 or (i + 1) % 200 == 0 or i == len(fns) - 1:
+            print(f"  [{i+1}/{len(fns)}] acc max={int(acc.max())}",
+                  flush=True)
+
+    assert acc is not None
+    print(f"sum: min={int(acc.min())} max={int(acc.max())} "
+          f"mean={float(acc.mean()):.1f}")
+
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(
+        data=np.clip(acc, 0, 65535).astype(np.uint16),
+        compression_type="RICE_1")
+    comp.header["NFRAMES"] = (len(fns), "frames summed (raw)")
+    comp.header["RAWMAX"] = (int(acc.max()),
+                             "true accumulator max before clip")
+    fits.HDUList([primary, comp]).writeto(out_path, overwrite=True)
+    print(f"wrote {out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
