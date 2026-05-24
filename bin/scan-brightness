@@ -61,9 +61,14 @@ def epoch_ms_from_name(p: Path) -> int | None:
     # Strip ALL extensions: 1779404330189.fits.fz → 1779404330189
     name = p.name.split(".", 1)[0]
     try:
-        return int(name)
+        v = int(name)
     except ValueError:
         return epoch_ms_from_header(p)
+    # Real epoch_ms values are 13 digits (≥ year 2001); short ints like
+    # "0001" from renumbered binned frames aren't timestamps.
+    if v < 10**12:
+        return epoch_ms_from_header(p)
+    return v
 
 
 EXAMPLES = """\
