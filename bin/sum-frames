@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
+from PIL import Image
 
 
 def load_frame(path: Path) -> np.ndarray:
@@ -79,6 +80,16 @@ def main() -> int:
     comp.header["NFRAMES"] = (len(fns), "frames summed (raw)")
     fits.HDUList([primary, comp]).writeto(out_path, overwrite=True)
     print(f"wrote {out_path}")
+
+    # Companion jpg for quick eyeballing (p50 → p99.5 stretch).
+    jpg_path = out_path.with_suffix("").with_suffix(".jpg")
+    lo = float(np.percentile(acc, 50))
+    hi = float(np.percentile(acc, 99.5))
+    if hi <= lo:
+        hi = lo + 1.0
+    u8 = (np.clip((acc - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
+    Image.fromarray(u8).save(jpg_path, quality=92)
+    print(f"wrote {jpg_path} (p50={lo:.0f} → p99.5={hi:.0f})")
     return 0
 
 
