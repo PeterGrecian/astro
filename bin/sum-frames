@@ -90,7 +90,7 @@ def main() -> int:
         hi = lo + 1.0
     u8 = (np.clip((acc - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
     Image.fromarray(u8).save(jpg_path, quality=92)
-    print(f"wrote {jpg_path} (p50={lo:.0f} → p99.5={hi:.0f})")
+    print(f"wrote {jpg_path} (p50={lo:.0f} → p99.9={hi:.0f})")
     return 0
 
 
