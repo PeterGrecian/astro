@@ -40,24 +40,39 @@ oiiotool looks interesting.  siril is hidious.  splay is capable of doing it bet
 - [ ] Decide camera identifier convention (`back`, `front`, `sky`, `experimental`). Reflect in path layout: `~/<cam>-frames/night/<night-dir>/HH/`.
 - [ ] Per-camera config: gain, exposure, lens, sensor, Bayer pattern.
 
-## Accurate per-frame timing (open question; affects radial smear)
+## Accurate per-frame timing
 
-- [ ] **Use real epoch_ms not frame index for angle.** fit-pole and
-      fit-geometry currently assume uniform 3s frame spacing
-      (`angle = omega × frame_index`). The daemon runs at-best-effort
-      on a Pi 1B and intervals drift. Switch to
-      `angle = sidereal_rate_per_s × (epoch_ms - epoch_0) / 1000`.
-      derot-night already does this; the fitters don't.
+**Current state (2026-05-25):** filename epoch_ms is **noisier than
+the actual sensor cadence** because the daemon stamps with
+`time.time_ns()` *after* the Python loop receives the frame — that
+stamp jitters ±100 ms (measured stddev 103 ms over 1199 intervals).
+Sensor itself is rock-steady at the requested cadence. So:
 
-- [ ] **Rolling shutter correction.** OV5647 reads top-to-bottom
-      over the 2.9s exposure. Stars at the bottom of the frame are
-      sampled ~2.9s later than stars at the top. Means each *row*
-      needs its own angle offset, not just each frame:
-        angle(frame_N, row_Y) =
-            omega × ((epoch_ms_N - epoch_0) / 1000 + Y × T_row)
-      where T_row = exposure_time / sensor_height.
-      Probably accounts for some of the residual radial smear we
-      see in derot outputs.
+- Fitters (fit-pole, fit-geometry) keep using `frame_index × 3 s` —
+  that's *more* accurate than the recorded timestamps.
+- derot-night uses `(epoch_ms - epoch_0)` from filenames; affects
+  it less because the jitter is unbiased and we're summing many
+  frames at each pixel.
+
+**Fix in flight (2026-05-25):** changed
+`Berrylands/gardencam/starcam_night_daemon.py` to use libcamera's
+`SensorTimestamp` (CLOCK_BOOTTIME ns, set at exposure end) instead
+of wall-clock `time.time_ns()`. Converted to wall-clock epoch via
+one-time offset captured at process start. Frames captured AFTER
+this fix is deployed should have ms-accurate, jitter-free
+filenames.
+
+**To verify after deployment:**
+- [ ] Re-measure interval std on a fresh hour (`ls *.fits.fz |
+      awk` one-liner). Should drop from ~103 ms to ~1 ms.
+- [ ] Then switch fitters to use real epoch_ms (cumulative drift
+      ~0.14 px at 300 frames would vanish).
+
+**Rolling shutter:** OV5647 readout time is 66.7 ms top-to-bottom,
+NOT exposure time. So row-to-row sample-time difference is half
+that — ~33 ms. At sidereal rate, sub-pixel even at corners of our
+binned image. Skip the per-row correction; it's below INTER_LINEAR
+precision.
 
 ## Multi-night stacking (deferred — let the per-night pipeline mature first)
 
