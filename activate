@@ -29,4 +29,37 @@ case ":$PATH:" in
 esac
 
 unset _astro_root
+
+# STARCAM_ROOT autodetect: NFS mount on pip, local path on puppy/muppet.
+if [ -d /mnt/puppy/starcam-frames/night ]; then
+    export STARCAM_ROOT=/mnt/puppy/starcam-frames/night
+elif [ -d "$HOME/starcam-frames/night" ]; then
+    export STARCAM_ROOT="$HOME/starcam-frames/night"
+fi
+
+# cdd — cd into today's noon-rollover night dir and export $CDD.
+# Before noon local time, "today" is yesterday's date (the night that
+# started before midnight). Per ~/astro/CLAUDE.md noon-noon rollover.
+cdd() {
+    local night
+    night=$(date +%H 2>/dev/null)
+    if [ "$night" -lt 12 ] 2>/dev/null; then
+        night=$(date -d 'yesterday' +%Y-%m-%d)
+    else
+        night=$(date +%Y-%m-%d)
+    fi
+    if [ -z "$STARCAM_ROOT" ]; then
+        echo "cdd: no STARCAM_ROOT set" >&2
+        return 1
+    fi
+    export CDD="$STARCAM_ROOT/$night"
+    if [ ! -d "$CDD" ]; then
+        echo "cdd: no night dir at $CDD" >&2
+        return 1
+    fi
+    cd "$CDD" || return 1
+    echo "cdd → $CDD"
+}
+
 echo "astro mode: venv active, ~/astro/bin on PATH"
+[ -n "$STARCAM_ROOT" ] && echo "  STARCAM_ROOT=$STARCAM_ROOT  (cdd: today's night dir)"
