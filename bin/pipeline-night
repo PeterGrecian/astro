@@ -1,28 +1,42 @@
 #!/usr/bin/env bash
-# pipeline-night — run pipeline-hour on every viable HH dir of a night.
+# pipeline-night — end-of-night processing for one night dir.
 #
-# Walks <night>/{19,20,21,22,23,00,01,02,03} in time order. For each
-# HH dir present:
-#   - skip if the binned brightness.csv mean exceeds --sky-threshold
-#     (sky too bright for stars; default 100 ADU)
-#   - otherwise call pipeline-hour, seeding the pole from the
-#     previous hour's converged pole (so iterations converge faster)
+# Stages:
+#   A. Per-hour prep: pipeline-hour for each HH (bin + scan + sum).
+#   B. Per-night hot-pixel mask: sum-of-sums → hot-pixel-mask --sweep.
+#   C. Refresh plot-brightness for the whole night-tree.
+#   D. Pick sky mask: most recent ~/astro/calib/sky-mask-starcam-*.fits.fz
+#      with date ≤ this night's date (logs and continues if none).
+#   E. Per-hour fit + derot bootstrap loop (fit-pole → fit-geometry →
+#      derot-patches → find-candidates), darkest hour first, pole
+#      carried forward. Result: <HHb>/final/derot.fits.fz per hour.
+#   F. derot-night → <night>/all-night-derot.fits.fz
 #
-# Writes a per-night log at <night>/pipeline.log and a small summary
-# CSV <night>/pipeline-poles.csv: hh, pole_x, pole_y, mean.
+# Writes <night>/pipeline.log + <night>/pipeline-poles.csv.
 #
 # Usage:
 #   pipeline-night <night-dir>
-#   pipeline-night <night-dir> --pole-x 905.5 --pole-y 50.4
-#   pipeline-night <night-dir> --sky-threshold 80 --max-iters 6
+#   pipeline-night <night-dir> --pole-x 910 --pole-y 40
+#   pipeline-night <night-dir> --sky-threshold 80 --max-iters 6 --force
+#   pipeline-night <night-dir> --no-sky-mask    # skip sky mask this run
+#
+# Per-night opt-out:
+#   touch <night>/.no-sky-mask         # persistent: no sky mask for this night
+#   (use when the camera has moved but you haven't re-painted yet)
 set -euo pipefail
 
-POLE_X=905.5
-POLE_Y=50.4
+POLE_X=910
+POLE_Y=40
 SKY_THRESH=100
 MAX_ITERS=10
 FORCE=0
-EXTRA_ARGS=()
+NO_SKY_MASK=0
+FRAMES=100
+FRAMES_GEOM=300
+TOP=10
+PATCH=50
+GEOM_AFTER_ITER=2
+MIN_MOVE=1.0
 
 usage() { sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; }
 
@@ -34,6 +48,7 @@ while [ $# -gt 0 ]; do
         --sky-threshold) SKY_THRESH="$2"; shift 2;;
         --max-iters) MAX_ITERS="$2"; shift 2;;
         --force) FORCE=1; shift;;
+        --no-sky-mask) NO_SKY_MASK=1; shift;;
         -h|--help) usage; exit 0;;
         *) if [ -z "$NIGHT" ]; then NIGHT="$1"; shift
            else echo "extra arg: $1" >&2; exit 2; fi;;
@@ -43,19 +58,103 @@ done
 [ -n "$NIGHT" ] || { usage; exit 2; }
 NIGHT="${NIGHT%/}"
 [ -d "$NIGHT" ] || { echo "no such dir: $NIGHT" >&2; exit 2; }
+NIGHT_DATE=$(basename "$NIGHT")
 
 LOG="$NIGHT/pipeline.log"
 SUMMARY="$NIGHT/pipeline-poles.csv"
-
-# Header (overwrite each run; per-iter outputs live in <HH>b/)
+: > "$LOG"
 echo "hh,started_utc,mean,pole_x,pole_y,status" > "$SUMMARY"
 
 step() { printf '\n=== %s ===\n' "$*" | tee -a "$LOG"; }
 
-# Hour processing order: darkest hour first (cleanest data → most
-# reliable pole), then propagate that pole to brighter hours.
-# Read mean brightness from each hour's brightness.csv if present;
-# fall back to alphabetical for hours without one.
+run() { "$@" 2>&1 | tee -a "$LOG"; }
+
+# ---------- Stage A: per-hour prep -----------------------------------
+step "A. per-hour prep"
+PIPE_HOUR_ARGS=()
+[ "$FORCE" = "1" ] && PIPE_HOUR_ARGS+=(--force)
+for cand in "$NIGHT"/[0-2][0-9]; do
+    [ -d "$cand" ] || continue
+    run pipeline-hour "$cand" "${PIPE_HOUR_ARGS[@]}"
+done
+
+# ---------- Stage B: per-night hot-pixel mask ------------------------
+step "B. per-night hot-pixel mask (sum-of-sums)"
+NIGHT_SUM="$NIGHT/sum-of-sums.fits.fz"
+if [ "$FORCE" = "1" ] || [ ! -e "$NIGHT_SUM" ]; then
+    python3 <<PY 2>&1 | tee -a "$LOG"
+from astropy.io import fits
+from pathlib import Path
+import numpy as np, sys
+
+night = Path("$NIGHT")
+hh_sums = sorted(night.glob("[0-2][0-9]b/sum.fits.fz"))
+if not hh_sums:
+    print("no per-hour sums found", file=sys.stderr); sys.exit(1)
+print(f"summing {len(hh_sums)} hourly sums:")
+acc = None
+for fn in hh_sums:
+    with fits.open(fn) as h:
+        hdu = next(x for x in h if x.data is not None and x.data.ndim == 2)
+        d = hdu.data.astype(np.int64)
+    acc = d if acc is None else acc + d
+    print(f"  + {fn.parent.name}/{fn.name}  max={int(d.max())}  running max={int(acc.max())}")
+print(f"final: min={int(acc.min())} max={int(acc.max())} mean={float(acc.mean()):.1f}")
+primary = fits.PrimaryHDU()
+comp = fits.CompImageHDU(data=acc.astype(np.int32), compression_type="RICE_1")
+comp.header["NHOURS"] = (len(hh_sums), "hourly sums combined")
+fits.HDUList([primary, comp]).writeto("$NIGHT_SUM", overwrite=True)
+print(f"wrote $NIGHT_SUM")
+PY
+else
+    echo "  skip (exists): $NIGHT_SUM"
+fi
+
+step "B.2 hot-pixel-mask sweep on $NIGHT_SUM → $NIGHT/"
+if [ "$FORCE" = "1" ] || [ ! -e "$NIGHT/hot-pixels-starcam-${NIGHT_DATE}-4pct.fits.fz" ]; then
+    # Write masks with the night date in the filename for unambiguous
+    # selection later. hot-pixel-mask uses --camera in the filename;
+    # we override --out-dir and re-suffix afterwards via mv.
+    run hot-pixel-mask "$NIGHT_SUM" --sweep --out-dir "$NIGHT" \
+        --camera "starcam-${NIGHT_DATE}"
+fi
+
+# Pick the strict mask (0.1%) for downstream tools. Cheap to change later.
+NIGHT_HOT_MASK="$NIGHT/hot-pixels-starcam-${NIGHT_DATE}-0.1pct.fits.fz"
+[ -e "$NIGHT_HOT_MASK" ] || NIGHT_HOT_MASK="$NIGHT/hot-pixels-starcam-${NIGHT_DATE}-1pct.fits.fz"
+echo "using hot mask: $NIGHT_HOT_MASK" | tee -a "$LOG"
+
+# ---------- Stage C: refresh plot-brightness -------------------------
+step "C. plot-brightness"
+ROOT="$(dirname "$NIGHT")"
+run plot-brightness "$ROOT" --out "$ROOT/brightness.png" || true
+
+# ---------- Stage D: pick sky mask -----------------------------------
+step "D. sky mask"
+SKY_MASK=""
+if [ "$NO_SKY_MASK" = "1" ] || [ -e "$NIGHT/.no-sky-mask" ]; then
+    why="--no-sky-mask flag"
+    [ -e "$NIGHT/.no-sky-mask" ] && why="$NIGHT/.no-sky-mask marker"
+    echo "sky mask disabled for this night ($why)" | tee -a "$LOG"
+else
+    for cand in $(ls -1 "$HOME/astro/calib/sky-mask-starcam-"*.fits.fz 2>/dev/null | sort -r); do
+        cand_date=$(basename "$cand" .fits.fz | sed 's/sky-mask-starcam-//')
+        if [ "$cand_date" \< "$NIGHT_DATE" ] || [ "$cand_date" = "$NIGHT_DATE" ]; then
+            SKY_MASK="$cand"
+            break
+        fi
+    done
+    if [ -n "$SKY_MASK" ]; then
+        echo "using sky mask: $SKY_MASK" | tee -a "$LOG"
+    else
+        echo "no sky mask found ≤ $NIGHT_DATE — proceeding without" | tee -a "$LOG"
+    fi
+fi
+
+# ---------- Stage E: per-hour fit + derot bootstrap ------------------
+step "E. per-hour fit + derot (darkest hour first)"
+
+# Order hours by mean brightness (darkest first) using the raw HH CSVs.
 declare -A HH_MEAN
 ORDER_FILE=$(mktemp)
 for cand in "$NIGHT"/[0-2][0-9]; do
@@ -72,53 +171,122 @@ for cand in "$NIGHT"/[0-2][0-9]; do
 done
 ORDER=($(sort -n "$ORDER_FILE" | awk '{print $2}'))
 rm -f "$ORDER_FILE"
-echo "hour order (darkest first): ${ORDER[*]}"
+echo "hour order (darkest first): ${ORDER[*]}" | tee -a "$LOG"
 
 PX="$POLE_X"; PY="$POLE_Y"
+K1="0.0"; K2="0.0"
+
+# Combined mask once for all hours (hot ∪ sky). Apply at fit-pole/
+# fit-geometry/find-candidates via --mask. derot-patches doesn't take
+# a mask currently; masking happens through find-candidates filtering
+# which seeds the derot patches. TODO: wire --mask through derot-patches.
+COMBINED_MASK="$NIGHT_HOT_MASK"
+if [ -n "$SKY_MASK" ] && [ -e "$NIGHT_HOT_MASK" ]; then
+    COMBINED_MASK="$NIGHT/combined-mask.fits.fz"
+    python3 <<PY 2>&1 | tee -a "$LOG"
+from astropy.io import fits
+import numpy as np
+hot = fits.getdata("$NIGHT_HOT_MASK")
+sky = fits.getdata("$SKY_MASK")
+comb = ((hot != 0) | (sky != 0)).astype(np.uint8)
+prim = fits.PrimaryHDU()
+c = fits.CompImageHDU(data=comb, compression_type="RICE_1")
+c.header["NEXCL"] = int(comb.sum())
+fits.HDUList([prim, c]).writeto("$COMBINED_MASK", overwrite=True)
+print(f"combined mask: {int(comb.sum())} excluded ({100*comb.sum()/comb.size:.2f}%)")
+PY
+fi
+
 for HH in "${ORDER[@]}"; do
     HH_DIR="$NIGHT/$HH"
-    [ -d "$HH_DIR" ] || continue
     HHB="$NIGHT/${HH}b"
-
-    step "hour $HH (seed pole=$PX,$PY)"
-    # Read mean brightness if scan-brightness has run; otherwise we run
-    # bin+scan via pipeline-hour anyway, but for the gating decision we
-    # need an estimate quickly. Use the existing un-binned brightness.csv
-    # if present.
-    MEAN="?"
-    if [ -f "$HH_DIR/brightness.csv" ]; then
-        MEAN=$(awk -F, 'NR>1 {s+=$4; n++} END{if(n>0) printf "%.1f", s/n; else print "?"}' \
-            "$HH_DIR/brightness.csv")
-    fi
+    [ -d "$HH_DIR" ] || continue
+    [ -d "$HHB" ] || continue
+    MEAN="${HH_MEAN[$HH]:-9999}"
     NOW=$(date -u +%FT%TZ)
 
-    if [ "$MEAN" != "?" ] && python3 -c "import sys; sys.exit(0 if $MEAN > $SKY_THRESH else 1)"; then
-        printf '  skip: mean %.1f > sky-threshold %s ADU\n' \
-            "$MEAN" "$SKY_THRESH" | tee -a "$LOG"
+    if python3 -c "import sys; sys.exit(0 if float('$MEAN') > $SKY_THRESH else 1)"; then
+        printf '  skip hour %s: mean %.1f > sky-threshold %s\n' \
+            "$HH" "$MEAN" "$SKY_THRESH" | tee -a "$LOG"
         echo "$HH,$NOW,$MEAN,,,skipped-bright" >> "$SUMMARY"
         continue
     fi
 
-    PIPE_ARGS=(--pole-x "$PX" --pole-y "$PY" --max-iters "$MAX_ITERS")
-    [ "$FORCE" = "1" ] && PIPE_ARGS+=(--force)
+    step "hour $HH: seed pole=($PX,$PY) k1=$K1 k2=$K2"
 
-    if pipeline-hour "$HH_DIR" "${PIPE_ARGS[@]}" 2>&1 | tee -a "$LOG"; then
-        # Parse the final pole line: "Final pole: --pole-x X --pole-y Y"
-        NEW=$(grep -E '^Final pole:' "$LOG" | tail -1 \
-            | awk '{print $4, $6}')
-        NEW_PX=$(echo "$NEW" | awk '{print $1}')
-        NEW_PY=$(echo "$NEW" | awk '{print $2}')
-        if [ -n "$NEW_PX" ] && [ -n "$NEW_PY" ]; then
-            PX="$NEW_PX"; PY="$NEW_PY"
-            echo "$HH,$NOW,$MEAN,$PX,$PY,ok" >> "$SUMMARY"
-        else
-            echo "$HH,$NOW,$MEAN,,,no-pole-parsed" >> "$SUMMARY"
-        fi
-    else
-        echo "$HH,$NOW,$MEAN,,,failed" >> "$SUMMARY"
+    # find-candidates round 0
+    if [ "$FORCE" = "1" ] || [ ! -e "$HHB/candidates.csv" ]; then
+        run find-candidates "$HHB" --grid 100 \
+            --mask "$COMBINED_MASK" --top-cells
     fi
+
+    # bootstrap loop
+    ITER=0
+    while [ "$ITER" -lt "$MAX_ITERS" ]; do
+        ITER=$((ITER + 1))
+        if [ "$ITER" -le "$GEOM_AFTER_ITER" ]; then
+            step "  iter $ITER: fit-pole"
+            FIT_OUT=$(fit-pole "$HHB" --pole-x "$PX" --pole-y "$PY" \
+                --frames "$FRAMES" --patch "$PATCH" --top "$TOP" \
+                --refine 2>&1)
+        else
+            step "  iter $ITER: fit-geometry"
+            FIT_OUT=$(fit-geometry "$HHB" --pole-x "$PX" --pole-y "$PY" \
+                --k1 "$K1" --k2 "$K2" \
+                --frames "$FRAMES_GEOM" --patch "$PATCH" --top "$TOP" \
+                2>&1)
+        fi
+        echo "$FIT_OUT" | tail -20 | tee -a "$LOG" >/dev/null
+
+        REC=$(echo "$FIT_OUT" | grep -E '^recommended ' | tail -1 || true)
+        NEW_PX=$(echo "$REC" | grep -oE -- '--pole-x [-0-9.]+' | awk '{print $2}' || true)
+        NEW_PY=$(echo "$REC" | grep -oE -- '--pole-y [-0-9.]+' | awk '{print $2}' || true)
+        NEW_K1=$(echo "$REC" | grep -oE -- '--k1 [-0-9.]+' | awk '{print $2}' || true)
+        NEW_K2=$(echo "$REC" | grep -oE -- '--k2 [-0-9.]+' | awk '{print $2}' || true)
+        if [ -z "$NEW_PX" ] || [ -z "$NEW_PY" ]; then
+            echo "  fitter failed; aborting hour $HH" | tee -a "$LOG"
+            break
+        fi
+        MOVE=$(python3 -c "import math; print(math.hypot($NEW_PX - $PX, $NEW_PY - $PY))")
+        printf '  pole moved %.2f px (%s,%s → %s,%s)\n' \
+            "$MOVE" "$PX" "$PY" "$NEW_PX" "$NEW_PY" | tee -a "$LOG"
+        PX="$NEW_PX"; PY="$NEW_PY"
+        [ -n "$NEW_K1" ] && K1="$NEW_K1"
+        [ -n "$NEW_K2" ] && K2="$NEW_K2"
+
+        OUT_DIR="$HHB/patches-iter$ITER"
+        run derot-patches "$HHB" --pole-x "$PX" --pole-y "$PY" \
+            --k1 "$K1" --k2 "$K2" \
+            --frames "$FRAMES" --patch "$PATCH" --top "$TOP" \
+            --out-dir "$OUT_DIR"
+        mv "$OUT_DIR/stack-derot.fits.fz" "$OUT_DIR/derot.fits.fz" 2>/dev/null || true
+
+        run find-candidates "$OUT_DIR" --grid 50 --top-cells \
+            --out "$HHB/candidates.csv"
+
+        if python3 -c "import sys; sys.exit(0 if $MOVE < $MIN_MOVE else 1)"; then
+            echo "  converged after $ITER iterations" | tee -a "$LOG"
+            break
+        fi
+    done
+
+    # Final all-frames stack for this hour
+    step "  hour $HH: final all-frames derot"
+    ALL=$(ls -1 "$HHB"/[0-9]*.fits.fz 2>/dev/null | wc -l)
+    FINAL_DIR="$HHB/final"
+    run derot-patches "$HHB" --pole-x "$PX" --pole-y "$PY" \
+        --k1 "$K1" --k2 "$K2" \
+        --frames "$ALL" --patch "$PATCH" --top "$TOP" \
+        --out-dir "$FINAL_DIR"
+    mv "$FINAL_DIR/stack-derot.fits.fz" "$FINAL_DIR/derot.fits.fz" 2>/dev/null || true
+
+    echo "$HH,$NOW,$MEAN,$PX,$PY,ok" >> "$SUMMARY"
 done
 
-printf '\n=== night complete: %s ===\n' "$NIGHT" | tee -a "$LOG"
+# ---------- Stage F: all-night derot ---------------------------------
+step "F. all-night derot"
+run derot-night "$NIGHT"
+
+step "night complete: $NIGHT"
 printf 'summary: %s\n' "$SUMMARY"
 column -s, -t "$SUMMARY"
