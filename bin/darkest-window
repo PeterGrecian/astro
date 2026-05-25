@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""darkest-window — find the darkest N-minute window across a night.
+
+Reads every <night>/<HH>/brightness.csv (skips binned <HH>b dirs)
+to get per-frame mean ADU with UTC timestamps. Slides a window of
+--minutes minutes across the concatenated stream, picks the
+contiguous window with the lowest mean of frame-means.
+
+Output is a single line:
+    <YYYY-MM-DDTHH:MM:SS> .. <YYYY-MM-DDTHH:MM:SS>  mean=X.XX  N frames
+
+Plus optional --window flag formatted ready for streak-sum / photon-sum
+in UTC HH:MM-HH:MM (handles midnight wrap).
+
+Usage:
+    darkest-window <night-dir>
+    darkest-window <night-dir> --minutes 5
+    darkest-window <night-dir> --top 5      # show top 5 darkest non-overlapping
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+
+def load_night_csv_rows(night_dir: Path):
+    """Yield (datetime_utc, mean, filename) across all non-binned HH CSVs."""
+    for csv_path in sorted(night_dir.rglob("brightness.csv")):
+        if csv_path.parent.name.endswith("b"):
+            continue
+        with open(csv_path) as f:
+            r = csv.DictReader(f)
+            for row in r:
+                try:
+                    t = datetime.fromisoformat(row["iso_utc"])
+                    if t.tzinfo is None:
+                        t = t.replace(tzinfo=timezone.utc)
+                    m = float(row["mean"])
+                except (KeyError, ValueError):
+                    continue
+                yield t, m, row["filename"]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("night", type=Path,
+                    help="night dir, e.g. /mnt/puppy/.../2026-05-24")
+    ap.add_argument("--minutes", type=float, default=1.0,
+                    help="window length in minutes (default 1.0)")
+    ap.add_argument("--top", type=int, default=1,
+                    help="report top-K darkest non-overlapping windows")
+    args = ap.parse_args()
+
+    rows = sorted(load_night_csv_rows(args.night), key=lambda r: r[0])
+    if not rows:
+        print(f"no brightness CSVs under {args.night}", file=sys.stderr)
+        return 1
+
+    window = timedelta(minutes=args.minutes)
+    print(f"loaded {len(rows)} frames "
+          f"from {rows[0][0].isoformat()} to {rows[-1][0].isoformat()}", file=sys.stderr)
+
+    # Slide window: for each starting frame i, accumulate until t[j] - t[i] > window.
+    # Score = mean of frame-means inside the window. Skip windows with fewer than 5 frames.
+    candidates = []
+    n = len(rows)
+    j = 0
+    win_sum = 0.0
+    for i in range(n):
+        while j < n and rows[j][0] - rows[i][0] < window:
+            win_sum += rows[j][1]
+            j += 1
+        count = j - i
+        if count >= 5:
+            mean = win_sum / count
+            candidates.append((mean, i, count))
+        # advance: remove i's contribution before next iter
+        win_sum -= rows[i][1]
+
+    if not candidates:
+        print("no windows had ≥5 frames", file=sys.stderr)
+        return 1
+
+    candidates.sort(key=lambda c: c[0])
+
+    picked = []
+    used = set()
+    for mean, i, count in candidates:
+        if any(abs(i - p) < count for p in used):
+            continue
+        picked.append((mean, i, count))
+        used.add(i)
+        if len(picked) >= args.top:
+            break
+
+    for k, (mean, i, count) in enumerate(picked, 1):
+        t0 = rows[i][0]
+        t1 = rows[i + count - 1][0]
+        win_str = f"{t0.strftime('%H:%M')}-{(t1 + timedelta(seconds=1)).strftime('%H:%M')}"
+        print(f"#{k}  {t0.isoformat()} .. {t1.isoformat()}  "
+              f"mean={mean:.3f} ADU  N={count} frames  "
+              f"--window {win_str}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
