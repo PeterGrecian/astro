@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""auto-sky-mask — derive a sky mask from daytime frames.
+
+Grabs N raw frames, takes their median (smooths out birds, planes,
+clouds drifting), thresholds at mean−k·sigma to find dark
+foreground regions (trees, house, lens-edge obstructions). Outputs:
+
+  ~/astro/calib/sky-mask-<camera>-<YYYY-MM-DD>.fits.fz   bitmap, 1=excl
+  ~/astro/calib/sky-mask-<camera>-<YYYY-MM-DD>.jpg       overlay
+
+Edge light-leak doesn't show in a daytime frame (it's lit by the
+same daylight as the sky); that contamination is caught later by
+the per-night hot-pixel mask. So this tool only handles the
+geometric obstructions.
+
+To use unattended (daily systemd timer at 12:00 local):
+  cover open                            # external; ensure lens unobstructed
+  auto-sky-mask --camera starcam        # grabs frames, writes mask
+
+Assumes:
+  - libcamera available (picamera2 installed)
+  - Camera not currently held by another process (stop the
+    capture daemon first)
+
+Usage:
+    auto-sky-mask                              # camera=starcam, today
+    auto-sky-mask --camera back --frames 20
+    auto-sky-mask --k 4.0                      # stricter threshold
+    auto-sky-mask --bin 2                      # 2x2 sum-bin to match
+                                                 the night pipeline
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def grab_frames(n: int, exposure_us: int, gain: float) -> np.ndarray:
+    """Return stack of n raw Bayer frames as uint16 (n, H, W)."""
+    from picamera2 import Picamera2
+    cam = Picamera2()
+    cfg = cam.create_still_configuration(
+        raw={"size": cam.sensor_resolution})
+    cam.configure(cfg)
+    cam.set_controls({
+        "ExposureTime": exposure_us,
+        "AnalogueGain": gain,
+        "AeEnable": False,
+        "AwbEnable": False,
+    })
+    cam.start()
+    time.sleep(1.0)  # let manual controls take effect
+    frames = []
+    for i in range(n):
+        req = cam.capture_request()
+        try:
+            arr = req.make_array("raw").view(np.uint16)
+            frames.append(arr.copy())
+        finally:
+            req.release()
+        print(f"  frame {i+1}/{n}  mean={float(arr.mean()):.0f}",
+              flush=True)
+    cam.stop()
+    cam.close()
+    return np.stack(frames, axis=0)
+
+
+def bin_2x2(img: np.ndarray) -> np.ndarray:
+    H, W = img.shape
+    H2, W2 = H - H % 2, W - W % 2
+    return (img[:H2, :W2].astype(np.uint32)
+            .reshape(H2 // 2, 2, W2 // 2, 2).sum(axis=(1, 3))
+            .clip(0, 65535).astype(np.uint16))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("--camera", default="starcam",
+                    help="camera id, used in output filename")
+    ap.add_argument("--frames", type=int, default=10,
+                    help="number of daytime frames to median (default 10)")
+    ap.add_argument("--exposure-us", type=int, default=10_000,
+                    help="exposure time per frame in µs (default 10ms)")
+    ap.add_argument("--gain", type=float, default=1.0)
+    ap.add_argument("--k", type=float, default=3.0,
+                    help="threshold = mean - k*sigma (lower k = stricter)")
+    ap.add_argument("--bin", type=int, default=2,
+                    help="2x2 sum-bin before thresholding (matches night pipeline)")
+    ap.add_argument("--out-dir", type=Path,
+                    default=Path.home() / "astro" / "calib")
+    args = ap.parse_args()
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    out_path = args.out_dir / f"sky-mask-{args.camera}-{today}.fits.fz"
+    jpg_path = out_path.with_suffix("").with_suffix(".jpg")
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"grabbing {args.frames} frames @ {args.exposure_us}µs gain {args.gain}",
+          flush=True)
+    stack = grab_frames(args.frames, args.exposure_us, args.gain)
+    print(f"stack {stack.shape} dtype={stack.dtype}", flush=True)
+
+    median = np.median(stack, axis=0).astype(np.uint16)
+    print(f"median: mean={float(median.mean()):.0f} "
+          f"std={float(median.std()):.0f} "
+          f"min={int(median.min())} max={int(median.max())}")
+
+    if args.bin >= 2:
+        median = bin_2x2(median)
+        print(f"after 2x2 bin: shape={median.shape} "
+              f"mean={float(median.mean()):.0f} "
+              f"std={float(median.std()):.0f}")
+
+    # Foreground = pixels well below sky mean.
+    sky_mean = float(median.mean())
+    sky_std = float(median.std())
+    threshold = sky_mean - args.k * sky_std
+    raw_mask = (median.astype(np.float32) < threshold).astype(np.uint8)
+    print(f"threshold: mean({sky_mean:.0f}) - {args.k}*std({sky_std:.0f}) "
+          f"= {threshold:.0f}  →  {int(raw_mask.sum())} pixels "
+          f"({100 * raw_mask.sum() / raw_mask.size:.2f}%)")
+
+    # Keep contiguous regions >= 50 px (drops single-pixel noise).
+    n_lab, labels, stats, _ = cv2.connectedComponentsWithStats(raw_mask, 8)
+    mask = np.zeros_like(raw_mask)
+    kept = 0
+    for i in range(1, n_lab):
+        if int(stats[i, cv2.CC_STAT_AREA]) >= 50:
+            mask[labels == i] = 1
+            kept += 1
+    print(f"kept {kept} regions ≥50 px → {int(mask.sum())} mask pixels "
+          f"({100 * mask.sum() / mask.size:.2f}%)")
+
+    # Write FITS
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=mask, compression_type="RICE_1")
+    comp.header["CAMERA"] = args.camera
+    comp.header["BIN"] = (args.bin, "binning factor")
+    comp.header["NEXCL"] = (int(mask.sum()), "excluded pixel count")
+    comp.header["KTHRESH"] = (args.k, "threshold = mean - K*std")
+    comp.header["NFRAMES"] = (args.frames, "frames median'd")
+    fits.HDUList([primary, comp]).writeto(out_path, overwrite=True)
+    print(f"wrote {out_path}")
+
+    # Overlay jpg
+    bg = median.astype(np.float32)
+    lo, hi = float(np.percentile(bg, 5)), float(np.percentile(bg, 99))
+    bg_u8 = np.clip((bg - lo) / max(hi - lo, 1.0), 0, 1) * 200
+    ov = np.stack([bg_u8.astype(np.uint8)] * 3, axis=-1)
+    ov[mask == 1] = [255, 0, 0]
+    Image.fromarray(ov).save(jpg_path, quality=92)
+    print(f"wrote {jpg_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
