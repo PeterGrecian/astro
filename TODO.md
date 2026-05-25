@@ -74,6 +74,26 @@ that — ~33 ms. At sidereal rate, sub-pixel even at corners of our
 binned image. Skip the per-row correction; it's below INTER_LINEAR
 precision.
 
+## Auto-sky-mask wiring (deferred until 2nd camera + ethernet arrive)
+
+`bin/auto-sky-mask` exists but isn't on a timer. Constraints to
+solve before wiring:
+
+- **Cover must be OPEN** while the mask frames are grabbed.
+  Cover-close runs at 07:00; auto-sky-mask wants ~12:00 with the
+  sun overhead, so we need:
+    1. cover-open-for-mask (~11:55)
+    2. starcam-capture stop (so we can grab the camera)
+    3. auto-sky-mask --camera starcam
+    4. cover-close (cover back to safe)
+    5. starcam-capture start
+  Bundle into a single oneshot wrapper `auto-sky-mask-cycle.sh`
+  on starcam, fire from a noon timer.
+- Re-painting required when camera moves; the mask filename has
+  the date so the pipeline-night auto-pick already handles this.
+- Per-camera invocation when 2nd camera lands: timer needs
+  --camera <name> per host.
+
 ## Seasonal note (2026-05-25)
 
 - 4 weeks to summer solstice (2026-06-21).
