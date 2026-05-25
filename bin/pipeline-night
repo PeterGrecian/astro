@@ -46,6 +46,8 @@ MIN_MOVE=1.0
 
 usage() { sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; }
 
+ORIG_ARGS="$*"
+
 NIGHT=""
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -68,7 +70,15 @@ NIGHT_DATE=$(basename "$NIGHT")
 
 LOG="$NIGHT/pipeline.log"
 SUMMARY="$NIGHT/pipeline-poles.csv"
-: > "$LOG"
+# Append (don't truncate) — multiple runs against the same night
+# leave a single audit trail. Mark each new run with a banner.
+{
+    echo ""
+    echo "################################################################"
+    echo "# pipeline-night run starting $(date -u +%FT%TZ)"
+    echo "# args: $0 $ORIG_ARGS"
+    echo "################################################################"
+} >> "$LOG"
 echo "hh,started_utc,mean,pole_x,pole_y,status" > "$SUMMARY"
 
 # Wall-clock at start, for prefix-elapsed.
