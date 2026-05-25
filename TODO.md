@@ -89,6 +89,27 @@ precision.
 - Maybe expose `--sky-threshold` more prominently or vary it
   seasonally if we want to keep pulling whatever signal we can.
 
+## Neptune in November (target)
+
+- Neptune opposition: late Sep / early Oct 2026; observable through
+  Nov with peak brightness ~mag +7.8 (point source for our pixel
+  scale ~70 arcsec/binned-px).
+- Estimated SNR budget: ~28 hours of derotated stacking (~4
+  good nights × ~7 dark hours) gets us 5–6× our current single-
+  hour SNR — enough to pull mag +7.8 from sky background.
+- Requirements:
+  1. Per-night `final/derot.fits.fz` must be sharp (good pole +
+     distortion fit). Residual smear squared compounds across
+     nights.
+  2. Multi-night derot stacker (`derot-week`-style) that derotates
+     using `omega × (epoch_ms - epoch_0)` across nights.
+  3. Planet-aware motion model: Neptune drifts ~1 arcmin/day
+     against the star background. After sidereal derotation the
+     planet smears. Either compute its ephemeris (real
+     ra/dec known from JPL Horizons) and apply per-night
+     position correction, or detect the moving spot directly.
+  4. Camera survives the winter (warm + dry; cover working).
+
 ## Multi-night stacking (deferred — let the per-night pipeline mature first)
 
 - [ ] `derot-week` — extension of `derot-night` that walks multiple
