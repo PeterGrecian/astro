@@ -71,9 +71,22 @@ SUMMARY="$NIGHT/pipeline-poles.csv"
 : > "$LOG"
 echo "hh,started_utc,mean,pole_x,pole_y,status" > "$SUMMARY"
 
-step() { printf '\n=== %s ===\n' "$*" | tee -a "$LOG"; }
+# Wall-clock at start, for prefix-elapsed.
+T0=$(date +%s)
 
-run() { "$@" 2>&1 | tee -a "$LOG"; }
+# Prefix every log line with HH:MM:SS elapsed since pipeline start.
+# stdbuf -oL keeps awk line-buffered so tail -f works in real time.
+_log_filter() {
+    stdbuf -oL awk -v t0="$T0" '
+        { t = systime() - t0
+          h = int(t/3600); m = int((t%3600)/60); s = t%60
+          printf "[%02d:%02d:%02d] %s\n", h, m, s, $0
+          fflush() }'
+}
+
+step() { printf '\n=== %s ===\n' "$*" | _log_filter | tee -a "$LOG"; }
+
+run() { "$@" 2>&1 | _log_filter | tee -a "$LOG"; }
 
 # ---------- Stage A: per-hour prep -----------------------------------
 step "A. per-hour prep"
