@@ -74,6 +74,21 @@ that — ~33 ms. At sidereal rate, sub-pixel even at corners of our
 binned image. Skip the per-row correction; it's below INTER_LINEAR
 precision.
 
+## Seasonal note (2026-05-25)
+
+- 4 weeks to summer solstice (2026-06-21).
+- At 51.4°N, **astronomical twilight doesn't end** around the
+  solstice — the sun stays within 18° of the horizon all night.
+- Effect on this pipeline:
+  - Mean per-hour sky brightness rises through June.
+  - sky-threshold gate (default 100 ADU) will skip more hours
+    each night, eventually skipping the whole night by mid-June.
+  - Cumulative stars detected per night will fall, then recover
+    after solstice.
+- Don't read "we're losing stars" as a regression — it's the sun.
+- Maybe expose `--sky-threshold` more prominently or vary it
+  seasonally if we want to keep pulling whatever signal we can.
+
 ## Multi-night stacking (deferred — let the per-night pipeline mature first)
 
 - [ ] `derot-week` — extension of `derot-night` that walks multiple
