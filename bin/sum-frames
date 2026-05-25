@@ -81,10 +81,11 @@ def main() -> int:
     fits.HDUList([primary, comp]).writeto(out_path, overwrite=True)
     print(f"wrote {out_path}")
 
-    # Companion jpg for quick eyeballing (p50 → p99.5 stretch).
+    # Companion jpg for quick eyeballing. p50 → p99.9 (top 0.1% saturate)
+    # so dim hours don't look "burnt" just because hot pixels stand out.
     jpg_path = out_path.with_suffix("").with_suffix(".jpg")
     lo = float(np.percentile(acc, 50))
-    hi = float(np.percentile(acc, 99.5))
+    hi = float(np.percentile(acc, 99.9))
     if hi <= lo:
         hi = lo + 1.0
     u8 = (np.clip((acc - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
