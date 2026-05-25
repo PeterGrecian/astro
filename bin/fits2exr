@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""fits2exr — convert a .fits.fz frame to .exr for editing in GIMP.
+
+Writes a single-channel float EXR matching the input shape. ADU
+values pass through verbatim (no stretch, no normalisation).
+
+Usage:
+    fits2exr <input.fits.fz> [output.exr]
+    fits2exr <input.fits.fz>             # → ~/tmp/<name>.exr
+
+Implementation: FITS → uint16 TIFF via PIL → EXR via oiiotool. The
+intermediate TIFF lands next to the output then is removed.
+"""
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def load_2d(path: Path) -> np.ndarray:
+    with fits.open(path) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("src", type=Path, help="input .fits or .fits.fz")
+    ap.add_argument("dst", type=Path, nargs="?", default=None,
+                    help="output .exr (default: ~/tmp/<stem>.exr)")
+    args = ap.parse_args()
+
+    if shutil.which("oiiotool") is None:
+        print("oiiotool not on PATH; install OpenImageIO", file=sys.stderr)
+        return 2
+
+    img = load_2d(args.src)
+    if img.dtype != np.uint16:
+        img = img.astype(np.uint16)
+    print(f"loaded {img.shape} min={int(img.min())} max={int(img.max())}")
+
+    dst = args.dst
+    if dst is None:
+        out_dir = Path.home() / "tmp"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = args.src.name.split(".", 1)[0]
+        dst = out_dir / f"{stem}.exr"
+
+    tmp_tif = dst.with_suffix(".tif")
+    Image.fromarray(img).save(tmp_tif)
+    try:
+        subprocess.run(["oiiotool", str(tmp_tif), "-o", str(dst)],
+                       check=True)
+    finally:
+        try:
+            tmp_tif.unlink()
+        except FileNotFoundError:
+            pass
+    print(f"wrote {dst}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
