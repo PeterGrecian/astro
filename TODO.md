@@ -3,31 +3,36 @@
 Live work list. Move items to DECISIONS.md once they crystallise
 into a load-bearing choice; delete done items.
 
-## Foundations
+rotating disk as lens cover toy motor.  start working on enclosure 2
 
-- [x] Decide tooling — FITS + astrometry.net + Siril + oiiotool (DECISIONS.md, 2026-05-22).
-- [x] Decide repo location — sibling of photography/, not nested.
-- [x] Skeleton: README, CLAUDE.md, DECISIONS.md, bin/, astro/, notes/.
-- [ ] `requirements.txt` finalised once we have the first utility working.
-- [ ] `notes/tooling.md` — install commands + cheat-sheet for solve-field, Siril, DS9, ASIFITSView, oiiotool, djv.
+storage comments:
+fitz 5G per hour 30G per night, bin2 1.4G/10G 6 or 7 hours currently  total 40G.  bin2 is derived.
+100 avalible - 100 on muppet too  100 on pip.  the old desktop
+fitz thinning 3s -> 6s
+delete fitz for every other night - ones which are "done".  I have a week to sort it all.  2 weeks at 6s and so on.
+
+## Foundations
+aliases    cdd - chdir to day dir - part of astro/activate.  splay is broken by latter.  maybe $CDD=that dir
+
+dashboard - camera state, brightness trend, storage, stars found
+
+brightness.csv generated for wrong hour on hourly trigger - revise whole real time analysis pipeline
+bin-frames should be part of the same pipeline .  step by step automate it all until its all stars
+plot-brightness usage message inacurate.  $ plot-brigtness * in the nights dir works
+oiiotool looks interesting.  siril is hidious.  splay is capable of doing it better.
+- [ ] `notes/tooling.md` — install commands + cheat-sheet for solve-field, oiiotool, djv. (Siril dropped — splay is better.)
 - [ ] `notes/pi4-feasibility.md` — can a £35 Pi4 do FITS + plate solve + derot? RAM/CPU budget. Estimate vs £45 model.
-- [ ] `notes/disk-budget.md` — 80 GB/night raw → ~35 GB FITS → ~1 GB/night accumulators. Confirm with real numbers once `to-fits` runs.
 
 ## Utilities (bin/, no astro- prefix)
 
-- [ ] `night-dir` — translate timestamp → noon-rollover night date. Pure stdlib, no venv needed; keep it standalone bash/python.
-- [ ] `night-stats` — produce brightness CSV for a night (mean / median / p95 / max / sat% per frame). Replaces the ad-hoc `/tmp/scan_brightness.py`.
 - [ ] `gc-status` — human readout of `file-garbage-collector` on puppy: free space, target, what would be next to go.
-- [ ] `to-fits` — `.npy` → `.fits.fz` with proper header (epoch_ms, exposure, gain, sensor, Bayer pattern). Bottleneck: unlocks all downstream tools.
-- [ ] `platesolve` — wraps `solve-field` with our defaults; writes SIP into header.
-- [ ] `derotate` — WCS-aware stack: read each frame's WCS, rotate to a common reference, sum.
+- [ ] `platesolve` — wraps `solve-field` with our defaults; writes SIP into header. (Decision pending — Peter prefers parametric fit over catalog; revisit if we want magnitudes.)
 
 ## Pipeline
 
-- [ ] Duff-pixel mask (per-camera, per-gain) — median of ≥100 dark frames. Store in repo? Or as a FITS sidecar per camera?
+- [ ] Hot-pixel mask v2 from derot stack — real stars are points, hot pixels trace arcs. Far more selective than thresholding the raw sum (which currently misclassifies bright stars).
 - [ ] Dark master per (gain, exposure) — capture procedure documented; subtraction step in `to-fits` or a separate `subtract-dark`?
-- [ ] Cloud / sky-quality flag per frame — `notes/sky-quality.md`. Std-dev signal, mean/median ratio, centre-vs-edge.
-- [ ] Coordination with `Berrylands/gardencam/starcam-daemon` — confirm input contract (filename, Bayer pattern, mtime semantics). Document in CLAUDE.md.
+- [ ] Cloud / sky-quality flag per frame — `notes/sky-quality.md`. Std-dev signal, mean/median ratio, centre-vs-edge. (Partial: scan-brightness mean already used for sky-threshold gating in pipeline-night.)
 - [ ] Compress retention plan — keep raws for N days, FITS for M, accumulators forever.
 
 ## Aspirational (cameras)
