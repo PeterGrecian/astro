@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Run scan-brightness on the HH dir that just finished.
 #
-# Night rolls over at noon Europe/London (per astro/CLAUDE.md). So at
-# 12:01–23:01 the HH dir lives under today's night; at 00:01–11:01 it
-# lives under yesterday's. Compute one hour ago in London time and
-# slot it into the right night dir.
+# Path layout: <root>/<night>/<HH>/ where
+#   <night> = YYYY-MM-DD in Europe/London with NOON ROLLOVER
+#             (the date when the night started; the morning hours
+#             after midnight still belong to the previous date)
+#   <HH>    = UTC hour 00..23 (the daemon names dirs in UTC)
+#
+# So "the hour that just finished" = UTC hour of (now - 1h), and
+# the night-dir for it is the Europe/London date of that same instant,
+# rolled back one day if local hour < 12.
 #
 # Wired in by services/scan-brightness.{service,timer}; safe to run
 # by hand any time (scan-brightness itself is idempotent).
@@ -12,12 +17,14 @@ set -euo pipefail
 
 ROOT="${STARCAM_ROOT:-$HOME/starcam-frames/night}"
 
-prev_iso=$(TZ=Europe/London date -d '1 hour ago' +%Y-%m-%dT%H)
-night=${prev_iso%T*}   # YYYY-MM-DD
-hh=${prev_iso#*T}      # HH
+# UTC hour of the just-finished hour (HH dir name).
+hh=$(TZ=UTC date -d '1 hour ago' +%H)
 
-# Before noon the hour belongs to yesterday's night dir.
-if [ "$hh" -lt 12 ]; then
+# London date of that same instant, with noon-rollover applied.
+prev_london=$(TZ=Europe/London date -d '1 hour ago' '+%Y-%m-%d %H')
+night=$(echo "$prev_london" | awk '{print $1}')
+local_hour=$(echo "$prev_london" | awk '{print $2}')
+if [ "$local_hour" -lt 12 ]; then
     night=$(TZ=Europe/London date -d "$night - 1 day" +%Y-%m-%d)
 fi
 
