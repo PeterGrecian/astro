@@ -60,84 +60,90 @@ def top_cells_with_peak(csv_path: Path, n: int):
     return [(cx, cy, *first_peak[(cx, cy)]) for (cx, cy), _ in ranked]
 
 
-def derot_with_distortion(img: np.ndarray, pole: tuple[float, float],
-                          angle_deg: float, k1: float, k2: float,
-                          maps_cache: dict) -> np.ndarray:
-    """Derotate `img` by `angle_deg` about `pole` in undistorted space.
+def build_patch_grid(patch_centres: list[tuple[int, int]],
+                     patch: int,
+                     w: int, h: int) -> np.ndarray:
+    """Return (N, patch, patch, 2) array of (x, y) output-pixel coords for
+    each patch. N patches, each holds the absolute (x, y) of its pixels
+    in the *output* (derotated) image."""
+    half = patch // 2
+    out = np.zeros((len(patch_centres), patch, patch, 2), dtype=np.float32)
+    for i, (px, py) in enumerate(patch_centres):
+        x0 = px - half
+        y0 = py - half
+        ys_g, xs_g = np.indices((patch, patch), dtype=np.float32)
+        out[i, :, :, 0] = xs_g + x0
+        out[i, :, :, 1] = ys_g + y0
+    return out
 
-    For each output pixel (xo, yo):
-        undistort to (xu, yu)
-        rotate about pole by angle_deg → (xur, yur)
-        re-distort → input sample point (xs, ys)
-    Then sample input at (xs, ys).
 
-    The undistort/redistort maps are constant per (k1, k2); cached.
+def patch_sample_maps(grid: np.ndarray, pole: tuple[float, float],
+                      angle_deg: float, k1: float, k2: float,
+                      w: int, h: int
+                      ) -> tuple[np.ndarray, np.ndarray]:
+    """For an (N, patch, patch, 2) grid of output-pixel coords, compute
+    the corresponding source-frame sample coords given pole, angle, and
+    distortion. Returns (xs, ys) each shaped (N*patch, patch) suitable
+    for cv2.remap.
     """
-    h, w = img.shape
     cx, cy = w / 2.0, h / 2.0
     R = np.hypot(cx, cy)
 
-    key = (h, w, float(k1), float(k2))
-    if key not in maps_cache:
-        ys_g, xs_g = np.indices((h, w), dtype=np.float32)
-        dx = xs_g - cx
-        dy = ys_g - cy
-        rn = np.hypot(dx, dy) / R
-        s = 1.0 + k1 * rn**2 + k2 * rn**4
-        xu = cx + dx * s
-        yu = cy + dy * s
-        maps_cache[key] = (xu, yu)
-    xu, yu = maps_cache[key]
+    # Output pixel → undistorted output: same forward map.
+    dx = grid[..., 0] - cx
+    dy = grid[..., 1] - cy
+    rn = np.hypot(dx, dy) / R
+    s = 1.0 + k1 * rn**2 + k2 * rn**4
+    xu = cx + dx * s
+    yu = cy + dy * s
 
     # Rotate undistorted coords about pole by angle_deg (CCW image).
     rad = np.deg2rad(angle_deg)
-    c, s = np.cos(rad), np.sin(rad)
+    c, ss = np.cos(rad), np.sin(rad)
     dxp = xu - pole[0]
     dyp = yu - pole[1]
-    xur = pole[0] + c * dxp - s * dyp
-    yur = pole[1] + s * dxp + c * dyp
+    xur = pole[0] + c * dxp - ss * dyp
+    yur = pole[1] + ss * dxp + c * dyp
 
-    # Re-distort: invert the radial scaling. Use the same forward map by
-    # Newton iteration on r_u → r_d, but for small distortions a single
-    # step usually suffices. For our case (k tiny), we just apply the
-    # forward map a second time: it's an approximation but works while
-    # k stays small; better to fit |k| < 0.1 anyway.
+    # Re-distort (same forward map, applied to inverse direction).
     dxr = xur - cx
     dyr = yur - cy
     rnr = np.hypot(dxr, dyr) / R
     sr = 1.0 + k1 * rnr**2 + k2 * rnr**4
-    # Invert: if forward is xu = cx + dx * s(dx), then to undo we want
-    # dx = (xu - cx) / s(dx). Approximate by dividing by s(dxr).
     inv = 1.0 / sr
-    xs = cx + dxr * inv
-    ys = cy + dyr * inv
+    xs_arr = cx + dxr * inv
+    ys_arr = cy + dyr * inv
 
-    return cv2.remap(img.astype(np.float32),
-                     xs.astype(np.float32), ys.astype(np.float32),
-                     interpolation=cv2.INTER_LINEAR,
-                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    # Stack patches vertically so a single remap call samples all of them.
+    N, P, _ = xs_arr.shape
+    return (xs_arr.reshape(N * P, P).astype(np.float32),
+            ys_arr.reshape(N * P, P).astype(np.float32))
 
 
 def score_geom(params, imgs, cells, patch, frame_indices, omega):
+    """Per-patch only. For each frame, sample just the N patches' worth
+    of pixels (N*patch² total) rather than the whole frame. Then sum
+    across frames, score peak/mean per patch."""
     pole_x, pole_y, k1, k2 = params
-    # Cheap guard against blow-ups.
     if abs(k1) > 0.5 or abs(k2) > 0.5:
         return 1e9
     h, w = imgs[0].shape
-    acc = np.zeros((h, w), dtype=np.float32)
-    maps_cache: dict = {}
+    half = patch // 2
+    patch_centres = [(px, py) for (_, _, px, py) in cells]
+    grid = build_patch_grid(patch_centres, patch, w, h)
+    N = len(patch_centres)
+    acc = np.zeros((N * patch, patch), dtype=np.float32)
     for i, img in zip(frame_indices, imgs):
         ang = float(np.degrees(i * omega))
-        acc += derot_with_distortion(img, (pole_x, pole_y), ang,
-                                     k1, k2, maps_cache)
-    half = patch // 2
+        xs_map, ys_map = patch_sample_maps(grid, (pole_x, pole_y),
+                                           ang, k1, k2, w, h)
+        sampled = cv2.remap(img, xs_map, ys_map,
+                            interpolation=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        acc += sampled
     score = 0.0
-    for cx, cy, px, py in cells:
-        x0 = max(0, px - half); y0 = max(0, py - half)
-        x1 = min(w, x0 + patch); y1 = min(h, y0 + patch)
-        p = acc[y0:y1, x0:x1]
-        if p.size == 0:
-            continue
+    for n in range(N):
+        p = acc[n * patch:(n + 1) * patch, :]
         m = float(p.mean())
         if m <= 0:
             continue
