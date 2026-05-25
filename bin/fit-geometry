@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""fit-geometry — joint fit of pole + omega + radial distortion (k1, k2).
+"""fit-geometry — joint fit of pole + radial distortion (k1, k2).
 
-Same sharpness objective as fit-pole, but with five free parameters:
-    pole_x, pole_y, omega, k1, k2
+Omega (sidereal rotation rate × frame interval) is known to 1 part
+in 10^6 from physics (sidereal day, 3-s exposure cadence), so we
+PIN it and only fit 4 free parameters:
+    pole_x, pole_y, k1, k2
 
 Distortion model: each pixel (x, y) is mapped to undistorted (x', y')
 relative to the image centre (cx, cy) via:
@@ -15,9 +17,9 @@ The derotation is applied in undistorted space. Output pixels are
 sampled from the input frame at the distorted positions corresponding
 to the rotated undistorted coordinates.
 
-Optimisation: Nelder-Mead in 5D from --pole-x/--pole-y seed,
-omega=-0.000219, k1=0, k2=0 (no distortion to start). Sub-optimal
-in noisy regions but converges in tens of evaluations.
+Optimisation: Nelder-Mead in 4D from --pole-x/--pole-y seed,
+k1=0, k2=0 (no distortion to start). Converges in tens of
+evaluations.
 
 Usage:
     fit-geometry <dir> --pole-x 905.5 --pole-y 50.4
@@ -116,8 +118,8 @@ def derot_with_distortion(img: np.ndarray, pole: tuple[float, float],
                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
-def score_geom(params, imgs, cells, patch, frame_indices):
-    pole_x, pole_y, omega, k1, k2 = params
+def score_geom(params, imgs, cells, patch, frame_indices, omega):
+    pole_x, pole_y, k1, k2 = params
     # Cheap guard against blow-ups.
     if abs(k1) > 0.5 or abs(k2) > 0.5:
         return 1e9
@@ -174,31 +176,31 @@ def main() -> int:
     imgs = [load_frame(fn).astype(np.float32) for fn in fns]
     frame_indices = list(range(len(fns)))
 
-    x0 = [args.pole_x, args.pole_y, args.omega, args.k1, args.k2]
-    s0 = -score_geom(x0, imgs, cells, args.patch, frame_indices)
+    x0 = [args.pole_x, args.pole_y, args.k1, args.k2]
+    s0 = -score_geom(x0, imgs, cells, args.patch, frame_indices, args.omega)
     print(f"seed: pole=({x0[0]:.1f},{x0[1]:.1f}) "
-          f"omega={x0[2]:.6f} k1={x0[3]:.4f} k2={x0[4]:.4f} → score={s0:.2f}")
+          f"k1={x0[2]:.4f} k2={x0[3]:.4f} (omega pinned at {args.omega:.7f}) "
+          f"→ score={s0:.2f}")
 
     # Nelder-Mead with parameter scales (initial simplex size).
     res = minimize(score_geom, x0=x0, method="Nelder-Mead",
-                   args=(imgs, cells, args.patch, frame_indices),
+                   args=(imgs, cells, args.patch, frame_indices, args.omega),
                    options={"xatol": 1e-4, "fatol": 0.01, "maxiter": 400,
                             "disp": True,
                             "initial_simplex": np.array([
                                 x0,
-                                [x0[0]+10, x0[1],    x0[2],          x0[3],     x0[4]],
-                                [x0[0],    x0[1]+10, x0[2],          x0[3],     x0[4]],
-                                [x0[0],    x0[1],    x0[2]+1e-5,     x0[3],     x0[4]],
-                                [x0[0],    x0[1],    x0[2],          x0[3]+0.02,x0[4]],
-                                [x0[0],    x0[1],    x0[2],          x0[3],     x0[4]+0.02],
+                                [x0[0]+10, x0[1],    x0[2],     x0[3]],
+                                [x0[0],    x0[1]+10, x0[2],     x0[3]],
+                                [x0[0],    x0[1],    x0[2]+0.02,x0[3]],
+                                [x0[0],    x0[1],    x0[2],     x0[3]+0.02],
                             ])})
     final = res.x
     score = -float(res.fun)
     print(f"\nfit:  pole=({final[0]:.2f},{final[1]:.2f}) "
-          f"omega={final[2]:.7f} k1={final[3]:.5f} k2={final[4]:.5f} "
+          f"k1={final[2]:.5f} k2={final[3]:.5f} "
           f"→ score={score:.2f}")
     print(f"\nrecommended --pole-x {final[0]:.2f} --pole-y {final[1]:.2f} "
-          f"--omega {final[2]:.7f} --k1 {final[3]:.5f} --k2 {final[4]:.5f}")
+          f"--omega {args.omega:.7f} --k1 {final[2]:.5f} --k2 {final[3]:.5f}")
     return 0
 
 
