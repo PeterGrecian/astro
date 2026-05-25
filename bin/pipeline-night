@@ -7,9 +7,15 @@
 #   C. Refresh plot-brightness for the whole night-tree.
 #   D. Pick sky mask: most recent ~/astro/calib/sky-mask-starcam-*.fits.fz
 #      with date ≤ this night's date (logs and continues if none).
-#   E. Per-hour fit + derot bootstrap loop (fit-pole → fit-geometry →
-#      derot-patches → find-candidates), darkest hour first, pole
-#      carried forward. Result: <HHb>/final/derot.fits.fz per hour.
+#   E. Per-hour PATCH-BASED bootstrap loop (the key speedup: every
+#      fit evaluates peak/mean on top-N candidate patches, not the
+#      whole image, so Nelder-Mead converges in minutes not days):
+#        iter 1-2: fit-pole       (3D: pole_x, pole_y, omega)
+#        iter 3+:  fit-geometry   (5D: + k1, k2 radial distortion)
+#        every iter: derot-patches → find-candidates on the derot
+#                    stack to seed the next iter
+#      Darkest hour first; converged pole carried forward as seed
+#      for the next-darkest hour. Result: <HHb>/final/derot.fits.fz.
 #   F. derot-night → <night>/all-night-derot.fits.fz
 #
 # Writes <night>/pipeline.log + <night>/pipeline-poles.csv.
@@ -152,7 +158,7 @@ else
 fi
 
 # ---------- Stage E: per-hour fit + derot bootstrap ------------------
-step "E. per-hour fit + derot (darkest hour first)"
+step "E. per-hour patch-based bootstrap: fit-pole then fit-geometry, derot, repeat (darkest hour first)"
 
 # Order hours by mean brightness (darkest first) using the raw HH CSVs.
 declare -A HH_MEAN
