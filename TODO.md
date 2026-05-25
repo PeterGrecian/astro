@@ -89,6 +89,31 @@ precision.
 - Maybe expose `--sky-threshold` more prominently or vary it
   seasonally if we want to keep pulling whatever signal we can.
 
+## Wandering-star (planet) discriminator — Tombaugh blink
+
+After two nights have a sharp per-night `final/derot.fits.fz` at
+identical pole + distortion, **subtract** them. Stars cancel
+(same pixel). Planets, asteroids, comets leave a `+star` at
+tonight's pixel and a `-star` at last night's pixel: classic
+blink-comparator signature.
+
+Implementation sketch:
+- `derot-diff <night-A> <night-B>` → writes
+  `<B>/diff-vs-<A>.fits.fz` (signed int32 = B - A).
+- Optional `--abs` for absolute-value variant where moving
+  objects appear as paired-bright-blob signatures.
+- `find-candidates` on the abs-diff stack with high threshold:
+  the only pixels above sky-noise floor are planet
+  positions (or hot pixels we didn't catch, or cosmic rays).
+- For Neptune/Uranus specifically: compute predicted nightly
+  motion from JPL Horizons ephemeris, derotate-stack the diff
+  along that motion vector across many nights — moving-object
+  SNR √N improvement, all sky cancels.
+
+Uranus (mag +5.6, Nov opposition 2026-11-21): per-night derot
+should already show it; diff-vs-yesterday should make it
+unmistakable. Neptune (mag +7.8) needs both stacking AND diff.
+
 ## Neptune in November (target)
 
 - Neptune opposition: late Sep / early Oct 2026; observable through
