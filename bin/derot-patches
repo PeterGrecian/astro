@@ -203,6 +203,8 @@ def main() -> int:
     comp.header["POLEX"] = (args.pole_x, "binned pole x")
     comp.header["POLEY"] = (args.pole_y, "binned pole y")
     comp.header["OMEGA"] = (args.omega, "radians per frame")
+    comp.header["K1"] = (args.k1, "radial distortion k1")
+    comp.header["K2"] = (args.k2, "radial distortion k2")
     fits.HDUList([primary, comp]).writeto(stack_path, overwrite=True)
     print(f"  saved full derot stack → {stack_path}")
 

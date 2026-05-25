@@ -25,6 +25,12 @@
 #   pipeline-night <night-dir> --pole-x 910 --pole-y 40
 #   pipeline-night <night-dir> --sky-threshold 80 --max-iters 6 --force
 #   pipeline-night <night-dir> --no-sky-mask    # skip sky mask this run
+#   pipeline-night <night-dir> --restart        # ignore prior iter state
+#
+# Resume is the default: re-running the same command picks up where it
+# left off. patches-iterN/derot.fits.fz headers carry pole/k1/k2 so
+# subsequent iterations seed from the last converged state. If
+# <HHb>/final/derot.fits.fz exists the hour is skipped entirely.
 #
 # Per-night opt-out:
 #   touch <night>/.no-sky-mask         # persistent: no sky mask for this night
@@ -36,9 +42,11 @@ POLE_Y=40
 SKY_THRESH=100
 MAX_ITERS=10
 FORCE=0
+RESTART=0
 NO_SKY_MASK=0
+HEARTBEAT_S=30
 FRAMES=100
-FRAMES_GEOM=300
+FRAMES_GEOM=100   # was 300; OOM-killed puppy at 7.5GB RAM
 TOP=10
 PATCH=50
 GEOM_AFTER_ITER=2
@@ -56,6 +64,7 @@ while [ $# -gt 0 ]; do
         --sky-threshold) SKY_THRESH="$2"; shift 2;;
         --max-iters) MAX_ITERS="$2"; shift 2;;
         --force) FORCE=1; shift;;
+        --restart) RESTART=1; shift;;
         --no-sky-mask) NO_SKY_MASK=1; shift;;
         -h|--help) usage; exit 0;;
         *) if [ -z "$NIGHT" ]; then NIGHT="$1"; shift
@@ -97,6 +106,26 @@ _log_filter() {
 step() { printf '\n=== %s ===\n' "$*" | _log_filter | tee -a "$LOG"; }
 
 run() { "$@" 2>&1 | _log_filter | tee -a "$LOG"; }
+
+# Heartbeat: every HEARTBEAT_S seconds, dump the live worker processes
+# (PID, CPU%, MEM_MB, command) so we know it's not dead. Background it
+# and arrange a kill trap.
+PARENT_PID=$$
+HEARTBEAT_PID=""
+heartbeat_loop() {
+    while sleep "$HEARTBEAT_S"; do
+        # All descendants of pipeline-night, filtered to relevant tools.
+        ps -eo pid,pcpu,rss,cmd --sort=-pcpu --no-headers 2>/dev/null \
+            | awk -v p="$PARENT_PID" '
+                /pipeline-(night|hour)|fit-pole|fit-geometry|derot-(patches|night)|find-candidates|bin-frames|sum-frames|hot-pixel-mask|scan-brightness/ \
+                && !/awk|grep/ \
+                { printf "heartbeat: PID=%s CPU=%s%% RES=%dMB  %s\n", $1, $2, $3/1024, substr($0, index($0,$4)) }' \
+            | _log_filter | tee -a "$LOG" >/dev/null
+    done
+}
+heartbeat_loop &
+HEARTBEAT_PID=$!
+trap '[ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null' EXIT
 
 # ---------- Stage A: per-hour prep -----------------------------------
 step "A. per-hour prep"
@@ -241,7 +270,56 @@ for HH in "${ORDER[@]}"; do
         continue
     fi
 
-    step "hour $HH: seed pole=($PX,$PY) k1=$K1 k2=$K2"
+    # Resume: if final/derot.fits.fz already exists, skip this hour.
+    if [ "$RESTART" != "1" ] && [ -e "$HHB/final/derot.fits.fz" ]; then
+        # Read pole from final stack header for the carry-forward chain.
+        FINAL_HDR=$(python3 -c "
+from astropy.io import fits
+with fits.open('$HHB/final/derot.fits.fz') as h:
+    for hdu in h:
+        if 'POLEX' in hdu.header:
+            print(f\"{hdu.header['POLEX']} {hdu.header['POLEY']} {hdu.header.get('K1',0.0)} {hdu.header.get('K2',0.0)}\")
+            break" 2>/dev/null)
+        if [ -n "$FINAL_HDR" ]; then
+            PX=$(echo "$FINAL_HDR" | awk '{print $1}')
+            PY=$(echo "$FINAL_HDR" | awk '{print $2}')
+            K1=$(echo "$FINAL_HDR" | awk '{print $3}')
+            K2=$(echo "$FINAL_HDR" | awk '{print $4}')
+            printf '  hour %s already done; pole=(%s,%s) k1=%s k2=%s\n' \
+                "$HH" "$PX" "$PY" "$K1" "$K2" | tee -a "$LOG"
+            echo "$HH,$NOW,$MEAN,$PX,$PY,resumed" >> "$SUMMARY"
+            continue
+        fi
+    fi
+
+    # Resume: if patches-iterN/derot.fits.fz exists, jump to iter N+1
+    # with pole/k1/k2 read from that header.
+    RESUME_ITER=0
+    if [ "$RESTART" != "1" ]; then
+        LAST_PATCH_DIR=""
+        for d in "$HHB"/patches-iter*/derot.fits.fz; do
+            [ -e "$d" ] || continue
+            LAST_PATCH_DIR="$d"
+        done
+        if [ -n "$LAST_PATCH_DIR" ]; then
+            RESUME_ITER=$(echo "$LAST_PATCH_DIR" | sed -E 's|.*patches-iter([0-9]+).*|\1|')
+            RES_HDR=$(python3 -c "
+from astropy.io import fits
+with fits.open('$LAST_PATCH_DIR') as h:
+    for hdu in h:
+        if 'POLEX' in hdu.header:
+            print(f\"{hdu.header['POLEX']} {hdu.header['POLEY']} {hdu.header.get('K1',0.0)} {hdu.header.get('K2',0.0)}\")
+            break" 2>/dev/null)
+            if [ -n "$RES_HDR" ]; then
+                PX=$(echo "$RES_HDR" | awk '{print $1}')
+                PY=$(echo "$RES_HDR" | awk '{print $2}')
+                K1=$(echo "$RES_HDR" | awk '{print $3}')
+                K2=$(echo "$RES_HDR" | awk '{print $4}')
+            fi
+        fi
+    fi
+
+    step "hour $HH: seed pole=($PX,$PY) k1=$K1 k2=$K2 (resume_iter=$RESUME_ITER)"
 
     # find-candidates round 0
     if [ "$FORCE" = "1" ] || [ ! -e "$HHB/candidates.csv" ]; then
@@ -250,7 +328,7 @@ for HH in "${ORDER[@]}"; do
     fi
 
     # bootstrap loop
-    ITER=0
+    ITER="$RESUME_ITER"
     while [ "$ITER" -lt "$MAX_ITERS" ]; do
         ITER=$((ITER + 1))
         if [ "$ITER" -le "$GEOM_AFTER_ITER" ]; then
