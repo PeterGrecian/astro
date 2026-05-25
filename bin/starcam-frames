@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# starcam-frames — print the path of the starcam-frames root on this host.
+#
+# On hosts that have ~/astro/activate sourced, $STARCAM_ROOT is already
+# set and you should prefer it (no fork). This script exists for the
+# rare case where $STARCAM_ROOT isn't set, and as a place to hang the
+# --hints documentation.
+#
+# Usage:
+#   starcam-frames           # print the root path on this host
+#   starcam-frames --hints   # print layout documentation
+#   starcam-frames -h        # this help
+set -euo pipefail
+
+usage() {
+    cat <<EOF
+usage: starcam-frames [--hints]
+
+Prints the local path of the starcam-frames NFS export root.
+On pip/muppet: /mnt/puppy/starcam-frames
+On puppy/starcam: /home/peter/starcam-frames
+
+\$STARCAM_ROOT (set by ~/astro/activate) is the preferred way to
+reference this path in scripts; this command is a fallback.
+
+--hints  Print layout documentation (sister to 'secrets --hints').
+EOF
+}
+
+hints() {
+    cat <<'EOF'
+starcam-frames layout
+=====================
+
+Root:
+  /mnt/puppy/starcam-frames           on pip, muppet  (NFS mount)
+  /home/peter/starcam-frames          on puppy, starcam  (local / NFS)
+
+Top-level:
+  brightness.png                       all-nights brightness plot (daily)
+  day/                                 day-mode frames (skycam)
+  night/                               star observation tree
+
+Per night:
+  night/<YYYY-MM-DD>/                  noon-rollover night dir
+    <HH>/                              raw .fits.fz, UTC hour
+      <epoch_ms>.fits.fz               from starcam_night_daemon
+    <HH>b/                             binned (bin-frames)
+      0001.fits.fz … NNNN.fits.fz      renumbered 2x2-binned
+      sum.fits.fz / sum.jpg            hourly sum
+      brightness.csv                   per-frame stats
+      candidates.csv                   per-cell argmax across frames
+      patches-iter<N>/                 bootstrap iteration debug
+        derot.fits.fz (POLEX, POLEY, K1, K2 in header)
+        mosaic.jpg                     candidate patches derot|raw
+      final/derot.fits.fz              final per-hour derotated stack
+    pipeline.log                       end-of-night audit trail
+    pipeline-poles.csv                 hh, mean, pole_x, pole_y per hour
+    hot-pixels-starcam-<date>-*.fits.fz  per-night hot-pixel sweep
+    sum-of-sums.fits.fz                whole-night sum (for hot mask)
+    all-night-derot.{fits.fz,jpg}      stage F output
+
+State:
+  .cover-state                         lens cover servo state
+                                       line 1: 'open'/'closed'/label
+                                       line 2: angle deg
+                                       line 3: epoch_s
+
+Calibration (kept in repo, not on NFS):
+  ~/astro/calib/sky-mask-starcam-<date>.fits.fz   painted sky mask
+  ~/astro/calib/hot-pixels-starcam-*.fits.fz      pre-per-night hot masks
+EOF
+}
+
+case "${1:-}" in
+    --hints) hints; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    "") ;;
+    *) echo "unknown: $1" >&2; usage; exit 2 ;;
+esac
+
+# Autodetect; mirror the logic in ~/astro/activate.
+if [ -d /mnt/puppy/starcam-frames ]; then
+    echo /mnt/puppy/starcam-frames
+elif [ -d "$HOME/starcam-frames" ]; then
+    echo "$HOME/starcam-frames"
+else
+    echo "starcam-frames: cannot find the root on this host" >&2
+    exit 1
+fi

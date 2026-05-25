@@ -17,8 +17,10 @@
 set -euo pipefail
 
 STARCAM=peter@192.168.4.128
-STATE_PATH_LOCAL="/mnt/puppy/starcam-frames/.cover-state"
-STATE_PATH_REMOTE="/home/peter/starcam-frames/.cover-state"
+# $STARCAM_ROOT is set by ~/astro/activate; fall back via the
+# starcam-frames helper so this works in any shell.
+ROOT="${STARCAM_ROOT:-$(starcam-frames 2>/dev/null || echo /mnt/puppy/starcam-frames)}"
+STATE_PATH_LOCAL="$ROOT/.cover-state"
 HELPER_REMOTE="/home/peter/astro-cover-move"
 
 OPEN_ANGLE=60
