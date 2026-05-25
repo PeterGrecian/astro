@@ -74,25 +74,44 @@ that — ~33 ms. At sidereal rate, sub-pixel even at corners of our
 binned image. Skip the per-row correction; it's below INTER_LINEAR
 precision.
 
-## Auto-sky-mask wiring (deferred until 2nd camera + ethernet arrive)
+## Day-mode sky-mask process (deferred until rain sensor + 2nd camera)
 
-`bin/auto-sky-mask` exists but isn't on a timer. Constraints to
-solve before wiring:
+A daily noon cycle on each camera that derives a fresh sky mask
+from blue-sky daytime frames. NOT interleaved with night capture
+— a standalone day-mode process.
 
-- **Cover must be OPEN** while the mask frames are grabbed.
-  Cover-close runs at 07:00; auto-sky-mask wants ~12:00 with the
-  sun overhead, so we need:
-    1. cover-open-for-mask (~11:55)
-    2. starcam-capture stop (so we can grab the camera)
-    3. auto-sky-mask --camera starcam
-    4. cover-close (cover back to safe)
-    5. starcam-capture start
-  Bundle into a single oneshot wrapper `auto-sky-mask-cycle.sh`
-  on starcam, fire from a noon timer.
-- Re-painting required when camera moves; the mask filename has
-  the date so the pipeline-night auto-pick already handles this.
-- Per-camera invocation when 2nd camera lands: timer needs
-  --camera <name> per host.
+Cycle (oneshot wrapper, e.g. `sky-mask-cycle.sh` on starcam):
+  1. Check rain sensor. **Abort if wet** (don't expose the lens).
+  2. Stop day-mode capture (whatever's running for skycam etc.).
+  3. Cover OPEN (servo to +60°).
+  4. Grab N daytime frames at low exposure/gain.
+  5. Process with chromakey (against blue-sky colour) AND
+     brightness key (dark = foreground). Combine: anything failing
+     either test is masked.
+  6. Cover CLOSED (back to -60°, weather-safe).
+  7. Restart day-mode capture.
+  8. Output: ~/astro/calib/sky-mask-<camera>-<YYYY-MM-DD>.fits.fz
+
+Cadence: daily noon if dry. Catches slow foreground changes
+(tree growth) and camera-position drift without manual
+intervention. Mask filename is dated so pipeline-night's
+auto-pick logic uses the most-recent-≤-night.
+
+Round-trip with existing cover timers:
+- 07:00  cover-close.timer → cover closed all morning
+- 12:00  sky-mask-cycle (if dry) → briefly open, mask, close
+- 12:00..20:30  cover closed (weather + sun protection)
+- 20:30  cover-open.timer → open for night capture
+- 21:00  starcam-capture night window begins
+
+Pre-reqs:
+- Rain sensor on starcam (GPIO input).
+- bin/auto-sky-mask (exists) needs chromakey added; currently
+  only does brightness threshold (mean − k·std). Blue-sky
+  chromakey would catch white house bricks that brightness
+  thresholding alone misses.
+- Per-camera: 2nd camera (south-facing, arriving soon) gets its
+  own sky-mask-cycle on its own host with its own --camera id.
 
 ## Seasonal note (2026-05-25)
 
