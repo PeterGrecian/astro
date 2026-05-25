@@ -148,8 +148,35 @@ across repositioning). Within a night it's stable to ~30 px. So:
 - Multi-night stacking would need per-night poles + shared
   distortion (see TODO.md).
 
+## Triggering
+
+`starcam_night_daemon` knows when the capture window starts and ends
+(log line: `outside night window`). When it transitions from "in
+window" to "outside", it touches `<night>/.captured` (or starts
+`pipeline-night.service` via systemctl-user). pipeline-night fires
+then — typically ~05:00 BST in summer, ~07:00 BST in winter, so we
+don't wait for a hardcoded clock time.
+
+Per-hour `pipeline-hour` fires from its own systemd timer at HH:01.
+It only does light prep (bin, scan, sum) — no fitting, no candidates,
+no derot. That keeps the hourly run quick and lets `pipeline-night`
+do the heavy lifting once at end-of-night with all the data ready.
+
+## Statistical scope for blown-pixel detection
+
+Whole-night sum (~7000 frames). Cost is trivial (single int32 add per
+pixel per frame, ~1 GB throughput per night). SNR boost is √7000 ≈
+83×, so a pixel that's just 1 ADU above sky in every frame stacks to
+7000 ADU vs sky mean ~7000 × 30 = 210000. Clear separation.
+
+A 1000-frame sample would still work statistically but adds choice
+about which 1000 — whole-night is just simpler.
+
 ## What's currently broken / to fix tomorrow
 
+- **pipeline-night doesn't fire from the daemon yet.** Currently
+  triggered manually. Need: daemon emits "end of window" signal;
+  systemd path-watch or hook invokes pipeline-night.
 - **Per-night hot-pixel mask** isn't implemented — current code
   derives a fresh mask per hour from that hour's sum. Need to
   sum-of-sums first, then mask once.
@@ -161,6 +188,23 @@ across repositioning). Within a night it's stable to ~30 px. So:
 - **Sky-mask + hot-mask combination** — needs a tiny helper that
   loads both, ORs them, returns the keep bitmap. Avoid every tool
   doing this independently.
+- **pipeline-hour does too much** — bootstrap loop and fit-pole
+  belong in pipeline-night, not the hourly run. Strip pipeline-hour
+  down to bin → scan → sum.
+- **darkest-window not wired in** — pipeline-night should locate the
+  darkest window in the night and start candidate finding there.
+
+## Implementation order
+
+1. **pipeline-hour slimming**: strip to bin + scan + sum only.
+2. **pipeline-night extensions**: per-night hot mask, sky mask lookup,
+   call darkest-window, then bootstrap (pole + geometry), then
+   per-hour final derot, then derot-night.
+3. **Daemon trigger**: starcam_night_daemon writes a `.captured`
+   marker file when window closes; systemd path unit fires
+   pipeline-night.
+4. **plot-brightness wired into pipeline-night** end (after binning,
+   before science) so the night ensemble plot is fresh for morning.
 
 ## Outputs for human inspection
 
