@@ -38,12 +38,13 @@ elif [ -d "$HOME/starcam-frames/night" ]; then
 fi
 
 # cdd — cd into today's noon-rollover night dir and export $CDD.
-# Before noon local time, "today" is yesterday's date (the night that
-# started before midnight). Per ~/astro/CLAUDE.md noon-noon rollover.
+# Capture begins at 21:00 local (BST). Before then, "today" is the
+# previous day's date — that's the night-dir containing fresh frames
+# from last night's run. Per ~/astro/CLAUDE.md noon-noon rollover.
 cdd() {
-    local night
-    night=$(date +%H 2>/dev/null)
-    if [ "$night" -lt 12 ] 2>/dev/null; then
+    local night hour
+    hour=$(date +%H 2>/dev/null)
+    if [ "$hour" -lt 21 ] 2>/dev/null; then
         night=$(date -d 'yesterday' +%Y-%m-%d)
     else
         night=$(date +%Y-%m-%d)
