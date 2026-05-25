@@ -40,6 +40,25 @@ oiiotool looks interesting.  siril is hidious.  splay is capable of doing it bet
 - [ ] Decide camera identifier convention (`back`, `front`, `sky`, `experimental`). Reflect in path layout: `~/<cam>-frames/night/<night-dir>/HH/`.
 - [ ] Per-camera config: gain, exposure, lens, sensor, Bayer pattern.
 
+## Accurate per-frame timing (open question; affects radial smear)
+
+- [ ] **Use real epoch_ms not frame index for angle.** fit-pole and
+      fit-geometry currently assume uniform 3s frame spacing
+      (`angle = omega × frame_index`). The daemon runs at-best-effort
+      on a Pi 1B and intervals drift. Switch to
+      `angle = sidereal_rate_per_s × (epoch_ms - epoch_0) / 1000`.
+      derot-night already does this; the fitters don't.
+
+- [ ] **Rolling shutter correction.** OV5647 reads top-to-bottom
+      over the 2.9s exposure. Stars at the bottom of the frame are
+      sampled ~2.9s later than stars at the top. Means each *row*
+      needs its own angle offset, not just each frame:
+        angle(frame_N, row_Y) =
+            omega × ((epoch_ms_N - epoch_0) / 1000 + Y × T_row)
+      where T_row = exposure_time / sensor_height.
+      Probably accounts for some of the residual radial smear we
+      see in derot outputs.
+
 ## Multi-night stacking (deferred — let the per-night pipeline mature first)
 
 - [ ] `derot-week` — extension of `derot-night` that walks multiple
