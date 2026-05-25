@@ -153,7 +153,12 @@ def main() -> int:
     ax.set_xlabel("local time (Europe/London, GMT/BST)")
     ax.set_ylabel("log2(mean ADU)")
     ax.set_title(f"starcam mean brightness — {plotted} night(s)")
-    ax.legend(loc="upper right", fontsize=9)
+    # Replace scatter's tiny dot legend markers with proper lines.
+    from matplotlib.lines import Line2D
+    handles, labels = ax.get_legend_handles_labels()
+    line_handles = [Line2D([0], [0], color=h.get_facecolor()[0], lw=2)
+                    for h in handles]
+    ax.legend(line_handles, labels, loc="upper right", fontsize=9)
     ax.grid(True, alpha=0.2)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
