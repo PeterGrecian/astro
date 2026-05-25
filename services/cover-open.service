@@ -1,0 +1,10 @@
+[Unit]
+Description=astro: open lens cover (before night capture window)
+
+[Service]
+Type=oneshot
+User=peter
+Group=peter
+ExecStart=/usr/bin/python3 /home/peter/astro-cover-move 60 open
+StandardOutput=journal
+StandardError=journal
