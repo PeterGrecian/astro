@@ -1,4 +1,8 @@
 # astro — TODO
+obviously, sort out the capture pipeline.
+and also the day pipeline.  i guess it's step by step
+
+pigpiod uses a lot of cpu unnecesarily.  
 
 Live work list. Move items to DECISIONS.md once they crystallise
 into a load-bearing choice; delete done items.
