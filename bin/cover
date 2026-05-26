@@ -21,7 +21,9 @@ STARCAM=peter@192.168.4.128
 # starcam-frames helper so this works in any shell.
 ROOT="${STARCAM_ROOT:-$(starcam-frames 2>/dev/null || echo /mnt/puppy/starcam-frames)}"
 STATE_PATH_LOCAL="$ROOT/.cover-state"
-HELPER_REMOTE="/home/peter/astro-cover-move"
+# cover-move lives in the astro repo, cloned to ~/astro on starcam by
+# the astro-camera ansible role.
+HELPER_REMOTE="/home/peter/astro/bin/cover-move"
 
 OPEN_ANGLE=60
 CLOSE_ANGLE=-60
@@ -36,62 +38,8 @@ usage: cover {open|close|status}
 EOF
 }
 
-helper_script() {
-    cat <<'PY'
-#!/usr/bin/env python3
-"""Drive SG90 to a target angle smoothly and write state file."""
-import sys, time
-from pathlib import Path
-from gpiozero import Servo
-from gpiozero.pins.pigpio import PiGPIOFactory
-
-SIGNAL_PIN = 18
-DEG_PER_SEC = 30.0
-STEP_HZ = 50
-STATE_PATH = Path.home() / "starcam-frames" / ".cover-state"
-
-if len(sys.argv) != 3:
-    print("usage: helper <angle_deg> <state_label>", file=sys.stderr)
-    sys.exit(2)
-target_deg = float(sys.argv[1])
-state_label = sys.argv[2]
-
-servo = Servo(SIGNAL_PIN, pin_factory=PiGPIOFactory())
-# Always start sweep from 0 so behaviour is reproducible; the
-# previous state-file value isn't trusted as the servo's true position.
-current = 0.0
-servo.value = 0.0
-time.sleep(0.3)
-
-dt = 1.0 / STEP_HZ
-step = DEG_PER_SEC * dt
-while abs(current - target_deg) > step / 2:
-    current += step if target_deg > current else -step
-    servo.value = max(-1.0, min(1.0, current / 90.0))
-    time.sleep(dt)
-servo.value = max(-1.0, min(1.0, target_deg / 90.0))
-time.sleep(0.5)
-servo.detach()
-
-STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-STATE_PATH.write_text(f"{state_label}\n{target_deg}\n{int(time.time())}\n")
-print(f"cover now {state_label} (angle={target_deg})")
-PY
-}
-
-deploy_helper_if_needed() {
-    # Copy helper script to starcam if missing or stale.
-    local local_sha remote_sha
-    local_sha=$(helper_script | sha256sum | awk '{print $1}')
-    remote_sha=$(ssh "$STARCAM" "sha256sum $HELPER_REMOTE 2>/dev/null | awk '{print \$1}'" || true)
-    if [ "$local_sha" != "$remote_sha" ]; then
-        helper_script | ssh "$STARCAM" "cat > $HELPER_REMOTE && chmod +x $HELPER_REMOTE"
-    fi
-}
-
 cmd_move() {
     local angle="$1" label="$2"
-    deploy_helper_if_needed
     ssh "$STARCAM" "python3 $HELPER_REMOTE $angle $label"
 }
 

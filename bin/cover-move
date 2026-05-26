@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Drive SG90 to a target angle smoothly and write state file.
+
+Invoked by cover-open.service / cover-close.service on the camera Pi.
+
+pigpiod idles at ~12% CPU on the Pi 1B, so we start it just for the
+move and stop it after. Requires passwordless sudo for
+`systemctl start/stop pigpiod` (installed by the astro-camera role
+via /etc/sudoers.d/peter-pigpiod).
+"""
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+SIGNAL_PIN = 18
+DEG_PER_SEC = 30.0
+STEP_HZ = 50
+STATE_PATH = Path.home() / "starcam-frames" / ".cover-state"
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("usage: cover-move <angle_deg> <state_label>", file=sys.stderr)
+        sys.exit(2)
+    target_deg = float(sys.argv[1])
+    state_label = sys.argv[2]
+
+    subprocess.run(["sudo", "systemctl", "start", "pigpiod"], check=True)
+    try:
+        time.sleep(0.3)
+        from gpiozero import Servo
+        from gpiozero.pins.pigpio import PiGPIOFactory
+
+        servo = Servo(SIGNAL_PIN, pin_factory=PiGPIOFactory())
+        current = 0.0
+        servo.value = 0.0
+        time.sleep(0.3)
+
+        dt = 1.0 / STEP_HZ
+        step = DEG_PER_SEC * dt
+        while abs(current - target_deg) > step / 2:
+            current += step if target_deg > current else -step
+            servo.value = max(-1.0, min(1.0, current / 90.0))
+            time.sleep(dt)
+        servo.value = max(-1.0, min(1.0, target_deg / 90.0))
+        time.sleep(0.5)
+        servo.detach()
+    finally:
+        subprocess.run(["sudo", "systemctl", "stop", "pigpiod"], check=False)
+
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(f"{state_label}\n{target_deg}\n{int(time.time())}\n")
+    print(f"cover now {state_label} (angle={target_deg})")
+
+
+if __name__ == "__main__":
+    main()
