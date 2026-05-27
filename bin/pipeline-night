@@ -26,6 +26,9 @@
 #   pipeline-night <night-dir> --sky-threshold 80 --max-iters 6 --force
 #   pipeline-night <night-dir> --no-sky-mask    # skip sky mask this run
 #   pipeline-night <night-dir> --restart        # ignore prior iter state
+#   pipeline-night <night-dir> --min-move 0.1 --max-iters 30
+#                                              # fit harder
+#   pipeline-night <night-dir> --hot-pct 4      # use 4pct hot mask
 #
 # Variants — run side-by-side with the default attempt:
 #   pipeline-night <night-dir> --variant max80 --max-mean 80
@@ -60,6 +63,8 @@ GEOM_AFTER_ITER=2
 MIN_MOVE=1.0
 VARIANT=""        # named bin variant; "" = default (HHb/, unprefixed outputs)
 MAX_MEAN=""       # forwarded to pipeline-hour --max-mean if set
+HOT_PCT=0.1       # which hot-pixel-mask strictness to use downstream
+                  # (0.01, 0.1, 1, 2, 4); higher = more pixels masked
 
 usage() { sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; }
 
@@ -72,6 +77,8 @@ while [ $# -gt 0 ]; do
         --pole-y) POLE_Y="$2"; shift 2;;
         --sky-threshold) SKY_THRESH="$2"; shift 2;;
         --max-iters) MAX_ITERS="$2"; shift 2;;
+        --min-move) MIN_MOVE="$2"; shift 2;;
+        --hot-pct) HOT_PCT="$2"; shift 2;;
         --force) FORCE=1; shift;;
         --restart) RESTART=1; shift;;
         --no-sky-mask) NO_SKY_MASK=1; shift;;
@@ -202,9 +209,23 @@ if [ "$FORCE" = "1" ] || [ ! -e "$NIGHT/hot-pixels-${HOT_CAMERA}-4pct.fits.fz" ]
         --camera "$HOT_CAMERA"
 fi
 
-# Pick the strict mask (0.1%) for downstream tools. Cheap to change later.
-NIGHT_HOT_MASK="$NIGHT/hot-pixels-${HOT_CAMERA}-0.1pct.fits.fz"
-[ -e "$NIGHT_HOT_MASK" ] || NIGHT_HOT_MASK="$NIGHT/hot-pixels-${HOT_CAMERA}-1pct.fits.fz"
+# Pick the chosen-strictness mask for downstream tools. Filenames are
+# "...-0.1pct.fits.fz", "...-1pct.fits.fz", "...-4pct.fits.fz" etc;
+# normalise integer-style numbers (4 → "4", not "4.0").
+HOT_PCT_STR=$(python3 -c "v=$HOT_PCT; print(int(v) if v == int(v) else v)")
+NIGHT_HOT_MASK="$NIGHT/hot-pixels-${HOT_CAMERA}-${HOT_PCT_STR}pct.fits.fz"
+if [ ! -e "$NIGHT_HOT_MASK" ]; then
+    # Fall back to next strictest available.
+    for fb in 1 0.1 2 4; do
+        cand="$NIGHT/hot-pixels-${HOT_CAMERA}-${fb}pct.fits.fz"
+        if [ -e "$cand" ]; then
+            echo "  warn: $NIGHT_HOT_MASK missing; falling back to $cand" \
+                | tee -a "$LOG"
+            NIGHT_HOT_MASK="$cand"
+            break
+        fi
+    done
+fi
 echo "using hot mask: $NIGHT_HOT_MASK" | tee -a "$LOG"
 
 # ---------- Stage C: refresh plot-brightness -------------------------

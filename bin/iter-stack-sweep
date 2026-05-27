@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# iter-stack-sweep — for one hour bin dir, build a full-frame derot
+# stack for each patches-iterN/ pole, plus the final/. Lets you flip
+# through every fit iteration's "real" all-frame stack in splay to see
+# whether the pole genuinely improved.
+#
+# Reads POLEX/POLEY/K1/K2 from each patches-iterN/derot.fits.fz
+# header (the per-iter stack written by pipeline-night, derot of
+# FRAMES=100 frames). Re-derotates every frame in the hour into
+# patches-iterN/full-derot.fits.fz.
+#
+# Usage:
+#   iter-stack-sweep <hour-bin-dir>
+#   iter-stack-sweep ~/starcam-frames/night/2026-05-25/00-max80
+set -euo pipefail
+
+HHB="${1:-}"
+[ -n "$HHB" ] || { echo "usage: iter-stack-sweep <hour-bin-dir>" >&2; exit 2; }
+HHB="${HHB%/}"
+[ -d "$HHB" ] || { echo "no such dir: $HHB" >&2; exit 2; }
+
+shopt -s nullglob
+ALL_FRAMES=("$HHB"/[0-9]*.fits.fz)
+shopt -u nullglob
+ALL=${#ALL_FRAMES[@]}
+[ "$ALL" -gt 0 ] || { echo "no binned frames in $HHB" >&2; exit 2; }
+
+read_pole_from_header() {
+    local fits="$1"
+    FITS_PATH="$fits" python3 - <<'PY' 2>/dev/null
+import os, sys
+from astropy.io import fits
+with fits.open(os.environ["FITS_PATH"]) as h:
+    for hdu in h:
+        if "POLEX" in hdu.header:
+            print(f"{hdu.header['POLEX']} {hdu.header['POLEY']} "
+                  f"{hdu.header.get('K1', 0.0)} {hdu.header.get('K2', 0.0)}")
+            break
+PY
+}
+
+# Iter dirs first (sorted numerically), then final.
+ITER_DIRS=$(ls -1d "$HHB"/patches-iter[0-9]* 2>/dev/null | sort -V)
+FINAL_DIR=""
+[ -d "$HHB/final" ] && FINAL_DIR="$HHB/final"
+
+if [ -z "$ITER_DIRS" ] && [ -z "$FINAL_DIR" ]; then
+    echo "no patches-iter*/ or final/ dirs in $HHB" >&2
+    exit 1
+fi
+
+for d in $ITER_DIRS $FINAL_DIR; do
+    SRC=""
+    [ -e "$d/derot.fits.fz" ] && SRC="$d/derot.fits.fz"
+    [ -z "$SRC" ] && [ -e "$d/stack-derot.fits.fz" ] && SRC="$d/stack-derot.fits.fz"
+    if [ -z "$SRC" ]; then
+        echo "skip $d: no derot.fits.fz or stack-derot.fits.fz" >&2
+        continue
+    fi
+
+    PARAMS=$(read_pole_from_header "$SRC")
+    if [ -z "$PARAMS" ]; then
+        echo "skip $d: no POLEX in header" >&2
+        continue
+    fi
+    PX=$(echo "$PARAMS" | awk '{print $1}')
+    PY=$(echo "$PARAMS" | awk '{print $2}')
+    K1=$(echo "$PARAMS" | awk '{print $3}')
+    K2=$(echo "$PARAMS" | awk '{print $4}')
+
+    OUT="$d/full-derot.fits.fz"
+    if [ -e "$OUT" ]; then
+        echo "skip $d: $OUT already exists"
+        continue
+    fi
+
+    printf '=== %s: pole=(%s,%s) k1=%s k2=%s × %s frames ===\n' \
+        "$(basename "$d")" "$PX" "$PY" "$K1" "$K2" "$ALL"
+
+    # derot-patches writes into a fresh subdir then we move the stack.
+    TMP=$(mktemp -d -p "$d" full-tmp.XXXXXX)
+    derot-patches "$HHB" --pole-x "$PX" --pole-y "$PY" \
+        --k1 "$K1" --k2 "$K2" \
+        --frames "$ALL" --patch 50 --top 10 \
+        --out-dir "$TMP"
+    mv "$TMP/stack-derot.fits.fz" "$OUT"
+    rm -rf "$TMP"
+    echo "  → $OUT"
+done
+
+echo
+echo "splay them with:"
+echo "  splay $HHB/patches-iter*/full-derot.fits.fz \\"
+echo "        $HHB/final/full-derot.fits.fz"
