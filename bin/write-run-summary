@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+"""write-run-summary — produce a one-file summary of a pipeline-night run.
+
+Reads the per-night CSV (`pipeline-poles.csv` or `<variant>_pipeline-poles.csv`)
+plus the bin dirs and night-level outputs, and emits a YAML summary
+alongside them.
+
+The summary captures:
+  - which variant + params (best-effort, from filenames and env)
+  - timing (wall, started/ended)
+  - per-hour outcome: nframes, iters, final pole, converged?, status
+  - aggregate: hours ok/skipped, pole median + spread (outlier flag)
+  - paths to the key output artefacts
+
+Usage:
+    write-run-summary <night-dir>                       # default variant
+    write-run-summary <night-dir> --variant max80
+    write-run-summary <night-dir> --variant max80 \\
+        --started-utc 2026-05-27T10:00:00Z \\
+        --wall-seconds 1726
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import statistics
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import yaml
+from astropy.io import fits
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_final_header(final_fits: Path) -> dict:
+    """Pull POLEX/POLEY/K1/K2 from final/derot.fits.fz if present."""
+    try:
+        with fits.open(final_fits) as h:
+            for hdu in h:
+                if "POLEX" in hdu.header:
+                    return {
+                        "pole_x": float(hdu.header["POLEX"]),
+                        "pole_y": float(hdu.header["POLEY"]),
+                        "k1": float(hdu.header.get("K1", 0.0)),
+                        "k2": float(hdu.header.get("K2", 0.0)),
+                    }
+    except Exception:
+        pass
+    return {}
+
+
+def count_iters(hh_bindir: Path) -> int:
+    """patches-iterN/derot.fits.fz → highest N."""
+    iters = [
+        int(d.name.replace("patches-iter", ""))
+        for d in hh_bindir.glob("patches-iter*")
+        if d.name.replace("patches-iter", "").isdigit()
+    ]
+    return max(iters, default=0)
+
+
+def count_frames(hh_bindir: Path) -> int:
+    return sum(1 for _ in hh_bindir.glob("[0-9]*.fits.fz"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("night", type=Path, help="night dir, e.g. .../2026-05-25")
+    ap.add_argument("--variant", default="",
+                    help="variant name; empty = default (unprefixed) run")
+    ap.add_argument("--started-utc", default="",
+                    help="ISO-8601 UTC start time (if known)")
+    ap.add_argument("--wall-seconds", type=int, default=0,
+                    help="wall time in seconds (if known)")
+    ap.add_argument("--max-mean", type=float, default=None,
+                    help="bin-frames --max-mean used (if any)")
+    ap.add_argument("--params", action="append", default=[],
+                    help="key=value param to record (repeatable)")
+    args = ap.parse_args()
+
+    night = args.night.resolve()
+    if not night.is_dir():
+        print(f"no such dir: {night}", file=sys.stderr)
+        return 2
+
+    prefix = f"{args.variant}_" if args.variant else ""
+    bin_suffix = f"-{args.variant}" if args.variant else "b"
+
+    poles_csv = night / f"{prefix}pipeline-poles.csv"
+    if not poles_csv.exists():
+        print(f"no {poles_csv.name} in {night}", file=sys.stderr)
+        return 2
+
+    # Per-hour records from the CSV + filesystem.
+    hours = []
+    poles_for_aggregate: list[tuple[float, float]] = []
+    with poles_csv.open() as f:
+        for row in csv.DictReader(f):
+            hh = row.get("hh", "").strip()
+            if not hh:
+                continue
+            status = row.get("status", "").strip() or "unknown"
+            mean = float(row["mean"]) if row.get("mean") else None
+            entry: dict = {
+                "hh": hh,
+                "status": status,
+                "started_utc": row.get("started_utc", "").strip() or None,
+                "mean_brightness": mean,
+            }
+            hh_bindir = night / f"{hh}{bin_suffix}"
+            if hh_bindir.is_dir():
+                entry["nframes_binned"] = count_frames(hh_bindir)
+                entry["iters"] = count_iters(hh_bindir)
+                final = hh_bindir / "final" / "derot.fits.fz"
+                if final.exists():
+                    entry.update(read_final_header(final))
+            # Pole from CSV (always recorded, even if header read fails).
+            for key in ("pole_x", "pole_y"):
+                v = row.get(key, "").strip()
+                if v:
+                    entry[key] = float(v)
+            if status == "ok" and "pole_x" in entry and "pole_y" in entry:
+                poles_for_aggregate.append((entry["pole_x"], entry["pole_y"]))
+            hours.append(entry)
+
+    # Aggregate stats.
+    agg: dict = {
+        "hours_total": len(hours),
+        "hours_ok": sum(1 for h in hours if h["status"] == "ok"),
+        "hours_skipped_bright": sum(
+            1 for h in hours if h["status"] == "skipped-bright"),
+        "hours_skipped_empty": sum(
+            1 for h in hours if h["status"] == "skipped-empty"),
+        "hours_resumed": sum(1 for h in hours if h["status"] == "resumed"),
+    }
+    if len(poles_for_aggregate) >= 2:
+        xs = [p[0] for p in poles_for_aggregate]
+        ys = [p[1] for p in poles_for_aggregate]
+        med_x = statistics.median(xs)
+        med_y = statistics.median(ys)
+        dists = [math.hypot(x - med_x, y - med_y)
+                 for x, y in poles_for_aggregate]
+        agg["pole_median"] = [round(med_x, 2), round(med_y, 2)]
+        agg["pole_spread_px"] = round(max(dists), 2)
+        outlier_dist = 50.0
+        outliers = [
+            h["hh"] for h, d in zip(
+                [h for h in hours if h["status"] == "ok"
+                 and "pole_x" in h], dists)
+            if d > outlier_dist
+        ]
+        if outliers:
+            agg["pole_outliers"] = outliers
+            agg["pole_outlier_threshold_px"] = outlier_dist
+
+    # Output artefact paths (relative to night dir; bare name if missing).
+    def rel(name: str) -> str | None:
+        p = night / name
+        return name if p.exists() else None
+
+    outputs = {
+        "log": rel(f"{prefix}pipeline.log"),
+        "poles_csv": poles_csv.name,
+        "sum_of_sums": rel(f"{prefix}sum-of-sums.fits.fz"),
+        "combined_mask": rel(f"{prefix}combined-mask.fits.fz"),
+        "all_night_derot_fits": rel(f"{prefix}all-night-derot.fits.fz"),
+        "all_night_derot_jpg": rel(f"{prefix}all-night-derot.jpg"),
+    }
+    per_hour = {
+        h["hh"]: f"{prefix}sum_{h['hh']}.jpg"
+        for h in hours
+        if (night / f"{prefix}sum_{h['hh']}.jpg").exists()
+    }
+    if per_hour:
+        outputs["per_hour_sum_jpgs"] = per_hour
+
+    # Params block — best-effort, from CLI flags and --params overrides.
+    params: dict = {}
+    if args.max_mean is not None:
+        params["max_mean"] = args.max_mean
+    for kv in args.params:
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            params[k.strip()] = v.strip()
+
+    summary = {
+        "variant": args.variant or "default",
+        "night": night.name,
+        "written_utc": iso_now(),
+        "started_utc": args.started_utc or None,
+        "wall_seconds": args.wall_seconds or None,
+        "params": params or None,
+        "outputs": {k: v for k, v in outputs.items() if v is not None},
+        "aggregate": agg,
+        "hours": hours,
+    }
+    # Drop None top-level values to keep the file tidy.
+    summary = {k: v for k, v in summary.items() if v is not None}
+
+    out_path = night / f"{prefix}summary.yaml"
+    with out_path.open("w") as f:
+        yaml.safe_dump(summary, f, sort_keys=False, default_flow_style=False)
+    print(f"wrote {out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

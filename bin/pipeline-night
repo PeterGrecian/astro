@@ -429,6 +429,27 @@ DEROT_NIGHT_ARGS=()
 [ -n "$VARIANT" ] && DEROT_NIGHT_ARGS+=(--variant "$VARIANT")
 run derot-night "$NIGHT" "${DEROT_NIGHT_ARGS[@]}"
 
+# ---------- Stage G: structured run summary --------------------------
+step "G. write-run-summary"
+SUMMARY_ARGS=("$NIGHT")
+[ -n "$VARIANT" ] && SUMMARY_ARGS+=(--variant "$VARIANT")
+[ -n "$MAX_MEAN" ] && SUMMARY_ARGS+=(--max-mean "$MAX_MEAN")
+SUMMARY_ARGS+=(--wall-seconds "$(($(date +%s) - T0))")
+SUMMARY_ARGS+=(--started-utc "$(date -u -d "@$T0" +%FT%TZ)")
+SUMMARY_ARGS+=(
+    --params "pole_x=$POLE_X"
+    --params "pole_y=$POLE_Y"
+    --params "sky_threshold=$SKY_THRESH"
+    --params "max_iters=$MAX_ITERS"
+    --params "patch=$PATCH"
+    --params "top=$TOP"
+    --params "frames=$FRAMES"
+    --params "frames_geom=$FRAMES_GEOM"
+    --params "geom_after_iter=$GEOM_AFTER_ITER"
+    --params "min_move=$MIN_MOVE"
+)
+run write-run-summary "${SUMMARY_ARGS[@]}"
+
 step "night complete: $NIGHT"
 printf 'summary: %s\n' "$SUMMARY"
 column -s, -t "$SUMMARY"
