@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""derot-colour — like derot-patches but lerps red→blue across the hour.
+
+Each frame i is derotated about (pole_x, pole_y) and added to the
+stack weighted by a red→blue gradient:
+    t      = i / (N-1)              # 0 at start of hour, 1 at end
+    weight = ((1-t), 0, t)          # red→blue lerp
+
+In the output JPEG:
+    round point     = magenta/white   (early and late contributions blend)
+    short arc       = red end ↔ blue end (direction shows pole-error vector)
+    blank pixel     = black
+
+Time model: per-frame angle is computed from EPOCH_MS deltas via the
+shared angles_from_epochs helper (same as fit-pole/fit-geometry/
+derot-patches), so cadence jitter is handled.
+
+Usage:
+    derot-colour <bin-dir> --pole-x 952 --pole-y 151
+    derot-colour <bin-dir> --pole-x 952 --pole-y 151 \\
+                 --k1 -0.20 --k2 0.30 --frames 100
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def load_frame(path: Path) -> tuple[np.ndarray, int | None]:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def angles_from_epochs(epochs_ms, omega_per_frame, nominal_dt_ms=3000):
+    if any(e is None for e in epochs_ms):
+        return [float(np.degrees(i * omega_per_frame))
+                for i in range(len(epochs_ms))]
+    e0 = epochs_ms[0]
+    return [float(np.degrees(((e - e0) / nominal_dt_ms) * omega_per_frame))
+            for e in epochs_ms]
+
+
+def derotate(img, pole, angle_deg):
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def derotate_with_distortion(img, pole, angle_deg, k1, k2, maps_cache):
+    h, w = img.shape
+    cx, cy = w / 2.0, h / 2.0
+    R = np.hypot(cx, cy)
+    key = (h, w, float(k1), float(k2))
+    if key not in maps_cache:
+        ys_g, xs_g = np.indices((h, w), dtype=np.float32)
+        dx = xs_g - cx
+        dy = ys_g - cy
+        rn = np.hypot(dx, dy) / R
+        s = 1.0 + k1 * rn**2 + k2 * rn**4
+        maps_cache[key] = (cx + dx * s, cy + dy * s)
+    xu, yu = maps_cache[key]
+    rad = np.deg2rad(angle_deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dxp = xu - pole[0]
+    dyp = yu - pole[1]
+    xur = pole[0] + c * dxp - s * dyp
+    yur = pole[1] + s * dxp + c * dyp
+    dxr = xur - cx
+    dyr = yur - cy
+    rnr = np.hypot(dxr, dyr) / R
+    sr = 1.0 + k1 * rnr**2 + k2 * rnr**4
+    inv = 1.0 / sr
+    xs = (cx + dxr * inv).astype(np.float32)
+    ys_o = (cy + dyr * inv).astype(np.float32)
+    return cv2.remap(img.astype(np.float32), xs, ys_o,
+                     interpolation=cv2.INTER_LINEAR,
+                     borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path, help="binned-frames dir")
+    ap.add_argument("--pole-x", type=float, required=True)
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--k1", type=float, default=0.0)
+    ap.add_argument("--k2", type=float, default=0.0)
+    ap.add_argument("--omega", type=float, default=-0.000219)
+    ap.add_argument("--frames", type=int, default=0,
+                    help="0 = all frames in dir")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output JPG (default: <dir>/colour-derot.jpg)")
+    ap.add_argument("--stretch-lo", type=float, default=50.0,
+                    help="percentile for black point per channel")
+    ap.add_argument("--stretch-hi", type=float, default=99.5,
+                    help="percentile for white point per channel")
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("[0-9]*.fits.fz"))
+    fns = [f for f in fns
+           if f.name not in ("sum.fits.fz", "motion.fits.fz")
+           and not f.name.startswith(("stack", "hot-pixels"))]
+    if args.frames:
+        fns = fns[:args.frames]
+    if not fns:
+        print(f"no frames in {args.dir}", file=sys.stderr)
+        return 1
+    N = len(fns)
+    print(f"colour-deroting {N} frames from {args.dir}")
+    print(f"  pole=({args.pole_x:.2f},{args.pole_y:.2f}) "
+          f"k1={args.k1:.5f} k2={args.k2:.5f}")
+
+    print("reading epochs from headers...", flush=True)
+    epochs = [load_frame(fn)[1] for fn in fns]
+    angles_deg = angles_from_epochs(epochs, args.omega)
+    if any(e is None for e in epochs):
+        print("  warn: some frames lack EPOCH_MS — frame-index fallback")
+
+    pole = (args.pole_x, args.pole_y)
+    use_distortion = args.k1 != 0.0 or args.k2 != 0.0
+    maps_cache: dict = {}
+
+    R_acc = None  # red channel accumulator
+    B_acc = None  # blue channel accumulator
+    t0 = time.time()
+    for i, fn in enumerate(fns):
+        img, _ = load_frame(fn)
+        img = img.astype(np.float32)
+        if use_distortion:
+            derot = derotate_with_distortion(img, pole, angles_deg[i],
+                                             args.k1, args.k2, maps_cache)
+        else:
+            derot = derotate(img, pole, angles_deg[i])
+        t = i / max(N - 1, 1)
+        if R_acc is None:
+            R_acc = np.zeros_like(derot)
+            B_acc = np.zeros_like(derot)
+        R_acc += derot * (1.0 - t)
+        B_acc += derot * t
+        if i == 0 or (i + 1) % 50 == 0 or i == N - 1:
+            elapsed = time.time() - t0
+            fps = (i + 1) / max(elapsed, 1e-6)
+            eta = (N - i - 1) / max(fps, 1e-6) / 60
+            print(f"  [{i+1}/{N}] {fn.name} t={t:.3f} "
+                  f"({fps:.1f} fps, ETA {eta:.1f} min)", flush=True)
+
+    assert R_acc is not None and B_acc is not None
+    # Green channel = min(R,B) so a star hit across the whole hour
+    # (both red early and blue late contributions) becomes white-ish,
+    # while a star only at one end stays pure red or pure blue.
+    G_acc = np.minimum(R_acc, B_acc)
+
+    # Per-channel stretch: keeps the colour balance honest. A pure-red
+    # arc segment will have B≈0 → blue channel maps lo→hi to 0→255 of
+    # *its* values, which are near zero, so they stay dark blue. Stars
+    # with content in all channels span the full range.
+    def stretch(arr, lo_pct, hi_pct):
+        lo = float(np.percentile(arr, lo_pct))
+        hi = float(np.percentile(arr, hi_pct))
+        if hi <= lo:
+            hi = lo + 1.0
+        return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+
+    r = stretch(R_acc, args.stretch_lo, args.stretch_hi)
+    g = stretch(G_acc, args.stretch_lo, args.stretch_hi)
+    b = stretch(B_acc, args.stretch_lo, args.stretch_hi)
+    rgb = (np.stack([r, g, b], axis=-1) * 255).astype(np.uint8)
+
+    out = args.out or (args.dir / "colour-derot.jpg")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(rgb).save(out, quality=92)
+    print(f"wrote {out}  (p{args.stretch_lo}→p{args.stretch_hi})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
