@@ -27,6 +27,13 @@
 #   pipeline-night <night-dir> --no-sky-mask    # skip sky mask this run
 #   pipeline-night <night-dir> --restart        # ignore prior iter state
 #
+# Variants — run side-by-side with the default attempt:
+#   pipeline-night <night-dir> --variant max80 --max-mean 80
+#     ↳ bins into HH-max80/, writes max80_pipeline.log,
+#       max80_pipeline-poles.csv, max80_all-night-derot.{fits.fz,jpg},
+#       max80_sum_HH.jpg per hour.
+# Without --variant the legacy names (HHb/, pipeline.log, etc.) are used.
+#
 # Resume is the default: re-running the same command picks up where it
 # left off. patches-iterN/derot.fits.fz headers carry pole/k1/k2 so
 # subsequent iterations seed from the last converged state. If
@@ -51,6 +58,8 @@ TOP=10
 PATCH=50
 GEOM_AFTER_ITER=2
 MIN_MOVE=1.0
+VARIANT=""        # named bin variant; "" = default (HHb/, unprefixed outputs)
+MAX_MEAN=""       # forwarded to pipeline-hour --max-mean if set
 
 usage() { sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'; }
 
@@ -66,6 +75,8 @@ while [ $# -gt 0 ]; do
         --force) FORCE=1; shift;;
         --restart) RESTART=1; shift;;
         --no-sky-mask) NO_SKY_MASK=1; shift;;
+        --variant) VARIANT="$2"; shift 2;;
+        --max-mean) MAX_MEAN="$2"; shift 2;;
         -h|--help) usage; exit 0;;
         *) if [ -z "$NIGHT" ]; then NIGHT="$1"; shift
            else echo "extra arg: $1" >&2; exit 2; fi;;
@@ -77,8 +88,18 @@ NIGHT="${NIGHT%/}"
 [ -d "$NIGHT" ] || { echo "no such dir: $NIGHT" >&2; exit 2; }
 NIGHT_DATE=$(basename "$NIGHT")
 
-LOG="$NIGHT/pipeline.log"
-SUMMARY="$NIGHT/pipeline-poles.csv"
+# Variant: empty → legacy unprefixed names + HHb/ dirs.
+# Named   → <variant>_ prefix on night-level files + HH-<variant>/ dirs.
+if [ -n "$VARIANT" ]; then
+    PREFIX="${VARIANT}_"
+    BIN_SUFFIX="-${VARIANT}"
+else
+    PREFIX=""
+    BIN_SUFFIX="b"
+fi
+
+LOG="$NIGHT/${PREFIX}pipeline.log"
+SUMMARY="$NIGHT/${PREFIX}pipeline-poles.csv"
 # Append (don't truncate) — multiple runs against the same night
 # leave a single audit trail. Mark each new run with a banner.
 {
@@ -128,9 +149,11 @@ HEARTBEAT_PID=$!
 trap '[ -n "$HEARTBEAT_PID" ] && kill "$HEARTBEAT_PID" 2>/dev/null' EXIT
 
 # ---------- Stage A: per-hour prep -----------------------------------
-step "A. per-hour prep"
+step "A. per-hour prep${VARIANT:+ (variant=$VARIANT)}"
 PIPE_HOUR_ARGS=()
 [ "$FORCE" = "1" ] && PIPE_HOUR_ARGS+=(--force)
+[ -n "$VARIANT" ] && PIPE_HOUR_ARGS+=(--variant "$VARIANT")
+[ -n "$MAX_MEAN" ] && PIPE_HOUR_ARGS+=(--max-mean "$MAX_MEAN")
 for cand in "$NIGHT"/[0-2][0-9]; do
     [ -d "$cand" ] || continue
     run pipeline-hour "$cand" "${PIPE_HOUR_ARGS[@]}"
@@ -138,7 +161,8 @@ done
 
 # ---------- Stage B: per-night hot-pixel mask ------------------------
 step "B. per-night hot-pixel mask (sum-of-sums)"
-NIGHT_SUM="$NIGHT/sum-of-sums.fits.fz"
+NIGHT_SUM="$NIGHT/${PREFIX}sum-of-sums.fits.fz"
+BIN_GLOB="[0-2][0-9]${BIN_SUFFIX}"
 if [ "$FORCE" = "1" ] || [ ! -e "$NIGHT_SUM" ]; then
     python3 <<PY 2>&1 | tee -a "$LOG"
 from astropy.io import fits
@@ -146,7 +170,7 @@ from pathlib import Path
 import numpy as np, sys
 
 night = Path("$NIGHT")
-hh_sums = sorted(night.glob("[0-2][0-9]b/sum.fits.fz"))
+hh_sums = sorted(night.glob("$BIN_GLOB/sum.fits.fz"))
 if not hh_sums:
     print("no per-hour sums found", file=sys.stderr); sys.exit(1)
 print(f"summing {len(hh_sums)} hourly sums:")
@@ -169,17 +193,18 @@ else
 fi
 
 step "B.2 hot-pixel-mask sweep on $NIGHT_SUM → $NIGHT/"
-if [ "$FORCE" = "1" ] || [ ! -e "$NIGHT/hot-pixels-starcam-${NIGHT_DATE}-4pct.fits.fz" ]; then
-    # Write masks with the night date in the filename for unambiguous
-    # selection later. hot-pixel-mask uses --camera in the filename;
-    # we override --out-dir and re-suffix afterwards via mv.
+HOT_CAMERA="starcam-${NIGHT_DATE}${VARIANT:+-${VARIANT}}"
+if [ "$FORCE" = "1" ] || [ ! -e "$NIGHT/hot-pixels-${HOT_CAMERA}-4pct.fits.fz" ]; then
+    # Write masks with the night date (+variant) in the filename for
+    # unambiguous selection later. hot-pixel-mask uses --camera in the
+    # filename; we override --out-dir and re-suffix afterwards via mv.
     run hot-pixel-mask "$NIGHT_SUM" --sweep --out-dir "$NIGHT" \
-        --camera "starcam-${NIGHT_DATE}"
+        --camera "$HOT_CAMERA"
 fi
 
 # Pick the strict mask (0.1%) for downstream tools. Cheap to change later.
-NIGHT_HOT_MASK="$NIGHT/hot-pixels-starcam-${NIGHT_DATE}-0.1pct.fits.fz"
-[ -e "$NIGHT_HOT_MASK" ] || NIGHT_HOT_MASK="$NIGHT/hot-pixels-starcam-${NIGHT_DATE}-1pct.fits.fz"
+NIGHT_HOT_MASK="$NIGHT/hot-pixels-${HOT_CAMERA}-0.1pct.fits.fz"
+[ -e "$NIGHT_HOT_MASK" ] || NIGHT_HOT_MASK="$NIGHT/hot-pixels-${HOT_CAMERA}-1pct.fits.fz"
 echo "using hot mask: $NIGHT_HOT_MASK" | tee -a "$LOG"
 
 # ---------- Stage C: refresh plot-brightness -------------------------
@@ -240,7 +265,7 @@ K1="0.0"; K2="0.0"
 # which seeds the derot patches. TODO: wire --mask through derot-patches.
 COMBINED_MASK="$NIGHT_HOT_MASK"
 if [ -n "$SKY_MASK" ] && [ -e "$NIGHT_HOT_MASK" ]; then
-    COMBINED_MASK="$NIGHT/combined-mask.fits.fz"
+    COMBINED_MASK="$NIGHT/${PREFIX}combined-mask.fits.fz"
     python3 <<PY 2>&1 | tee -a "$LOG"
 from astropy.io import fits
 import numpy as np
@@ -257,11 +282,19 @@ fi
 
 for HH in "${ORDER[@]}"; do
     HH_DIR="$NIGHT/$HH"
-    HHB="$NIGHT/${HH}b"
+    HHB="$NIGHT/${HH}${BIN_SUFFIX}"
     [ -d "$HH_DIR" ] || continue
     [ -d "$HHB" ] || continue
     MEAN="${HH_MEAN[$HH]:-9999}"
     NOW=$(date -u +%FT%TZ)
+
+    # Empty HHb (e.g. all frames gated out by bin-frames --max-mean) — skip.
+    NFRAMES=$(ls -1 "$HHB"/[0-9]*.fits.fz 2>/dev/null | wc -l)
+    if [ "$NFRAMES" = "0" ]; then
+        printf '  skip hour %s: no binned frames in %s\n' "$HH" "$HHB" | tee -a "$LOG"
+        echo "$HH,$NOW,$MEAN,,,skipped-empty" >> "$SUMMARY"
+        continue
+    fi
 
     if python3 -c "import sys; sys.exit(0 if float('$MEAN') > $SKY_THRESH else 1)"; then
         printf '  skip hour %s: mean %.1f > sky-threshold %s\n' \
@@ -392,7 +425,9 @@ done
 
 # ---------- Stage F: all-night derot ---------------------------------
 step "F. all-night derot"
-run derot-night "$NIGHT"
+DEROT_NIGHT_ARGS=()
+[ -n "$VARIANT" ] && DEROT_NIGHT_ARGS+=(--variant "$VARIANT")
+run derot-night "$NIGHT" "${DEROT_NIGHT_ARGS[@]}"
 
 step "night complete: $NIGHT"
 printf 'summary: %s\n' "$SUMMARY"

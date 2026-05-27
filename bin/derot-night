@@ -82,9 +82,15 @@ def main() -> int:
                     help="rad/frame (3s sidereal × sign for image-coord CCW)")
     ap.add_argument("--stretch-lo", type=float, default=50.0)
     ap.add_argument("--stretch-hi", type=float, default=99.5)
+    ap.add_argument("--variant", default="",
+                    help="variant name; reads HH-<variant>/ dirs and "
+                         "writes <variant>_pipeline-poles.csv / "
+                         "<variant>_all-night-derot.{fits.fz,jpg}. "
+                         "Empty (default) uses HHb/ and unprefixed outputs.")
     args = ap.parse_args()
 
-    poles_csv = args.night / "pipeline-poles.csv"
+    prefix = f"{args.variant}_" if args.variant else ""
+    poles_csv = args.night / f"{prefix}pipeline-poles.csv"
     if args.pole_x is not None and args.pole_y is not None:
         pole = (args.pole_x, args.pole_y)
         print(f"using override pole=({pole[0]:.1f},{pole[1]:.1f})")
@@ -94,14 +100,22 @@ def main() -> int:
             print(f"no usable poles in {poles_csv}", file=sys.stderr)
             return 1
         pole = med
-        print(f"median pole from pipeline-poles.csv: "
+        print(f"median pole from {poles_csv.name}: "
               f"({pole[0]:.1f},{pole[1]:.1f})")
 
-    # Walk all <HHb>/*.fits.fz in time order (sorted by epoch_ms).
-    hh_dirs = sorted(d for d in args.night.iterdir()
-                     if d.is_dir() and d.name.endswith("b"))
+    # Walk all hour-bin dirs in time order. Default variant: HHb/.
+    # Named variant: HH-<variant>/.
+    if args.variant:
+        suffix = f"-{args.variant}"
+        hh_dirs = sorted(d for d in args.night.iterdir()
+                         if d.is_dir() and d.name.endswith(suffix))
+    else:
+        hh_dirs = sorted(d for d in args.night.iterdir()
+                         if d.is_dir() and d.name.endswith("b")
+                         and "-" not in d.name)
     if not hh_dirs:
-        print(f"no <HH>b dirs under {args.night}", file=sys.stderr)
+        which = f"HH-{args.variant}" if args.variant else "HHb"
+        print(f"no {which} dirs under {args.night}", file=sys.stderr)
         return 1
 
     items: list[tuple[int, Path]] = []
@@ -150,7 +164,7 @@ def main() -> int:
     print(f"\nstack: min={acc.min():.0f} max={acc.max():.0f} "
           f"mean={acc.mean():.1f}")
 
-    out_fits = args.night / "all-night-derot.fits.fz"
+    out_fits = args.night / f"{prefix}all-night-derot.fits.fz"
     primary = fits.PrimaryHDU()
     comp = fits.CompImageHDU(data=acc.astype(np.int32),
                              compression_type="RICE_1")
@@ -168,7 +182,7 @@ def main() -> int:
         hi = lo + 1.0
     norm = np.clip((acc - lo) / (hi - lo), 0, 1)
     u8 = (norm * 255).astype(np.uint8)
-    out_jpg = args.night / "all-night-derot.jpg"
+    out_jpg = args.night / f"{prefix}all-night-derot.jpg"
     Image.fromarray(u8).save(out_jpg, quality=92)
     print(f"wrote {out_jpg} (p{args.stretch_lo}={lo:.0f} → "
           f"p{args.stretch_hi}={hi:.0f})")

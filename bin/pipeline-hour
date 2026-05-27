@@ -2,21 +2,31 @@
 # pipeline-hour — light per-hour prep, fires from systemd hourly.
 #
 # Does (all idempotent, skipped if output exists unless --force):
-#   1. bin-frames     <hh> → <hh>b/
+#   1. bin-frames     <hh> → <hh-bindir>/
 #   2. scan-brightness <hh>     (raw HH dir, for plot-brightness)
-#   3. sum-frames     <hh>b/    → <hh>b/sum.fits.fz (int32)
+#   3. sum-frames     <hh-bindir>/ → <hh-bindir>/sum.fits.fz (int32)
+#      + JPG at <night>/[<variant>_]sum_<HH>.jpg for easy flip-through
 #
 # Heavy work (hot mask, sky mask, candidates, fit-pole, fit-geometry,
 # derot-patches, derot-night) lives in pipeline-night. Pipeline-hour
 # is intentionally cheap so it can run from the HH:01 timer without
 # contending with capture.
 #
+# Variants: --variant NAME makes the bin dir <HH>-<NAME>/ instead of
+# the default <HH>b/, and prefixes the night-level sum jpg with
+# <NAME>_. Pair with bin-frames flags (e.g. --max-mean 80) to test
+# different ingestion choices side-by-side. If --variant is set and
+# bin-frames gates all frames out, exit 0 silently (no work to do).
+#
 # Usage:
-#   pipeline-hour <hh-dir>          # e.g. ~/starcam-frames/night/2026-05-24/02
-#   pipeline-hour <hh-dir> --force  # redo every step
+#   pipeline-hour <hh-dir>                       # default variant
+#   pipeline-hour <hh-dir> --force               # redo every step
+#   pipeline-hour <hh-dir> --variant max80 --max-mean 80
 set -euo pipefail
 
 FORCE=0
+VARIANT=""
+MAX_MEAN=""
 
 usage() {
     sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//;/^set -e/d'
@@ -25,8 +35,10 @@ usage() {
 HH=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --force)   FORCE=1; shift;;
-        -h|--help) usage; exit 0;;
+        --force)    FORCE=1; shift;;
+        --variant)  VARIANT="$2"; shift 2;;
+        --max-mean) MAX_MEAN="$2"; shift 2;;
+        -h|--help)  usage; exit 0;;
         *) if [ -z "$HH" ]; then HH="$1"; shift
            else echo "extra arg: $1" >&2; exit 2; fi;;
     esac
@@ -35,7 +47,20 @@ done
 [ -n "$HH" ] || { usage; exit 2; }
 HH="${HH%/}"
 [ -d "$HH" ] || { echo "no such dir: $HH" >&2; exit 2; }
-HHB="${HH}b"
+
+# Bin dir: default keeps the historical <HH>b/ name; named variants
+# get <HH>-<NAME>/ so they coexist with the default.
+if [ -n "$VARIANT" ]; then
+    HHB="${HH}-${VARIANT}"
+else
+    HHB="${HH}b"
+fi
+
+NIGHT="$(dirname "$HH")"   # e.g. .../night/2026-05-25
+HHNAME="$(basename "$HH")" # e.g. 02
+JPG_PREFIX=""
+[ -n "$VARIANT" ] && JPG_PREFIX="${VARIANT}_"
+SUM_JPG="$NIGHT/${JPG_PREFIX}sum_${HHNAME}.jpg"
 
 step() { printf '\n=== %s ===\n' "$*"; }
 need() {
@@ -44,9 +69,18 @@ need() {
 }
 
 # 1. bin
-step "1. bin-frames → $HHB"
+BIN_ARGS=()
+[ -n "$MAX_MEAN" ] && BIN_ARGS+=(--max-mean "$MAX_MEAN")
+step "1. bin-frames → $HHB${MAX_MEAN:+ (max-mean=$MAX_MEAN)}"
 if need "$HHB/0001.fits.fz"; then
-    bin-frames "$HH" "$HHB"
+    if ! bin-frames "$HH" "$HHB" "${BIN_ARGS[@]}"; then
+        rc=$?
+        if [ "$rc" = "2" ]; then
+            echo "  hour $HHNAME: all frames gated out — nothing to do"
+            exit 0
+        fi
+        exit "$rc"
+    fi
 fi
 
 # 2. scan-brightness on the RAW HH dir (plot-brightness consumes these)
@@ -55,10 +89,10 @@ if need "$HH/brightness.csv"; then
     scan-brightness "$HH"
 fi
 
-# 3. sum binned frames
-step "3. sum-frames $HHB"
+# 3. sum binned frames; jpg lands at night-level for easy comparison.
+step "3. sum-frames $HHB → $SUM_JPG"
 if need "$HHB/sum.fits.fz"; then
-    sum-frames "$HHB"
+    sum-frames "$HHB" --out-jpg "$SUM_JPG"
 fi
 
 printf '\nhour prep done: %s\n' "$HHB"

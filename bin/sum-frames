@@ -46,7 +46,11 @@ def main() -> int:
     ap.add_argument("dir", type=Path, nargs="?", default=Path.cwd(),
                     help="directory containing .fits.fz (default: cwd)")
     ap.add_argument("--out", type=Path, default=None,
-                    help="output path (default: <dir>/sum.fits.fz)")
+                    help="output FITS path (default: <dir>/sum.fits.fz)")
+    ap.add_argument("--out-jpg", type=Path, default=None,
+                    help="output JPG path (default: sibling of --out, "
+                         "renamed sum.jpg). Use to land the eyeballable "
+                         "JPG outside the input dir.")
     args = ap.parse_args()
 
     fns = sorted(args.dir.glob("*.fits.fz"))
@@ -83,7 +87,8 @@ def main() -> int:
 
     # Companion jpg for quick eyeballing. p50 → p99.9 (top 0.1% saturate)
     # so dim hours don't look "burnt" just because hot pixels stand out.
-    jpg_path = out_path.with_suffix("").with_suffix(".jpg")
+    jpg_path = args.out_jpg or out_path.with_suffix("").with_suffix(".jpg")
+    jpg_path.parent.mkdir(parents=True, exist_ok=True)
     lo = float(np.percentile(acc, 50))
     hi = float(np.percentile(acc, 99.9))
     if hi <= lo:

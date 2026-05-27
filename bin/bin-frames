@@ -53,6 +53,10 @@ def main() -> int:
     ap.add_argument("dst", type=Path, help="destination dir for binned + renumbered output")
     ap.add_argument("--limit", type=int, default=0,
                     help="cap on frames (0 = no cap)")
+    ap.add_argument("--max-mean", type=float, default=0.0,
+                    help="skip source frames with raw mean above this "
+                         "(0 = no gate). Use to drop dawn/twilight frames "
+                         "while keeping the dark portion of the hour.")
     args = ap.parse_args()
 
     fns = sorted(args.src.glob("*.fits.fz"))
@@ -65,11 +69,18 @@ def main() -> int:
         return 1
 
     args.dst.mkdir(parents=True, exist_ok=True)
-    print(f"binning {len(fns)} frames {args.src} → {args.dst}")
+    print(f"binning {len(fns)} frames {args.src} → {args.dst}"
+          + (f" (--max-mean {args.max_mean})" if args.max_mean else ""))
 
-    for i, src in enumerate(fns):
+    written = 0
+    skipped_bright = 0
+    for i_src, src in enumerate(fns):
         img, src_hdr = load_frame(src)
+        if args.max_mean and float(img.mean()) > args.max_mean:
+            skipped_bright += 1
+            continue
         binned = bin2x2_sum(img)
+        i = written
 
         primary = fits.PrimaryHDU()
         comp = fits.CompImageHDU(data=binned, compression_type="RICE_1")
@@ -84,13 +95,21 @@ def main() -> int:
 
         out = args.dst / f"{i+1:04d}.fits.fz"
         fits.HDUList([primary, comp]).writeto(out, overwrite=True)
+        written += 1
 
-        if i == 0 or (i + 1) % 200 == 0 or i == len(fns) - 1:
-            print(f"  [{i+1}/{len(fns)}] {src.name} → {out.name}  "
+        if written == 1 or written % 200 == 0 or i_src == len(fns) - 1:
+            print(f"  [{i_src+1}/{len(fns)}] {src.name} → {out.name}  "
                   f"{img.shape} → {binned.shape}",
                   flush=True)
 
-    print(f"wrote {len(fns)} frames to {args.dst}")
+    msg = f"wrote {written} frames to {args.dst}"
+    if skipped_bright:
+        msg += f" (skipped {skipped_bright} above --max-mean {args.max_mean})"
+    print(msg)
+    if written == 0:
+        print(f"  no frames passed brightness gate — leaving {args.dst} empty",
+              file=sys.stderr)
+        return 2
     return 0
 
 
