@@ -32,9 +32,7 @@ STATE_PATH = STARCAM_ROOT / ".cover-state"
 
 SKYCAM_MOUNT = Path(os.environ.get("SKYCAM_MOUNT", "/mnt/skycam-frames"))
 
-COVER_MOVE = Path.home() / "astro" / "bin" / "cover-move"
-OPEN_ANGLE = 60
-CLOSE_ANGLE = -60
+COVER = Path.home() / "astro" / "bin" / "cover"
 
 # Window: cover-open.timer fires 20:30, cover-close.timer fires 05:00.
 # We don't act in the first hour after dusk (still bright everywhere) nor
@@ -130,9 +128,9 @@ def skycam_crop_mean(path: Path) -> float | None:
     return None
 
 
-def move_cover(angle: int, label: str) -> None:
-    log(f"moving cover -> {label} (angle={angle})")
-    subprocess.run(["python3", str(COVER_MOVE), str(angle), label], check=True)
+def move_cover(action: str) -> None:
+    log(f"invoking: cover {action}")
+    subprocess.run([str(COVER), action], check=True)
 
 
 def main() -> int:
@@ -161,7 +159,7 @@ def main() -> int:
             return 0
         if all(m >= CLOUDY_STARCAM_MEAN for m in means):
             log(f"all >= {CLOUDY_STARCAM_MEAN}: cloudy -> CLOSE")
-            move_cover(CLOSE_ANGLE, "closed")
+            move_cover("close")
         else:
             log("not all cloudy; keep open")
         return 0
@@ -179,7 +177,7 @@ def main() -> int:
             return 0
         if all(c < CLEAR_SKYCAM_CROP for c in crops):
             log(f"all < {CLEAR_SKYCAM_CROP}: clear -> OPEN")
-            move_cover(OPEN_ANGLE, "open")
+            move_cover("open")
         else:
             log("not all clear; keep closed")
         return 0

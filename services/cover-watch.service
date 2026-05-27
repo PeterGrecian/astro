@@ -1,10 +1,15 @@
 [Unit]
 Description=astro: decide cover open/closed from starcam+skycam brightness
+# Runs on puppy: starcam-frames is NFS-mounted here (read+write for state),
+# skycam-frames is native, and the astro venv with astropy lives here.
+# Calls `cover` which ssh's to starcam to drive the servo.
 
 [Service]
 Type=oneshot
 User=peter
 Group=peter
+Environment=STARCAM_ROOT=/home/peter/starcam-frames
+Environment=SKYCAM_MOUNT=/home/peter/skycam-frames
 ExecStart=/home/peter/astro/.venv/bin/python /home/peter/astro/bin/cover-watch
 StandardOutput=journal
 StandardError=journal
