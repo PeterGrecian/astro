@@ -133,6 +133,15 @@ def main() -> int:
                     help="rotation rate (rad/frame); sign matches camera")
     ap.add_argument("--refine", action="store_true",
                     help="also run Nelder-Mead from the grid best")
+    ap.add_argument("--trace", type=Path, default=None,
+                    help="append a CSV record of this fit's outcome "
+                         "(creates header if file is new). One line per call.")
+    ap.add_argument("--trace-grad", action="store_true",
+                    help="also compute score gradients in x and y at the "
+                         "final pole (4 extra score evals)")
+    ap.add_argument("--trace-iter", type=int, default=0,
+                    help="iter number to record in --trace (the bootstrap "
+                         "loop sets this; standalone runs leave it 0)")
     args = ap.parse_args()
 
     cand_csv = args.candidates or (args.dir / "candidates.csv")
@@ -181,6 +190,7 @@ def main() -> int:
           f"score={best[0]:.2f} (seed={seed_score:.2f}, "
           f"+{100*(best[0]-seed_score)/seed_score:.1f}%)")
 
+    nfev = args.grid * args.grid
     if args.refine:
         print("\nNelder-Mead refinement from grid best…")
         def f(p):
@@ -190,11 +200,50 @@ def main() -> int:
                        options={"xatol": 0.5, "fatol": 0.1, "disp": True})
         rx, ry = float(res.x[0]), float(res.x[1])
         rscore = -float(res.fun)
+        nfev += int(res.nfev)
         print(f"refined:  pole=({rx:.2f},{ry:.2f})  score={rscore:.2f}")
         print(f"\nrecommended --pole-x {rx:.1f} --pole-y {ry:.1f}")
+        final_px, final_py, final_score = rx, ry, rscore
     else:
-        print(f"\nrecommended --pole-x {best[1]:.1f} --pole-y {best[2]:.1f}")
+        final_px, final_py, final_score = best[1], best[2], best[0]
+        print(f"\nrecommended --pole-x {final_px:.1f} --pole-y {final_py:.1f}")
+
+    if args.trace is not None:
+        write_trace(args.trace, args.trace_iter, "pole", len(fns), args.top,
+                    final_px, final_py, 0.0, 0.0, final_score, nfev,
+                    grad=args.trace_grad, imgs=imgs, angles=angles_deg,
+                    cells=cells, patch=args.patch)
     return 0
+
+
+def write_trace(path: Path, iter_n: int, phase: str, frames: int, top: int,
+                px: float, py: float, k1: float, k2: float,
+                score: float, nfev: int,
+                grad: bool = False, imgs=None, angles=None, cells=None,
+                patch: int = 50) -> None:
+    """Append one CSV record. Creates header if file is new.
+
+    With grad=True, computes finite-difference dscore/dpx, dscore/dpy
+    at (±1 px) — 4 extra score evaluations (fit-pole only; geom has
+    its own variant)."""
+    new = not path.exists()
+    grad_x = grad_y = ""
+    if grad and imgs is not None:
+        # ±1 px finite-difference. Symmetric so it averages out noise.
+        sxp = score_pole((px + 1.0, py), imgs, angles, cells, patch)
+        sxm = score_pole((px - 1.0, py), imgs, angles, cells, patch)
+        syp = score_pole((px, py + 1.0), imgs, angles, cells, patch)
+        sym = score_pole((px, py - 1.0), imgs, angles, cells, patch)
+        grad_x = f"{(sxp - sxm) / 2.0:.4f}"
+        grad_y = f"{(syp - sym) / 2.0:.4f}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        if new:
+            f.write("iter,phase,frames,top,px,py,k1,k2,score,nfev,"
+                    "grad_x,grad_y\n")
+        f.write(f"{iter_n},{phase},{frames},{top},"
+                f"{px:.4f},{py:.4f},{k1:.6f},{k2:.6f},"
+                f"{score:.4f},{nfev},{grad_x},{grad_y}\n")
 
 
 if __name__ == "__main__":

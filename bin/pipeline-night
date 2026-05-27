@@ -391,6 +391,11 @@ with fits.open('$LAST_PATCH_DIR') as h:
             --mask "$COMBINED_MASK" --top-cells
     fi
 
+    # Per-hour fit trace — one row per fit-pole/fit-geometry call. Lets
+    # you see whether the score climbs monotonically, where it plateaus,
+    # which axis is sensitive (grad_x/y), etc.
+    TRACE_CSV="$HHB/fit-trace.csv"
+
     # bootstrap loop
     ITER="$RESUME_ITER"
     while [ "$ITER" -lt "$MAX_ITERS" ]; do
@@ -399,12 +404,15 @@ with fits.open('$LAST_PATCH_DIR') as h:
             step "  iter $ITER: fit-pole"
             FIT_OUT=$(fit-pole "$HHB" --pole-x "$PX" --pole-y "$PY" \
                 --frames "$FRAMES" --patch "$PATCH" --top "$TOP" \
-                --refine 2>&1)
+                --refine \
+                --trace "$TRACE_CSV" --trace-iter "$ITER" --trace-grad \
+                2>&1)
         else
             step "  iter $ITER: fit-geometry"
             FIT_OUT=$(fit-geometry "$HHB" --pole-x "$PX" --pole-y "$PY" \
                 --k1 "$K1" --k2 "$K2" \
                 --frames "$FRAMES_GEOM" --patch "$PATCH" --top "$TOP" \
+                --trace "$TRACE_CSV" --trace-iter "$ITER" --trace-grad \
                 2>&1)
         fi
         echo "$FIT_OUT" | tail -20 | tee -a "$LOG" >/dev/null

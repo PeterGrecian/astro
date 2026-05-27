@@ -187,6 +187,12 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=15,
                     help="top-N candidate cells")
     ap.add_argument("--patch", type=int, default=50)
+    ap.add_argument("--trace", type=Path, default=None,
+                    help="append one CSV record of this fit's outcome")
+    ap.add_argument("--trace-grad", action="store_true",
+                    help="also compute finite-diff gradients dscore/dpx, "
+                         "dscore/dpy (4 extra score evals at ±1 px)")
+    ap.add_argument("--trace-iter", type=int, default=0)
     args = ap.parse_args()
 
     cand_csv = args.candidates or (args.dir / "candidates.csv")
@@ -230,6 +236,31 @@ def main() -> int:
           f"→ score={score:.2f}")
     print(f"\nrecommended --pole-x {final[0]:.2f} --pole-y {final[1]:.2f} "
           f"--omega {args.omega:.7f} --k1 {final[2]:.5f} --k2 {final[3]:.5f}")
+
+    if args.trace is not None:
+        grad_x = grad_y = ""
+        if args.trace_grad:
+            # ±1 px finite-difference on pole_x/pole_y, keeping k1/k2 fixed.
+            sxp = -score_geom([final[0]+1, final[1], final[2], final[3]],
+                              imgs, cells, args.patch, angles_deg)
+            sxm = -score_geom([final[0]-1, final[1], final[2], final[3]],
+                              imgs, cells, args.patch, angles_deg)
+            syp = -score_geom([final[0], final[1]+1, final[2], final[3]],
+                              imgs, cells, args.patch, angles_deg)
+            sym = -score_geom([final[0], final[1]-1, final[2], final[3]],
+                              imgs, cells, args.patch, angles_deg)
+            grad_x = f"{(sxp - sxm) / 2.0:.4f}"
+            grad_y = f"{(syp - sym) / 2.0:.4f}"
+        args.trace.parent.mkdir(parents=True, exist_ok=True)
+        new = not args.trace.exists()
+        with args.trace.open("a") as f:
+            if new:
+                f.write("iter,phase,frames,top,px,py,k1,k2,score,nfev,"
+                        "grad_x,grad_y\n")
+            f.write(f"{args.trace_iter},geom,{len(fns)},{args.top},"
+                    f"{final[0]:.4f},{final[1]:.4f},"
+                    f"{final[2]:.6f},{final[3]:.6f},"
+                    f"{score:.4f},{int(res.nfev)},{grad_x},{grad_y}\n")
     return 0
 
 
