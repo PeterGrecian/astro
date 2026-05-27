@@ -1,0 +1,10 @@
+[Unit]
+Description=astro: decide cover open/closed from starcam+skycam brightness
+
+[Service]
+Type=oneshot
+User=peter
+Group=peter
+ExecStart=/home/peter/astro/.venv/bin/python /home/peter/astro/bin/cover-watch
+StandardOutput=journal
+StandardError=journal

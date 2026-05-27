@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""cover-watch — close the lens cover when the sky goes bright (cloudy / dawn),
+reopen it when skycam (on puppy, NFS-mounted) reports clear sky again.
+
+Designed for one-shot invocation by a 5-minute systemd timer on starcam.
+Runs only inside the operational night window. Writes decisions to journal
+and (on a real flip) writes the cover state file the existing tooling uses.
+
+Brightness rules (calibrated 2026-05-26, near-full moon, north-facing cams):
+    starcam mean >= CLOUDY_STARCAM_MEAN     for 3 reads -> close
+    skycam crop_mean <  CLEAR_SKYCAM_CROP   for 3 reads -> reopen
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+LONDON = ZoneInfo("Europe/London")
+
+STARCAM_ROOT = Path(os.environ.get("STARCAM_ROOT", str(Path.home() / "starcam-frames")))
+NIGHT_ROOT = STARCAM_ROOT / "night"
+STATE_PATH = STARCAM_ROOT / ".cover-state"
+
+SKYCAM_MOUNT = Path(os.environ.get("SKYCAM_MOUNT", "/mnt/skycam-frames"))
+
+COVER_MOVE = Path.home() / "astro" / "bin" / "cover-move"
+OPEN_ANGLE = 60
+CLOSE_ANGLE = -60
+
+# Window: cover-open.timer fires 20:30, cover-close.timer fires 05:00.
+# We don't act in the first hour after dusk (still bright everywhere) nor
+# in the last 30 minutes before the hard close (let timer handle it).
+ACT_AFTER = (21, 30)   # 21:30 local
+ACT_BEFORE = (4, 30)   # 04:30 local
+
+CLOUDY_STARCAM_MEAN = 45.0   # >= means cover should close
+CLEAR_SKYCAM_CROP = 35.0     # < means safe to reopen
+CONSEC_NEEDED = 3
+LOCKOUT_S = 3600             # no flip within 1 hour of last flip
+
+
+def log(msg: str) -> None:
+    print(f"cover-watch: {msg}", flush=True)
+
+
+def in_act_window(now: datetime) -> bool:
+    t = (now.hour, now.minute)
+    # window straddles midnight: 21:30 -> 04:30
+    return t >= ACT_AFTER or t < ACT_BEFORE
+
+
+def current_night_label(now: datetime) -> str:
+    """IAU noon-rollover: morning hours belong to the previous date."""
+    if now.hour < 12:
+        return (now - __import__("datetime").timedelta(days=1)).strftime("%Y-%m-%d")
+    return now.strftime("%Y-%m-%d")
+
+
+def read_cover_state() -> tuple[str, int]:
+    """Return (label, epoch_s_of_last_move). ('unknown', 0) if no state file."""
+    if not STATE_PATH.exists():
+        return ("unknown", 0)
+    lines = STATE_PATH.read_text().splitlines()
+    label = lines[0].strip() if lines else "unknown"
+    ts = 0
+    if len(lines) >= 3:
+        try:
+            ts = int(lines[2].strip())
+        except ValueError:
+            pass
+    return (label, ts)
+
+
+def latest_starcam_fits(n: int) -> list[Path]:
+    """Most-recent n .fits.fz files across current and previous hour dirs."""
+    now = datetime.now(LONDON)
+    night = current_night_label(now)
+    night_dir = NIGHT_ROOT / night
+    if not night_dir.is_dir():
+        return []
+    # Look at the latest 2 hour dirs to span hour boundaries.
+    hour_dirs = sorted([p for p in night_dir.iterdir() if p.is_dir() and len(p.name) == 2])[-2:]
+    files: list[Path] = []
+    for hd in hour_dirs:
+        files.extend(sorted(hd.glob("*.fits.fz")))
+    return files[-n:]
+
+
+def starcam_frame_mean(path: Path) -> float | None:
+    try:
+        with fits.open(path, memmap=True) as h:
+            for hdu in h:
+                if hdu.data is not None and hdu.data.ndim == 2:
+                    return float(np.asarray(hdu.data).mean())
+    except Exception as e:
+        log(f"failed to read {path.name}: {e}")
+    return None
+
+
+def latest_skycam_jpgs(n: int) -> list[Path]:
+    """Most-recent n .jpg files from the NFS-mounted skycam frames tree."""
+    if not SKYCAM_MOUNT.is_dir():
+        return []
+    # skycam uses YYYY-MM-DD/HH/<epoch>_label.jpg (UTC date+hour).
+    date_dirs = sorted([p for p in SKYCAM_MOUNT.iterdir() if p.is_dir() and len(p.name) == 10])[-2:]
+    files: list[Path] = []
+    for dd in date_dirs:
+        for hd in sorted([p for p in dd.iterdir() if p.is_dir() and len(p.name) == 2])[-2:]:
+            files.extend(sorted(hd.glob("*.jpg")))
+    return files[-n:]
+
+
+def skycam_crop_mean(path: Path) -> float | None:
+    try:
+        img = np.asarray(Image.open(path).convert("L"))
+        h, w = img.shape
+        crop = img[h // 4:3 * h // 4, w // 4:3 * w // 4]
+        return float(crop.mean())
+    except Exception as e:
+        log(f"failed to read {path.name}: {e}")
+    return None
+
+
+def move_cover(angle: int, label: str) -> None:
+    log(f"moving cover -> {label} (angle={angle})")
+    subprocess.run(["python3", str(COVER_MOVE), str(angle), label], check=True)
+
+
+def main() -> int:
+    now = datetime.now(LONDON)
+    if not in_act_window(now):
+        log(f"outside act window ({now.strftime('%H:%M')}); no-op")
+        return 0
+
+    state, last_ts = read_cover_state()
+    age = int(time.time()) - last_ts if last_ts else 10**9
+    log(f"state={state} age={age}s")
+    if age < LOCKOUT_S:
+        log(f"within {LOCKOUT_S}s lockout; no-op")
+        return 0
+
+    if state == "open":
+        # Decide whether to close based on starcam brightness.
+        frames = latest_starcam_fits(CONSEC_NEEDED)
+        if len(frames) < CONSEC_NEEDED:
+            log(f"only {len(frames)} starcam frames available; need {CONSEC_NEEDED}; no-op")
+            return 0
+        means = [starcam_frame_mean(p) for p in frames]
+        log(f"starcam means: {means}")
+        if any(m is None for m in means):
+            log("missing starcam reads; no-op")
+            return 0
+        if all(m >= CLOUDY_STARCAM_MEAN for m in means):
+            log(f"all >= {CLOUDY_STARCAM_MEAN}: cloudy -> CLOSE")
+            move_cover(CLOSE_ANGLE, "closed")
+        else:
+            log("not all cloudy; keep open")
+        return 0
+
+    if state in ("closed", "weather-closed", "unknown"):
+        # Decide whether to reopen based on skycam brightness.
+        frames = latest_skycam_jpgs(CONSEC_NEEDED)
+        if len(frames) < CONSEC_NEEDED:
+            log(f"only {len(frames)} skycam frames available; need {CONSEC_NEEDED}; no-op")
+            return 0
+        crops = [skycam_crop_mean(p) for p in frames]
+        log(f"skycam crop_means: {crops}")
+        if any(c is None for c in crops):
+            log("missing skycam reads; no-op")
+            return 0
+        if all(c < CLEAR_SKYCAM_CROP for c in crops):
+            log(f"all < {CLEAR_SKYCAM_CROP}: clear -> OPEN")
+            move_cover(OPEN_ANGLE, "open")
+        else:
+            log("not all clear; keep closed")
+        return 0
+
+    log(f"unhandled state {state!r}; no-op")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
