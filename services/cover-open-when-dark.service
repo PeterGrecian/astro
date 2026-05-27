@@ -1,0 +1,15 @@
+[Unit]
+Description=astro: open lens cover the moment skycam reports dark sky
+# Runs on puppy: skycam-frames is native, starcam-frames is NFS-mounted
+# (for the cover-state file), and `cover` ssh's to starcam to drive the
+# servo. No act window — fires whenever the timer wakes it.
+
+[Service]
+Type=oneshot
+User=peter
+Group=peter
+Environment=STARCAM_ROOT=/home/peter/starcam-frames
+Environment=SKYCAM_MOUNT=/home/peter/skycam-frames
+ExecStart=/home/peter/astro/.venv/bin/python /home/peter/astro/bin/cover-open-when-dark
+StandardOutput=journal
+StandardError=journal

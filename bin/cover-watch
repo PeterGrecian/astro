@@ -6,6 +6,14 @@ Designed for one-shot invocation by a 5-minute systemd timer on starcam.
 Runs only inside the operational night window. Writes decisions to journal
 and (on a real flip) writes the cover state file the existing tooling uses.
 
+Host coupling: must run on the host where starcam-frames and skycam-frames
+are local filesystems. Today that's puppy (it is also the NFS server for
+starcam-frames, so "read recent starcam .fits.fz" is a local read). If the
+NFS server moves, this service moves with it — otherwise the starcam-frame
+reads become a network round-trip to the new server. The hard 05:00
+cover-close.timer on starcam is independent of this and survives any
+puppy/network outage.
+
 Brightness rules (calibrated 2026-05-26, near-full moon, north-facing cams):
     starcam mean >= CLOUDY_STARCAM_MEAN     for 3 reads -> close
     skycam crop_mean <  CLEAR_SKYCAM_CROP   for 3 reads -> reopen
