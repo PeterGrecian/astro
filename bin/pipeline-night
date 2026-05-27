@@ -29,6 +29,8 @@
 #   pipeline-night <night-dir> --min-move 0.1 --max-iters 30
 #                                              # fit harder
 #   pipeline-night <night-dir> --hot-pct 4      # use 4pct hot mask
+#   pipeline-night <night-dir> --top 50         # score 50 stars not 10
+#                                              # (~4x cost, broader sample)
 #
 # Variants — run side-by-side with the default attempt:
 #   pipeline-night <night-dir> --variant max80 --max-mean 80
@@ -79,6 +81,9 @@ while [ $# -gt 0 ]; do
         --max-iters) MAX_ITERS="$2"; shift 2;;
         --min-move) MIN_MOVE="$2"; shift 2;;
         --hot-pct) HOT_PCT="$2"; shift 2;;
+        --top) TOP="$2"; shift 2;;
+        --frames) FRAMES="$2"; shift 2;;
+        --frames-geom) FRAMES_GEOM="$2"; shift 2;;
         --force) FORCE=1; shift;;
         --restart) RESTART=1; shift;;
         --no-sky-mask) NO_SKY_MASK=1; shift;;
