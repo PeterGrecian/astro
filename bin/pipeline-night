@@ -289,7 +289,12 @@ for HH in "${ORDER[@]}"; do
     NOW=$(date -u +%FT%TZ)
 
     # Empty HHb (e.g. all frames gated out by bin-frames --max-mean) — skip.
-    NFRAMES=$(ls -1 "$HHB"/[0-9]*.fits.fz 2>/dev/null | wc -l)
+    # set -o pipefail makes `ls ... | wc -l` fatal on no-match; count
+    # directly via shell globbing instead.
+    shopt -s nullglob
+    HHB_FRAMES=("$HHB"/[0-9]*.fits.fz)
+    shopt -u nullglob
+    NFRAMES=${#HHB_FRAMES[@]}
     if [ "$NFRAMES" = "0" ]; then
         printf '  skip hour %s: no binned frames in %s\n' "$HH" "$HHB" | tee -a "$LOG"
         echo "$HH,$NOW,$MEAN,,,skipped-empty" >> "$SUMMARY"
@@ -412,7 +417,10 @@ with fits.open('$LAST_PATCH_DIR') as h:
 
     # Final all-frames stack for this hour
     step "  hour $HH: final all-frames derot"
-    ALL=$(ls -1 "$HHB"/[0-9]*.fits.fz 2>/dev/null | wc -l)
+    shopt -s nullglob
+    ALL_FRAMES=("$HHB"/[0-9]*.fits.fz)
+    shopt -u nullglob
+    ALL=${#ALL_FRAMES[@]}
     FINAL_DIR="$HHB/final"
     run derot-patches "$HHB" --pole-x "$PX" --pole-y "$PY" \
         --k1 "$K1" --k2 "$K2" \

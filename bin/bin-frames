@@ -107,7 +107,13 @@ def main() -> int:
         msg += f" (skipped {skipped_bright} above --max-mean {args.max_mean})"
     print(msg)
     if written == 0:
-        print(f"  no frames passed brightness gate — leaving {args.dst} empty",
+        # Remove the empty dest dir we created so downstream tools that
+        # iterate "*-<variant>/" don't see a misleading empty bin dir.
+        try:
+            args.dst.rmdir()
+        except OSError:
+            pass
+        print(f"  no frames passed brightness gate — removed empty {args.dst}",
               file=sys.stderr)
         return 2
     return 0
