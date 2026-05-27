@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""mark-candidates — overlay candidate-cell markers on a stack image.
+
+Draws a yellow + cross at each candidate peak coordinate, plus the
+cell number. Useful for sanity-checking which "stars" the fit-pole/
+fit-geometry scorer is actually optimising against — if the markers
+land on hot pixels or empty patches of noise, the fit is junk.
+
+Renders by overlaying onto:
+  - a JPG (PIL drawing on the RGB pixels), or
+  - a FITS (auto-stretched via the same p50→p99.5 used by sum-frames,
+    then overlay in colour).
+
+The candidate cells are the top-N by cumulative peak value from
+candidates.csv, same selection as fit-pole/fit-geometry use.
+
+Usage:
+    mark-candidates <stack.fits.fz|stack.jpg>
+                    --candidates <candidates.csv>
+                    --top 10
+                    [--out marked.jpg]
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from PIL import Image, ImageDraw, ImageFont
+
+
+def top_cells(csv_path: Path, n: int):
+    sums = {}
+    first_peak = {}
+    with open(csv_path) as f:
+        for row in csv.DictReader(f):
+            k = (int(row["cell_x"]), int(row["cell_y"]))
+            sums[k] = sums.get(k, 0) + int(row["peak_value"])
+            if k not in first_peak:
+                first_peak[k] = (int(row["peak_x"]), int(row["peak_y"]))
+    ranked = sorted(sums.items(), key=lambda kv: -kv[1])[:n]
+    return [((cx, cy), first_peak[(cx, cy)]) for (cx, cy), _ in ranked]
+
+
+def load_image(path: Path, stretch_lo: float, stretch_hi: float):
+    """Return PIL RGB Image."""
+    if path.suffix.lower() in (".jpg", ".jpeg", ".png"):
+        return Image.open(path).convert("RGB")
+    # FITS — stretch to 8-bit and convert.
+    with fits.open(path) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                arr = hdu.data.astype(np.float32)
+                break
+        else:
+            raise SystemExit(f"no 2D image in {path}")
+    lo = float(np.percentile(arr, stretch_lo))
+    hi = float(np.percentile(arr, stretch_hi))
+    if hi <= lo:
+        hi = lo + 1.0
+    norm = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
+    u8 = (norm * 255).astype(np.uint8)
+    rgb = np.stack([u8, u8, u8], axis=-1)
+    return Image.fromarray(rgb)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("image", type=Path,
+                    help="FITS or JPG/PNG stack to annotate")
+    ap.add_argument("--candidates", type=Path, default=None,
+                    help="candidates.csv (default: <image-dir>/../candidates.csv)")
+    ap.add_argument("--top", type=int, default=10,
+                    help="number of top candidate cells to mark")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output JPG (default: <image>.marked.jpg)")
+    ap.add_argument("--colour", default="yellow",
+                    help="marker colour (PIL name or '#RRGGBB')")
+    ap.add_argument("--arm", type=int, default=5,
+                    help="cross arm length in pixels (default 5)")
+    ap.add_argument("--stretch-lo", type=float, default=50.0)
+    ap.add_argument("--stretch-hi", type=float, default=99.5)
+    args = ap.parse_args()
+
+    if args.candidates is None:
+        # Stacks usually live as HHb/<sub>/derot.fits.fz; candidates.csv
+        # is in the HHb dir (one level up from the stack subdir).
+        guess = args.image.parent / "candidates.csv"
+        if not guess.exists():
+            guess = args.image.parent.parent / "candidates.csv"
+        args.candidates = guess
+    if not args.candidates.exists():
+        print(f"no candidates.csv: {args.candidates}", file=sys.stderr)
+        return 2
+
+    cells = top_cells(args.candidates, args.top)
+    print(f"marking top {len(cells)} cells from {args.candidates.name}")
+
+    img = load_image(args.image, args.stretch_lo, args.stretch_hi)
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 14)
+    except OSError:
+        font = ImageFont.load_default()
+
+    a = args.arm
+    for i, ((cx, cy), (px, py)) in enumerate(cells, 1):
+        # + cross
+        draw.line([(px - a, py), (px + a, py)], fill=args.colour, width=1)
+        draw.line([(px, py - a), (px, py + a)], fill=args.colour, width=1)
+        # label
+        draw.text((px + a + 2, py - 8), f"{i}",
+                  fill=args.colour, font=font)
+
+    out = args.out or args.image.with_suffix(".marked.jpg")
+    img.save(out, quality=92)
+    print(f"wrote {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
