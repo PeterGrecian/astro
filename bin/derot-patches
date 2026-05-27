@@ -29,12 +29,28 @@ from astropy.io import fits
 from PIL import Image
 
 
-def load_frame(path: Path) -> np.ndarray:
+def load_frame(path: Path) -> tuple[np.ndarray, int | None]:
+    """Return (image, epoch_ms or None) — EPOCH_MS carried through binning."""
     with fits.open(path, memmap=True) as h:
         for hdu in h:
             if hdu.data is not None and hdu.data.ndim == 2:
-                return hdu.data
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
     raise SystemExit(f"no 2D image in {path}")
+
+
+def angles_from_epochs(epochs_ms: list[int | None], omega_per_frame: float,
+                       nominal_dt_ms: int = 3000) -> list[float]:
+    """Per-frame derotation angle in degrees. Time-based via EPOCH_MS
+    deltas when available (handles network/IO cadence jitter that
+    breaks frame-index × omega over long baselines). Falls back to
+    frame index if any epoch is missing."""
+    if any(e is None for e in epochs_ms):
+        return [float(np.degrees(i * omega_per_frame))
+                for i in range(len(epochs_ms))]
+    e0 = epochs_ms[0]
+    return [float(np.degrees(((e - e0) / nominal_dt_ms) * omega_per_frame))
+            for e in epochs_ms]
 
 
 def derotate(img: np.ndarray, pole: tuple[float, float],
@@ -160,7 +176,14 @@ def main() -> int:
     # undo sky rotation that occurred from frame 0 to frame i.
     # Image y is flipped vs math, so the CCW image-coord angle to undo
     # +omega sky rotation per frame is +omega per frame (matches sim).
-    angles_deg = [float(np.degrees(i * args.omega)) for i in range(len(fns))]
+    # Uses EPOCH_MS deltas when available so network/IO cadence jitter
+    # doesn't accumulate into a few-px arc over a long hour.
+    print("reading epochs from frame headers...", flush=True)
+    epochs = [load_frame(fn)[1] for fn in fns]
+    angles_deg = angles_from_epochs(epochs, args.omega)
+    if any(e is None for e in epochs):
+        print("  warn: some frames lack EPOCH_MS — falling back to "
+              "frame-index time model")
 
     pole = (args.pole_x, args.pole_y)
 
@@ -171,7 +194,8 @@ def main() -> int:
     maps_cache: dict = {}
     stack: np.ndarray | None = None
     for i, fn in enumerate(fns):
-        img = load_frame(fn).astype(np.float32)
+        img, _ = load_frame(fn)
+        img = img.astype(np.float32)
         if use_distortion:
             derot = derotate_with_distortion(img, pole, angles_deg[i],
                                              args.k1, args.k2, maps_cache)
@@ -186,7 +210,8 @@ def main() -> int:
     # Also derive a raw (no-derot) sum for comparison.
     raw_sum: np.ndarray | None = None
     for fn in fns:
-        d = load_frame(fn).astype(np.float32)
+        d, _ = load_frame(fn)
+        d = d.astype(np.float32)
         raw_sum = d if raw_sum is None else raw_sum + d
     assert raw_sum is not None
 

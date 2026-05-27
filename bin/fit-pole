@@ -30,12 +30,32 @@ from astropy.io import fits
 from scipy.optimize import minimize
 
 
-def load_frame(path: Path) -> np.ndarray:
+def load_frame(path: Path) -> tuple[np.ndarray, int | None]:
+    """Return (image, epoch_ms or None) — EPOCH_MS carried through binning."""
     with fits.open(path, memmap=True) as h:
         for hdu in h:
             if hdu.data is not None and hdu.data.ndim == 2:
-                return hdu.data
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
     raise SystemExit(f"no 2D image in {path}")
+
+
+def angles_from_epochs(epochs_ms: list[int | None], omega_per_frame: float,
+                       nominal_dt_ms: int = 3000) -> list[float]:
+    """Per-frame derotation angle in degrees.
+
+    Real cadence drifts (network/IO jitter), so frame-index × omega
+    accumulates phase error over a full hour. Use epoch deltas when
+    available: angle = (epoch_i - epoch_0) / nominal_dt_ms * omega_per_frame,
+    i.e. (seconds_elapsed * omega_per_second). Falls back to frame
+    index if any epoch is missing.
+    """
+    if any(e is None for e in epochs_ms):
+        return [float(np.degrees(i * omega_per_frame))
+                for i in range(len(epochs_ms))]
+    e0 = epochs_ms[0]
+    return [float(np.degrees(((e - e0) / nominal_dt_ms) * omega_per_frame))
+            for e in epochs_ms]
 
 
 def top_cells_with_peak(csv_path: Path, n: int):
@@ -128,8 +148,13 @@ def main() -> int:
            and not f.name.startswith(("stack", "hot-pixels"))]
     fns = fns[:args.frames]
     print(f"loading {len(fns)} frames into memory…")
-    imgs = [load_frame(fn).astype(np.float32) for fn in fns]
-    angles_deg = [float(np.degrees(i * args.omega)) for i in range(len(fns))]
+    loaded = [load_frame(fn) for fn in fns]
+    imgs = [d.astype(np.float32) for d, _ in loaded]
+    epochs = [e for _, e in loaded]
+    angles_deg = angles_from_epochs(epochs, args.omega)
+    if any(e is None for e in epochs):
+        print("  warn: some frames lack EPOCH_MS — falling back to "
+              "frame-index time model")
 
     seed_score = score_pole((args.pole_x, args.pole_y), imgs, angles_deg,
                             cells, args.patch)
