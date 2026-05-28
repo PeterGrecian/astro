@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """cover-watch — close the lens cover when the sky goes bright (cloudy / dawn),
-reopen it when skycam (on puppy, NFS-mounted) reports clear sky again.
+reopen it when skycam reports clear sky again.
 
-Designed for one-shot invocation by a 5-minute systemd timer on starcam.
-Runs only inside the operational night window. Writes decisions to journal
-and (on a real flip) writes the cover state file the existing tooling uses.
+Designed for one-shot invocation by a 5-minute systemd timer on starcam, which
+owns the cover decision. Runs only inside the operational night window. Writes
+decisions to the journal and (on a real flip) drives the servo via `cover`.
 
-Host coupling: must run on the host where starcam-frames and skycam-frames
-are local filesystems. Today that's puppy (it is also the NFS server for
-starcam-frames, so "read recent starcam .fits.fz" is a local read). If the
-NFS server moves, this service moves with it — otherwise the starcam-frame
-reads become a network round-trip to the new server. The hard 05:00
-cover-close.timer on starcam is independent of this and survives any
-puppy/network outage.
+Brightness sources, chosen so the CLOSE decision needs nothing off-host:
+  - CLOSE (cover open): starcam's own brightness, read from the capture
+    daemon's journal ('mean=N.N' per raw Bayer frame). Local, no FITS/astropy,
+    no NFS — survives a puppy/storage outage.
+  - REOPEN (cover closed): starcam is blind behind the cover, so use skycam
+    crop brightness from the NFS-mounted skycam frames (PIL, no astropy).
+
+The hard 05:00 cover-close.timer on starcam is independent of this and
+survives any outage.
 
 Brightness rules (calibrated 2026-05-26, near-full moon, north-facing cams):
     starcam mean >= CLOUDY_STARCAM_MEAN     for 3 reads -> close
@@ -21,6 +23,7 @@ Brightness rules (calibrated 2026-05-26, near-full moon, north-facing cams):
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -29,13 +32,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
-from astropy.io import fits
 from PIL import Image
 
 LONDON = ZoneInfo("Europe/London")
 
 STARCAM_ROOT = Path(os.environ.get("STARCAM_ROOT", str(Path.home() / "starcam-frames")))
-NIGHT_ROOT = STARCAM_ROOT / "night"
 STATE_PATH = STARCAM_ROOT / ".cover-state"
 
 SKYCAM_MOUNT = Path(os.environ.get("SKYCAM_MOUNT", "/mnt/skycam-frames"))
@@ -64,13 +65,6 @@ def in_act_window(now: datetime) -> bool:
     return t >= ACT_AFTER or t < ACT_BEFORE
 
 
-def current_night_label(now: datetime) -> str:
-    """IAU noon-rollover: morning hours belong to the previous date."""
-    if now.hour < 12:
-        return (now - __import__("datetime").timedelta(days=1)).strftime("%Y-%m-%d")
-    return now.strftime("%Y-%m-%d")
-
-
 def read_cover_state() -> tuple[str, int]:
     """Return (label, epoch_s_of_last_move). ('unknown', 0) if no state file."""
     if not STATE_PATH.exists():
@@ -86,30 +80,31 @@ def read_cover_state() -> tuple[str, int]:
     return (label, ts)
 
 
-def latest_starcam_fits(n: int) -> list[Path]:
-    """Most-recent n .fits.fz files across current and previous hour dirs."""
-    now = datetime.now(LONDON)
-    night = current_night_label(now)
-    night_dir = NIGHT_ROOT / night
-    if not night_dir.is_dir():
-        return []
-    # Look at the latest 2 hour dirs to span hour boundaries.
-    hour_dirs = sorted([p for p in night_dir.iterdir() if p.is_dir() and len(p.name) == 2])[-2:]
-    files: list[Path] = []
-    for hd in hour_dirs:
-        files.extend(sorted(hd.glob("*.fits.fz")))
-    return files[-n:]
+_MEAN_RE = re.compile(r"\bmean=([0-9]+(?:\.[0-9]+)?)")
 
 
-def starcam_frame_mean(path: Path) -> float | None:
+def recent_starcam_means(n: int) -> list[float]:
+    """Most-recent n starcam frame brightness values, read from the capture
+    daemon's own journal (it logs 'mean=N.N' per the raw Bayer frame).
+
+    This reads brightness LOCALLY on starcam — no FITS, no astropy, no NFS.
+    The cover decision must not depend on puppy storage being reachable; the
+    daemon already does the .mean() and prints it, so we just parse it back."""
     try:
-        with fits.open(path, memmap=True) as h:
-            for hdu in h:
-                if hdu.data is not None and hdu.data.ndim == 2:
-                    return float(np.asarray(hdu.data).mean())
+        out = subprocess.run(
+            ["journalctl", "-u", "starcam-capture.service",
+             "--no-pager", "-q", "-n", str(n * 30)],
+            capture_output=True, text=True, timeout=20,
+        ).stdout
     except Exception as e:
-        log(f"failed to read {path.name}: {e}")
-    return None
+        log(f"failed to read capture journal: {e}")
+        return []
+    means: list[float] = []
+    for line in out.splitlines():
+        m = _MEAN_RE.search(line)
+        if m:
+            means.append(float(m.group(1)))
+    return means[-n:]
 
 
 def latest_skycam_jpgs(n: int) -> list[Path]:
@@ -164,16 +159,13 @@ def main() -> int:
         return 0
 
     if state == "open":
-        # Decide whether to close based on starcam brightness.
-        frames = latest_starcam_fits(CONSEC_NEEDED)
-        if len(frames) < CONSEC_NEEDED:
-            log(f"only {len(frames)} starcam frames available; need {CONSEC_NEEDED}; no-op")
+        # Decide whether to close based on starcam brightness (from its own
+        # capture-daemon journal — local, no NFS/astropy dependency).
+        means = recent_starcam_means(CONSEC_NEEDED)
+        if len(means) < CONSEC_NEEDED:
+            log(f"only {len(means)} starcam means available; need {CONSEC_NEEDED}; no-op")
             return 0
-        means = [starcam_frame_mean(p) for p in frames]
         log(f"starcam means: {means}")
-        if any(m is None for m in means):
-            log("missing starcam reads; no-op")
-            return 0
         if all(m >= CLOUDY_STARCAM_MEAN for m in means):
             log(f"all >= {CLOUDY_STARCAM_MEAN}: cloudy -> CLOSE")
             move_cover("close")
