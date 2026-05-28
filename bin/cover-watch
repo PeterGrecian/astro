@@ -136,9 +136,18 @@ def skycam_crop_mean(path: Path) -> float | None:
     return None
 
 
-def move_cover(action: str) -> None:
+def move_cover(action: str) -> bool:
+    """Invoke the cover servo. Returns True on success. A failed move is
+    logged but never propagated: a transient error (e.g. SSH host-key churn
+    after an IP change) must not fail the unit, or the 5-minute timer stops
+    retrying and weather-close is silently disabled for the rest of the night."""
     log(f"invoking: cover {action}")
-    subprocess.run([str(COVER), action], check=True)
+    try:
+        subprocess.run([str(COVER), action], check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        log(f"cover {action} FAILED (exit {e.returncode}); will retry next tick")
+        return False
 
 
 def main() -> int:

@@ -16,7 +16,7 @@
 # status` works from any host without needing to reach starcam.
 set -euo pipefail
 
-STARCAM=peter@192.168.4.128
+STARCAM=peter@starcam.local
 # $STARCAM_ROOT is set by ~/astro/activate; fall back via the
 # starcam-frames helper so this works in any shell.
 ROOT="${STARCAM_ROOT:-$(starcam-frames 2>/dev/null || echo /mnt/puppy/starcam-frames)}"
