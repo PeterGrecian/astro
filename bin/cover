@@ -22,8 +22,11 @@ STARCAM=peter@starcam.local
 ROOT="${STARCAM_ROOT:-$(starcam-frames 2>/dev/null || echo /mnt/puppy/starcam-frames)}"
 STATE_PATH_LOCAL="$ROOT/.cover-state"
 # cover-move lives in the astro repo, cloned to ~/astro on starcam by
-# the astro-camera ansible role.
-HELPER_REMOTE="/home/peter/astro/bin/cover-move"
+# the astro-camera ansible role. When this script already runs ON
+# starcam (the cover logic now lives there), call cover-move directly
+# and skip SSH entirely — that removes the cross-host host-key/IP
+# fragility that disabled weather-close on 2026-05-27.
+HELPER="/home/peter/astro/bin/cover-move"
 
 OPEN_ANGLE=60
 CLOSE_ANGLE=-60
@@ -40,7 +43,11 @@ EOF
 
 cmd_move() {
     local angle="$1" label="$2"
-    ssh "$STARCAM" "python3 $HELPER_REMOTE $angle $label"
+    if [ "$(hostname)" = starcam ]; then
+        python3 "$HELPER" "$angle" "$label"
+    else
+        ssh "$STARCAM" "python3 $HELPER $angle $label"
+    fi
 }
 
 cmd_status() {
