@@ -151,12 +151,32 @@ def skycam_latest_crop() -> float | None:
     return skycam_crop_mean(frames[0]) if frames else None
 
 
-def move_cover(action: str) -> bool:
+ALERT = Path.home() / "super" / "bin" / "alert"
+
+
+def send_alert(title: str, detail: str = "") -> None:
+    """Fire a state-change alert (Slack + quiet xMatters). Best-effort: an
+    alert failure must never affect the cover decision."""
+    if not ALERT.exists():
+        return
+    cmd = [str(ALERT), "--xinfo", "--source", "starcam"]
+    if detail:
+        cmd += ["--detail", detail]
+    cmd.append(title)
+    try:
+        subprocess.run(cmd, check=True, timeout=20)
+    except Exception as e:
+        log(f"alert failed (non-fatal): {e}")
+
+
+def move_cover(action: str, reason: str = "") -> bool:
     """Drive the servo via `cover`. A failed move is logged but not raised, so
-    a transient error never fails the unit and stops the 5-min retry loop."""
+    a transient error never fails the unit and stops the 5-min retry loop.
+    On a successful move, alert (the cover changing state is worth knowing)."""
     log(f"invoking: cover {action}")
     try:
         subprocess.run([str(COVER), action], check=True)
+        send_alert(f"starcam cover {action.upper()}", reason)
         return True
     except subprocess.CalledProcessError as e:
         log(f"cover {action} FAILED (exit {e.returncode}); will retry next tick")
@@ -198,7 +218,7 @@ def main() -> int:
             return 0
         if all(m >= CLOUDY_STARCAM_MEAN for m in means):
             log(f"all >= {CLOUDY_STARCAM_MEAN}: bright -> CLOSE + stop capture")
-            if move_cover("close"):
+            if move_cover("close", f"starcam bright (means={means} >= {CLOUDY_STARCAM_MEAN}); cloud/dawn"):
                 set_capture(False)
         else:
             log("not all bright; keep open")
@@ -217,7 +237,7 @@ def main() -> int:
             return 0
         if all(c <= DARK_SKYCAM_CROP for c in crops):
             log(f"all <= {DARK_SKYCAM_CROP}: dark -> OPEN + start capture")
-            if move_cover("open"):
+            if move_cover("open", f"skycam dark (crops={crops} <= {DARK_SKYCAM_CROP}); clear night"):
                 set_capture(True)
         else:
             log("not all dark; keep closed")
