@@ -52,6 +52,24 @@ def main():
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(f"{state_label}\n{target_deg}\n{int(time.time())}\n")
     print(f"cover now {state_label} (angle={target_deg})")
+    alert_state_change(state_label, target_deg)
+
+
+def alert_state_change(state_label: str, angle: float) -> None:
+    """Notify on every actual cover move (Slack + quiet xMatters). This is the
+    universal chokepoint — controller, the 05:00 safety close and manual moves
+    all end here, so alerting here covers every state change exactly once.
+    Best-effort: never let a notification failure affect the move."""
+    alert = Path.home() / "super" / "bin" / "alert"
+    if not alert.exists():
+        return
+    try:
+        subprocess.run(
+            [str(alert), "--xinfo", "--source", "starcam",
+             "--detail", f"angle={angle}", f"starcam cover {state_label.upper()}"],
+            check=False, timeout=20)
+    except Exception as e:
+        print(f"cover-move: alert failed (non-fatal): {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":
