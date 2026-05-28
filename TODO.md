@@ -1,15 +1,42 @@
 # astro — TODO
-obviously, sort out the capture pipeline.
-and also the day pipeline.  i guess it's step by step
 
-pigpiod uses a lot of cpu unnecesarily.  
+periodically review the relationship between these repos:
+astro - image processing for astronomy
+Berrylands/gardencam - raspberry pi camera routines.  might need rehoming
+super/services - asynchronous file transfer using local ramfs
+Berrylands shoud have servo sg90.  maybe generic servo stuff is super?
+generic camera super? 
+Berrylands is sprawling and I could have a focused pi repo pilib or piservices
+
+the temporal resolution of 3 second frames is probably overkill.  There's probably an order of magnetude saving in bandwidth which can be achieved.  
+there are still some breakthroughs to be had.   think how scruffy the skycam videos were for ages.  maybe a month to get smooth reliable output.  I have 1/4 TBy of data and have many stars I can pull from it.  still quite a way to go on the clouds.
+
+some more stereo video?  stereo video with one camera.
+
+
+
+info in journal for pipeline-night is better than pipeline.log
+pipeline-night could be renamed starfinder-daily or something  starcatcher
+
 
 Live work list. Move items to DECISIONS.md once they crystallise
 into a load-bearing choice; delete done items.
 
-rotating disk as lens cover toy motor.  start working on enclosure 2
 
 storage comments:
+moved 2026-05-20 to muppet
+moving 2026-05-22 
+still 100G free there, will need to do the experiment: can we derive stars from 6s fits - or 12s?  can we finish a pipeline and get just the deliverables?  
+pip has 100G.  we are, with care going to make it to the break in the weather Thursday night lasting at least 1 week.  just 2 more nights.  going to make it!
+
+**WATCH ~/.trash — it warps the free-space picture.** Trashed data
+still occupies disk until the GC sweeps it; `df` "Avail" only tells
+the truth once trash is accounted for. I emptied ~/.trash recently,
+so the current reading is real: pip 121G free, trash empty (2026-05-28).
+Always check `du -sh ~/.trash` alongside `df -h ~` before judging headroom.
+
+need the real catalog to do magnetude estimates.
+
 fitz 5G per hour 30G per night, bin2 1.4G/10G 6 or 7 hours currently  total 40G.  bin2 is derived.
 100 avalible - 100 on muppet too  100 on pip.  the old desktop
 fitz thinning 3s -> 6s
@@ -131,6 +158,59 @@ Pre-reqs:
 - Don't read "we're losing stars" as a regression — it's the sun.
 - Maybe expose `--sky-threshold` more prominently or vary it
   seasonally if we want to keep pulling whatever signal we can.
+
+## Transparent/diffuse cover → starcam self-sufficient for brightness (idea, 2026-05-28)
+
+**Goal: make starcam independent of skycam for brightness
+measurement while the cover is closed.** Today the cover is opaque
+white, so with it closed starcam is blind and we must lean on skycam
+for the dusk/darkness brightness signal. Replace the opaque cover
+with a **transparent (possibly diffuse) cover** so that closed
+starcam still reads total downwelling sky flux — an integrated
+brightness measure of its own, no skycam dependency.
+
+A diffuse-transparent cover acts as a white screen that passes light:
+starcam sees the integrated sky flux that bounces/transmits through
+the cover. That removes the [[project-cover-brightness-calibration]]
+coupling where the close/open decision relies on skycam — starcam
+can drive its own cover from its own closed-cover reading.
+
+Value of the diffuse path isn't sharper discrimination — diffuse
+transmission smears out the spatial cloud structure the open view
+shows directly — but it's a robust, structureless integrated-flux
+baseline: no saturation from a bright star/moon/streetlight in
+frame, no AE chasing a hot spot. Still useful to difference against
+the open/skycam views for **cloudy vs. clear** at dusk (cloudy dusk
+is brighter and decays slower than clear at the same solar
+depression).
+
+First sample (2026-05-28, daytime): AE pinned shutter to 1/100 s,
+ISO 155, mean 223/255 (near saturation). So the raw mean is useless
+while AE is running — need either fixed exposure/gain capture, or
+back out AE via `mean / (exposure × gain)`.
+
+Open questions / risks:
+- **Transparency vs. how much light to let in.** A transparent cover
+  reads dusk well but admits more daylight — pick the diffuse/tint
+  level so closed starcam stays unsaturated by day yet sees enough at
+  low sky brightness. The angle-dependent-opacity idea below is the
+  refinement that squares this circle.
+- **Direct-sunlight concern is cumulative degradation, not
+  burnout.** No focusing optics: the wide OV5647 lens (53.5°×41.4°,
+  f=3.6 mm) spreads the 0.5° solar disc over a few pixels, not a
+  focused point, so catastrophic sensor death is unlikely. The real,
+  documented OV5647 failure mode is **thermal**: repeated direct sun
+  raises dark current and burns in hot pixels / a faint spot where
+  the sun tracks — exactly what hurts an astronomy sensor's dark
+  frames. Mitigation: never leave the cover open across the sun's
+  daytime arc (existing timers already keep it closed 07:00–20:30).
+  The **angle-dependent-opacity cover** idea targets this directly:
+  opaque toward the daytime solar arc, more translucent toward the
+  zenith / low-sun dusk directions — lets dusk light in without
+  exposing the sensor to midday sun, so the closed window can relax.
+- Empirical test still owed: log AE-corrected closed-cover flux
+  through one clear and one cloudy dusk and see if the curves
+  separate. Check what `cover-watch` already logs first.
 
 ## Wandering-star (planet) discriminator — Tombaugh blink
 

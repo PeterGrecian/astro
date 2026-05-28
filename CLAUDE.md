@@ -52,6 +52,11 @@ argued this and it's right. Decision recorded in DECISIONS.md.
   should accept `--camera` not hard-code the path.
 - **Bayer pattern is SGBRG10** on the OV5647 — NOT SRGGB10. This is
   a recurring mistake; the daemon and any IO code must use SGBRG.
+- **OV5647 (Camera Module v1) FOV** — per official Raspberry Pi docs:
+  horizontal 53.50° ± 0.13°, vertical 41.41° ± 0.11°. Sensor 2592×1944,
+  pixel pitch 1.4 µm, focal length 3.60 mm. On-axis plate scale
+  ~0.0206°/px at full res, ~0.0413°/px at 2×2 binned. Lens has barrel
+  distortion (magnitude not yet characterised).
 - **Night dir = noon-noon rollover.** The "night of 2026-05-21" is
   2026-05-21 12:00 → 2026-05-22 12:00 (Europe/London noon, so the
   whole observing session lives under one date string).
