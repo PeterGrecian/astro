@@ -54,17 +54,24 @@ CAPTURE_UNIT = "starcam-capture.service"
 ACT_AFTER = (21, 0)    # 21:00 local
 ACT_BEFORE = (4, 30)   # 04:30 local
 
-# Brightness thresholds — first calibration from the clear night of 2026-05-27
-# (paired starcam-journal mean vs skycam crop, dusk + overnight):
-#   starcam (fixed 2.9s exposure, AE off): clear-night baseline ~48-52 (NEVER
-#     below 45 all night), dusk twilight 55-108, a bright cloud/moon event ~226.
-#   skycam crop: floors at ~25-27 within ~2 min of dusk (61->27), so it has no
-#     dynamic range in the dark — it's effectively a day/night gate only.
-# Hence: CLOSE on starcam well ABOVE the clear baseline+twilight (45 would have
-# closed every clear night immediately); OPEN on skycam safely past its cliff.
-# Refine with more nights, especially a cloudy one (see the paired log below).
-CLOUDY_STARCAM_MEAN = 120.0  # starcam mean >= this for N reads -> close (clear<=108)
-DARK_SKYCAM_CROP = 40.0      # skycam crop_mean <= this for N reads -> open (cliff ~38)
+# Brightness thresholds — calibrated from the night of 2026-05-27
+# (moon: waxing gibbous, ~86% illuminated — cloud brightness scales with
+# moonlight, so re-check under a darker moon). Paired starcam mean vs skycam
+# crop, including a dense cloud event ~02:00 BST that was a genuine must-close
+# (dense enough it could have rained):
+#   starcam (fixed 2.9s exposure, AE off): clear baseline ~48-52, twilight
+#     55-108, the 02:00 must-close cloud peaked ~85, a bigger event ~226.
+#   skycam crop: clear floor ~22-25, that same cloud ~57; floors fast at dusk
+#     (61->27 in ~2 min). NOTE B_star vs B_sky is NOT linear (R^2~0.07): skycam
+#     is a clear/cloud classifier, not a brightness proxy for starcam.
+#
+# INTERIM (opaque Mk1 cover): starcam is blind when closed, so REOPEN must use
+# skycam. CLOSE uses starcam (cover open -> starcam sees sky), kept local for
+# independence. starcam>=75 catches the ~85 cloud but sits only ~25 above the
+# clear baseline — accept some false-close risk until the Mk2 enclosure lets
+# starcam read THROUGH a closed cover (then both decisions go starcam-only).
+CLOUDY_STARCAM_MEAN = 75.0   # starcam mean >= this for N reads -> close (clear~48-52, cloud~85)
+DARK_SKYCAM_CROP = 40.0      # skycam crop_mean <= this for N reads -> open (clear floor ~22-25, cliff ~38)
 CONSEC_NEEDED = 3
 LOCKOUT_S = 3600             # no flip within 1 hour of the last flip
 
