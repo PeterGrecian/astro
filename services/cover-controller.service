@@ -1,0 +1,20 @@
+[Unit]
+Description=astro: unified cover + capture controller (one observing state)
+# Runs on starcam. Owns the single state where cover-open == capturing:
+# opens the cover + starts starcam-capture when skycam is dark; closes the
+# cover + stops capture when starcam's own (local buffer) frames go bright.
+# CLOSE decision reads local .npy (numpy only — no astropy/NFS/journal);
+# OPEN decision reads NFS-mounted skycam frames (starcam is blind when closed).
+# Servo is driven locally by bin/cover; capture is sudo systemctl start/stop.
+RequiresMountsFor=/home/peter/skycam-frames /var/lib/starcam-buffer
+
+[Service]
+Type=oneshot
+User=peter
+Group=peter
+Environment=STARCAM_ROOT=/home/peter/starcam-frames
+Environment=SKYCAM_MOUNT=/home/peter/skycam-frames
+Environment=STARCAM_BUFFER=/var/lib/starcam-buffer/night
+ExecStart=/usr/bin/python3 /home/peter/astro/bin/cover-controller
+StandardOutput=journal
+StandardError=journal
