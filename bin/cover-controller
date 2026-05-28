@@ -54,10 +54,17 @@ CAPTURE_UNIT = "starcam-capture.service"
 ACT_AFTER = (21, 0)    # 21:00 local
 ACT_BEFORE = (4, 30)   # 04:30 local
 
-# Brightness thresholds (UNCALIBRATED — placeholder values pending joint
-# starcam/skycam calibration against real nights; see the paired log below).
-CLOUDY_STARCAM_MEAN = 45.0   # starcam .npy mean >= this for N reads -> close
-DARK_SKYCAM_CROP = 60.0      # skycam crop_mean <= this for N reads -> open
+# Brightness thresholds — first calibration from the clear night of 2026-05-27
+# (paired starcam-journal mean vs skycam crop, dusk + overnight):
+#   starcam (fixed 2.9s exposure, AE off): clear-night baseline ~48-52 (NEVER
+#     below 45 all night), dusk twilight 55-108, a bright cloud/moon event ~226.
+#   skycam crop: floors at ~25-27 within ~2 min of dusk (61->27), so it has no
+#     dynamic range in the dark — it's effectively a day/night gate only.
+# Hence: CLOSE on starcam well ABOVE the clear baseline+twilight (45 would have
+# closed every clear night immediately); OPEN on skycam safely past its cliff.
+# Refine with more nights, especially a cloudy one (see the paired log below).
+CLOUDY_STARCAM_MEAN = 120.0  # starcam mean >= this for N reads -> close (clear<=108)
+DARK_SKYCAM_CROP = 40.0      # skycam crop_mean <= this for N reads -> open (cliff ~38)
 CONSEC_NEEDED = 3
 LOCKOUT_S = 3600             # no flip within 1 hour of the last flip
 
