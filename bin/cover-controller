@@ -66,14 +66,18 @@ ACT_BEFORE = (4, 30)   # 04:30 local
 #     is a clear/cloud classifier, not a brightness proxy for starcam.
 #
 # INTERIM (opaque Mk1 cover): starcam is blind when closed, so REOPEN must use
-# skycam. CLOSE uses starcam (cover open -> starcam sees sky), kept local for
-# independence. starcam>=75 catches the ~85 cloud but sits only ~25 above the
-# clear baseline — accept some false-close risk until the Mk2 enclosure lets
-# starcam read THROUGH a closed cover (then both decisions go starcam-only).
+# skycam. CLOSE used starcam alone for "independence", but starcam mean rises
+# through the night (moon/sky-glow/sensor offset) so a fixed bright threshold
+# risks closing on starcam drift when the sky is actually clear. Until the Mk2
+# transparent cover lets starcam read THROUGH a closed cover, we use SKYCAM AS
+# THE PROXY: a close requires BOTH starcam bright AND skycam cloud-lit, so
+# starcam drift alone can't trigger a close. When the transparent cover lands,
+# drop the skycam gate and go starcam-only for both decisions.
 CLOUDY_STARCAM_MEAN = 75.0   # starcam mean >= this for N reads -> close (clear~48-52, cloud~85)
+CLOUDY_SKYCAM_CROP = 55.0    # skycam crop_mean >= this confirms cloud (clear ~22-25, cloud ~57+)
 DARK_SKYCAM_CROP = 40.0      # skycam crop_mean <= this for N reads -> open (clear floor ~22-25, cliff ~38)
 CONSEC_NEEDED = 3
-LOCKOUT_S = 3600             # no flip within 1 hour of the last flip
+LOCKOUT_S = 300              # no flip within 5 min of the last flip
 
 
 def log(msg: str) -> None:
@@ -193,15 +197,23 @@ def main() -> int:
     if state == "open":
         # CLOSE decision: starcam's own brightness, read locally from buffer.
         means = recent_starcam_means(CONSEC_NEEDED)
-        sky = skycam_latest_crop()  # sample for calibration, not for deciding
-        log(f"starcam means={means} skycam_crop={sky} (paired, for calibration)")
+        sky = skycam_latest_crop()  # INTERIM: skycam is the proxy, used to gate
+        log(f"starcam means={means} skycam_crop={sky}")
         if len(means) < CONSEC_NEEDED:
             log(f"only {len(means)} starcam means; need {CONSEC_NEEDED}; no-op")
             return 0
-        if all(m >= CLOUDY_STARCAM_MEAN for m in means):
-            log(f"all >= {CLOUDY_STARCAM_MEAN}: bright -> CLOSE + stop capture")
+        starcam_bright = all(m >= CLOUDY_STARCAM_MEAN for m in means)
+        # Skycam proxy gate: don't close on starcam alone — it drifts up on a
+        # clear night. Require skycam to confirm cloud. If skycam is unreadable,
+        # fall back to starcam-only so a dead skycam can't pin the cover open.
+        skycam_cloud = sky is None or sky >= CLOUDY_SKYCAM_CROP
+        if starcam_bright and skycam_cloud:
+            log(f"starcam>={CLOUDY_STARCAM_MEAN} and skycam>={CLOUDY_SKYCAM_CROP}"
+                f" (or unread): cloud -> CLOSE + stop capture")
             if move_cover("close"):
                 set_capture(False)
+        elif starcam_bright:
+            log(f"starcam bright but skycam clear ({sky}): drift, keep open")
         else:
             log("not all bright; keep open")
         return 0
