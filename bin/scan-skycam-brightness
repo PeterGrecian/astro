@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""scan-skycam-brightness — centre-crop brightness for skycam JPG frames.
+
+Skycam writes JPEGs (not raw Bayer .npy like starcam), so it has its own
+brightness scanner. The metric matches cover-watch.skycam_crop_mean
+exactly — grayscale, centre 50% crop, mean ADU — so the output lines up
+with what the cover-controller actually decides on.
+
+Frame tree: <mount>/YYYY-MM-DD/HH/<epoch_ms>_<label>.jpg, where the
+date/hour dirs are UTC. A "night" (noon-noon, Europe/London) therefore
+spans a contiguous run of UTC hour dirs; we derive them from --night.
+
+Writes a CSV (iso_utc, crop_mean) for the whole night. Subsamples with
+--step to stay fast over NFS (14k frames/night at ~2s cadence).
+
+Usage:
+    scan-skycam-brightness                       # last night, default mount
+    scan-skycam-brightness --night 2026-05-28
+    scan-skycam-brightness --night 2026-05-28 --step 1 --out ~/tmp/x.csv
+    scan-skycam-brightness --mount /mnt/skycam-frames --window 20:00 04:00
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import numpy as np
+from PIL import Image
+
+LONDON = ZoneInfo("Europe/London")
+
+
+def default_night() -> str:
+    """The most recently completed observing night (noon-noon, London).
+
+    Before noon today, "last night" started yesterday noon. After noon,
+    it started today noon (tonight, mostly still ahead) — but the common
+    case is running in the morning to look at the night just gone, so we
+    anchor on the noon that began the night currently/most-recently
+    observed: if it's past noon, today; else yesterday.
+    """
+    now = datetime.now(LONDON)
+    anchor = now.date() if now.hour >= 12 else (now.date() - timedelta(days=1))
+    return anchor.isoformat()
+
+
+def utc_hour_dirs(night: str, start_local: time, end_local: time) -> list[tuple[str, str]]:
+    """UTC (date, HH) pairs covering [night noon-anchored window].
+
+    night is the London date the observing session began (noon rollover).
+    start/end are local clock times; end < start means it crosses midnight
+    into the following day.
+    """
+    anchor = datetime.fromisoformat(night).date()
+    start_dt = datetime.combine(anchor, start_local, tzinfo=LONDON)
+    end_date = anchor + (timedelta(days=1) if end_local <= start_local else timedelta())
+    end_dt = datetime.combine(end_date, end_local, tzinfo=LONDON)
+
+    out: list[tuple[str, str]] = []
+    cur = start_dt.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    last = end_dt.astimezone(timezone.utc)
+    while cur <= last:
+        out.append((cur.strftime("%Y-%m-%d"), cur.strftime("%H")))
+        cur += timedelta(hours=1)
+    return out
+
+
+def crop_mean(path: Path) -> float | None:
+    """Centre 50% crop mean of a grayscale-converted JPG. Matches
+    cover-watch.skycam_crop_mean."""
+    try:
+        img = np.asarray(Image.open(path).convert("L"))
+        h, w = img.shape
+        crop = img[h // 4:3 * h // 4, w // 4:3 * w // 4]
+        return float(crop.mean())
+    except Exception as e:
+        print(f"  skip {path.name}: {e}", file=sys.stderr)
+        return None
+
+
+def parse_hhmm(s: str) -> time:
+    h, m = s.split(":")
+    return time(int(h), int(m))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("--night", default=None,
+                    help="London date the night began (noon rollover); "
+                         "default: most recent")
+    ap.add_argument("--mount", type=Path,
+                    default=Path(os.environ.get("SKYCAM_MOUNT",
+                                                str(Path.home() / "skycam-frames"))),
+                    help="skycam frames root (YYYY-MM-DD/HH/*.jpg, UTC dirs)")
+    ap.add_argument("--window", nargs=2, metavar=("START", "END"),
+                    default=["20:00", "04:00"],
+                    help="local clock window (END<START crosses midnight)")
+    ap.add_argument("--step", type=int, default=10,
+                    help="take every Nth frame (default 10, ~one per 20s)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output CSV (default ~/tmp/skycam-<night>.csv)")
+    args = ap.parse_args()
+
+    night = args.night or default_night()
+    start_local, end_local = parse_hhmm(args.window[0]), parse_hhmm(args.window[1])
+    out = args.out or (Path.home() / "tmp" / f"skycam-{night}.csv")
+
+    if not args.mount.is_dir():
+        print(f"mount not found: {args.mount}", file=sys.stderr)
+        return 1
+
+    rows: list[tuple[str, float]] = []
+    for date, hh in utc_hour_dirs(night, start_local, end_local):
+        d = args.mount / date / hh
+        if not d.is_dir():
+            print(f"  missing {d} (UTC)", file=sys.stderr)
+            continue
+        jpgs = sorted(d.glob("*.jpg"))[::args.step]
+        for p in jpgs:
+            try:
+                epoch_ms = int(p.name.split("_", 1)[0])
+            except ValueError:
+                continue
+            v = crop_mean(p)
+            if v is None:
+                continue
+            iso = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).isoformat()
+            rows.append((iso, v))
+        print(f"  {date}/{hh} (UTC): {len(jpgs)} sampled", file=sys.stderr)
+
+    if not rows:
+        print("no frames found", file=sys.stderr)
+        return 1
+
+    rows.sort()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["iso_utc", "crop_mean"])
+        for iso, v in rows:
+            w.writerow([iso, f"{v:.4f}"])
+    print(f"wrote {out} ({len(rows)} rows)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

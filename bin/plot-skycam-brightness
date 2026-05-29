@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""plot-skycam-brightness — skycam centre-crop brightness vs time-of-day.
+
+Companion to plot-brightness (which plots starcam log2 ADU). Skycam is a
+clear/cloud classifier, so we plot RAW crop_mean on a linear axis and draw
+the cover-controller's decision thresholds, so the curve reads directly
+against what the controller does.
+
+Input: the iso_utc,crop_mean CSV(s) from scan-skycam-brightness.
+
+Usage:
+    plot-skycam-brightness ~/tmp/skycam-2026-05-28.csv
+    plot-skycam-brightness --out sky.png a.csv b.csv      # overlay nights
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+LONDON = ZoneInfo("Europe/London")
+
+# cover-controller thresholds (skycam side), kept in sync with that script.
+DARK_SKYCAM_CROP = 40.0   # <= for N reads -> OPEN
+CLOUD_HINT = 57.0         # observed cloud floor (not a controller threshold)
+
+
+def load_csv(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    rows: list[tuple[datetime, float]] = []
+    with open(path) as f:
+        for row in csv.DictReader(f):
+            try:
+                t = datetime.fromisoformat(row["iso_utc"])
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                rows.append((t.astimezone(LONDON), float(row["crop_mean"])))
+            except (KeyError, ValueError):
+                continue
+    rows.sort()
+    times = np.array([r[0] for r in rows])
+    vals = np.array([r[1] for r in rows], dtype=float)
+    return times, vals
+
+
+def to_noon_axis(times: np.ndarray, anchor_date) -> np.ndarray:
+    out = np.empty(len(times), dtype=object)
+    anchor_noon = datetime.combine(anchor_date, time(12, 0), tzinfo=LONDON)
+    next_noon = anchor_noon + timedelta(days=1)
+    for i, t in enumerate(times):
+        base = anchor_noon if t.hour >= 12 else next_noon
+        out[i] = base.replace(hour=t.hour, minute=t.minute, second=t.second)
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
+    ap.add_argument("csvs", type=Path, nargs="+", help="scan-skycam-brightness CSV(s)")
+    ap.add_argument("--out", type=Path,
+                    default=Path(__file__).resolve().parent.parent / "skycam-brightness.png")
+    args = ap.parse_args()
+
+    fig, ax = plt.subplots(figsize=(14, 6))
+    anchor_date = datetime(2000, 1, 1).date()
+    palette = ["#377eb8", "#e41a1c", "#4daf4a", "#ff7f00", "#984ea3"]
+
+    for i, csv_path in enumerate(args.csvs):
+        times, vals = load_csv(csv_path)
+        if len(times) == 0:
+            print(f"  {csv_path}: no data, skipping")
+            continue
+        xs = to_noon_axis(times, anchor_date)
+        ax.scatter(xs, vals, s=2, linewidths=0,
+                   color=palette[i % len(palette)], label=csv_path.stem)
+        print(f"  {csv_path.name}: {len(times)} pts, range {vals.min():.1f}..{vals.max():.1f}")
+
+    ax.axhline(DARK_SKYCAM_CROP, color="#888", ls="--", lw=1,
+               label=f"OPEN threshold ({DARK_SKYCAM_CROP:g})")
+    ax.axhline(CLOUD_HINT, color="#c00", ls=":", lw=1,
+               label=f"cloud floor (~{CLOUD_HINT:g})")
+
+    ax.set_xlabel("local time (Europe/London, GMT/BST)")
+    ax.set_ylabel("skycam centre-crop mean (8-bit grey)")
+    ax.set_title("skycam crop brightness")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(True, alpha=0.2)
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax.set_xlim(datetime.combine(anchor_date, time(22, 0), tzinfo=LONDON),
+                datetime.combine(anchor_date + timedelta(days=1), time(4, 0), tzinfo=LONDON))
+    fig.autofmt_xdate()
+    plt.tight_layout()
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(args.out, dpi=120)
+    print(f"wrote {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
