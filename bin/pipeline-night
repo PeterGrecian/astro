@@ -97,7 +97,18 @@ done
 
 [ -n "$NIGHT" ] || { usage; exit 2; }
 NIGHT="${NIGHT%/}"
-[ -d "$NIGHT" ] || { echo "no such dir: $NIGHT" >&2; exit 2; }
+if [ ! -d "$NIGHT" ]; then
+  # Could be a quiet night (cover stayed closed, sky too bright) or an
+  # upstream break (NFS hiccup, capture daemon down). Either way nothing
+  # to process — emit an alert so the difference is visible without the
+  # service going red, and exit clean so the timer doesn't show failed.
+  msg="pipeline-night: no frames at $NIGHT"
+  echo "$msg" >&2
+  if command -v alert >/dev/null 2>&1; then
+    alert --warn --source "$(hostname -s)" --detail "$NIGHT did not exist when pipeline-night ran" "$msg"
+  fi
+  exit 0
+fi
 NIGHT_DATE=$(basename "$NIGHT")
 
 # Variant: empty → legacy unprefixed names + HHb/ dirs.
