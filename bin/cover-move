@@ -16,7 +16,7 @@ from pathlib import Path
 SIGNAL_PIN = 18
 DEG_PER_SEC = 30.0
 STEP_HZ = 50
-STATE_PATH = Path.home() / "starcam-frames" / ".cover-state"
+STATE_PATH = Path.home() / ".cover-state"
 
 
 def main():

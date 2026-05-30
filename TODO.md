@@ -212,6 +212,18 @@ Open questions / risks:
   through one clear and one cloudy dusk and see if the curves
   separate. Check what `cover-watch` already logs first.
 
+**Today's coupling (to be removed by the transparent cover).** The
+brightness *decision* already runs on starcam (cover-controller,
+cover-watch, cover-open-when-dark all live and execute there), so the
+*logic* is in the right place. But the *data* it reads —
+`~/skycam-frames/` — is an NFS mount from puppy, so starcam still
+depends on puppy + the network path for every brightness read. That's
+the coupling that broke on 2026-05-27 when puppy's IP changed (see
+[[project-puppy-starcam-ethernet-migration]]). With a transparent
+cover, starcam reads downwelling flux through its own closed cover
+and the skycam-NFS dependency drops entirely — logic AND data become
+local to starcam, and the cross-host fragility goes away.
+
 ## Wandering-star (planet) discriminator — Tombaugh blink
 
 After two nights have a sharp per-night `final/derot.fits.fz` at

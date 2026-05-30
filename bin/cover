@@ -4,23 +4,21 @@
 # Usage:
 #   cover open       # smoothly rotate to OPEN_ANGLE
 #   cover close      # smoothly rotate to CLOSE_ANGLE
-#   cover status     # read state from NFS, no servo touched
+#   cover status     # read state from starcam, no servo touched
 #
 # Angles characterised 2026-05-25 (see ~/cover-sweep.csv on starcam):
 #   open  = +60°    well inside the open plateau
 #   close = -60°    minimum-leakage block position
 #
-# State is written by starcam after a successful move to
-# ~/starcam-frames/.cover-state which appears on every NFS client
-# (e.g. /mnt/puppy/starcam-frames/.cover-state on pip), so `cover
-# status` works from any host without needing to reach starcam.
+# State is written by cover-move to ~/.cover-state on starcam (local
+# disk, NOT NFS). Keeping the state local removes the puppy/NFS
+# dependency from the cover-status path — the IP-change incident on
+# 2026-05-27 broke status reads via NFS. Reading remotely from pip
+# costs an SSH round-trip; acceptable for an interactive query.
 set -euo pipefail
 
 STARCAM=peter@starcam.local
-# $STARCAM_ROOT is set by ~/astro/activate; fall back via the
-# starcam-frames helper so this works in any shell.
-ROOT="${STARCAM_ROOT:-$(starcam-frames 2>/dev/null || echo /mnt/puppy/starcam-frames)}"
-STATE_PATH_LOCAL="$ROOT/.cover-state"
+STATE_PATH_LOCAL="$HOME/.cover-state"
 # cover-move lives in the astro repo, cloned to ~/astro on starcam by
 # the astro-camera ansible role. When this script already runs ON
 # starcam (the cover logic now lives there), call cover-move directly
@@ -51,13 +49,23 @@ cmd_move() {
 }
 
 cmd_status() {
-    if [ ! -e "$STATE_PATH_LOCAL" ]; then
-        echo "unknown"
-        return 0
+    local raw
+    if [ "$(hostname)" = starcam ]; then
+        if [ ! -e "$STATE_PATH_LOCAL" ]; then
+            echo "unknown"
+            return 0
+        fi
+        raw=$(cat "$STATE_PATH_LOCAL")
+    else
+        raw=$(ssh "$STARCAM" 'cat ~/.cover-state 2>/dev/null' || true)
+        if [ -z "$raw" ]; then
+            echo "unknown"
+            return 0
+        fi
     fi
     local state ts age_s
-    state=$(sed -n '1p' "$STATE_PATH_LOCAL")
-    ts=$(sed -n '3p' "$STATE_PATH_LOCAL")
+    state=$(printf '%s\n' "$raw" | sed -n '1p')
+    ts=$(printf '%s\n' "$raw" | sed -n '3p')
     if [ -n "${ts:-}" ]; then
         age_s=$(( $(date +%s) - ts ))
         printf '%s  (last moved %s ago)\n' "$state" "$(date -u -d "@$age_s" +'%Hh%Mm%Ss')"
