@@ -9,7 +9,7 @@ Skycam CSVs (from scan-skycam-brightness: iso_utc,crop_mean) can be
 overlaid on the same log2 axis with --skycam. Skycam crop_mean switches
 between ~40 (dark) and ~80 (cloud-lit) — log2 puts it on the same scale
 as starcam so the two cameras read directly against each other. Starcam
-nights draw solid, skycam dashed.
+nights draw solid, skycam dash-dot.
 
 Usage:
     plot-brightness <night-dir> [<night-dir> ...]
@@ -138,7 +138,7 @@ def main() -> int:
                     help="night dirs, or a parent dir of nights")
     ap.add_argument("--skycam", type=Path, nargs="+", default=[],
                     metavar="CSV", help="scan-skycam-brightness CSV(s) to "
-                    "overlay (log2 crop_mean, dashed)")
+                    "overlay (log2 crop_mean, dash-dot)")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parent.parent
                     / "brightness.png",
@@ -203,7 +203,7 @@ def main() -> int:
         times, vals = loaded
         xs = to_noon_axis(times, anchor_date)
         ys = np.log2(np.maximum(vals, 1e-3))
-        ax.plot(xs, ys, label=f"skycam {csv_path.stem}", ls="--", lw=1.2,
+        ax.plot(xs, ys, label=f"skycam {csv_path.stem}", ls="-.", lw=1.5,
                 color=sky_cmap(i / max(sky_n - 1, 1)))
         print(f"  {csv_path.name}: {len(times)} pts, "
               f"crop_mean {vals.min():.1f}..{vals.max():.1f}")
@@ -215,7 +215,7 @@ def main() -> int:
 
     ax.set_xlabel("local time (Europe/London, GMT/BST)")
     ax.set_ylabel("log2(mean ADU)")
-    ax.set_title(f"starcam (solid) vs skycam (dashed) — {plotted} curve(s)")
+    ax.set_title(f"starcam (solid) vs skycam (dash-dot) — {plotted} curve(s)")
     # Replace scatter's tiny dot markers with proper lines; keep skycam's
     # dashed line handles as-is.
     from matplotlib.lines import Line2D
@@ -226,9 +226,9 @@ def main() -> int:
         if isinstance(h, PathCollection):  # scatter (starcam)
             legend_handles.append(Line2D([0], [0],
                                          color=h.get_facecolor()[0], lw=2))
-        else:  # Line2D (skycam, dashed)
+        else:  # Line2D (skycam, dash-dot)
             legend_handles.append(Line2D([0], [0], color=h.get_color(),
-                                         lw=1.2, ls="--"))
+                                         lw=1.5, ls="-."))
     ax.legend(legend_handles, labels, loc="upper right", fontsize=9)
     ax.grid(True, alpha=0.2)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
