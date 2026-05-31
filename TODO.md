@@ -49,14 +49,12 @@ dashboard - camera state, brightness trend, storage, stars found
 
 brightness.csv generated for wrong hour on hourly trigger - revise whole real time analysis pipeline
 bin-frames should be part of the same pipeline .  step by step automate it all until its all stars
-plot-brightness usage message inacurate.  $ plot-brigtness * in the nights dir works
 oiiotool looks interesting.  siril is hidious.  splay is capable of doing it better.
 - [ ] `notes/tooling.md` — install commands + cheat-sheet for solve-field, oiiotool, djv. (Siril dropped — splay is better.)
 - [ ] `notes/pi4-feasibility.md` — can a £35 Pi4 do FITS + plate solve + derot? RAM/CPU budget. Estimate vs £45 model.
 
 ## Utilities (bin/, no astro- prefix)
 
-- [ ] `gc-status` — human readout of `file-garbage-collector` on puppy: free space, target, what would be next to go.
 - [ ] `platesolve` — wraps `solve-field` with our defaults; writes SIP into header. (Decision pending — Peter prefers parametric fit over catalog; revisit if we want magnitudes.)
 
 ## Pipeline
@@ -93,10 +91,11 @@ one-time offset captured at process start. Frames captured AFTER
 this fix is deployed should have ms-accurate, jitter-free
 filenames.
 
-**To verify after deployment:**
-- [ ] Re-measure interval std on a fresh hour (`ls *.fits.fz |
-      awk` one-liner). Should drop from ~103 ms to ~1 ms.
-- [ ] Then switch fitters to use real epoch_ms (cumulative drift
+**Verified 2026-05-31:** measured on 2026-05-30/01 (1025 intervals,
+1008 within ±50 ms after trimming sat-skip gaps): mean 2999.6 ms,
+**std 0.49 ms** — down from 103 ms pre-fix. Min 2999, max 3000.
+
+- [ ] Switch fitters to use real epoch_ms (cumulative drift
       ~0.14 px at 300 frames would vanish).
 
 **Rolling shutter:** OV5647 readout time is 66.7 ms top-to-bottom,
