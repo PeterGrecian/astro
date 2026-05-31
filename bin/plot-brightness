@@ -188,13 +188,12 @@ def main() -> int:
               f"mean range {vals.min():.3f}..{vals.max():.1f}")
         plotted += 1
 
-    # Skycam overlay: same log2 axis, dashed lines so the two cameras
+    # Skycam overlay: same log2 axis, dash-dot lines so the two cameras
     # are visually distinct. crop_mean ~40 (dark) / ~80 (cloud-lit) maps
-    # to log2 ~5.3 / ~6.3, well below starcam's daytime range. plasma so
-    # the dashed skycam lines stay visually distinct from the viridis
-    # solid starcam lines.
-    sky_cmap = plt.get_cmap("plasma")
-    sky_n = max(len(args.skycam), 1)
+    # to log2 ~5.3 / ~6.3, well below starcam's daytime range. Hand-picked
+    # accent colours that don't collide with tab10 (which the starcam
+    # nights use): magenta, cyan, lime, gold.
+    sky_palette = ["#ff00aa", "#00bcd4", "#bfff00", "#ffd700"]
     for i, csv_path in enumerate(args.skycam):
         loaded = load_skycam(csv_path)
         if loaded is None:
@@ -204,7 +203,7 @@ def main() -> int:
         xs = to_noon_axis(times, anchor_date)
         ys = np.log2(np.maximum(vals, 1e-3))
         ax.plot(xs, ys, label=f"skycam {csv_path.stem}", ls="-.", lw=1.5,
-                color=sky_cmap(i / max(sky_n - 1, 1)))
+                color=sky_palette[i % len(sky_palette)])
         print(f"  {csv_path.name}: {len(times)} pts, "
               f"crop_mean {vals.min():.1f}..{vals.max():.1f}")
         plotted += 1
