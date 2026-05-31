@@ -52,7 +52,29 @@ def main():
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(f"{state_label}\n{target_deg}\n{int(time.time())}\n")
     print(f"cover now {state_label} (angle={target_deg})")
+    append_night_log(state_label, target_deg)
     alert_state_change(state_label, target_deg)
+
+
+def append_night_log(state_label: str, angle: float) -> None:
+    """Append the event to the night's frame dir on NFS so puppy can read it
+    without scraping the journal. iso_utc,state,angle columns. The night
+    label uses noon-rollover, matching where the daemon writes frames."""
+    iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    night = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 12 * 3600))
+    night_dir = Path.home() / "starcam-frames" / "night" / night
+    cover_csv = night_dir / "cover.csv"
+    try:
+        night_dir.mkdir(parents=True, exist_ok=True)
+        new_file = not cover_csv.exists()
+        with open(cover_csv, "a") as f:
+            if new_file:
+                f.write("iso_utc,state,angle\n")
+            f.write(f"{iso},{state_label},{angle}\n")
+    except OSError as e:
+        # NFS down or dir not writable — non-fatal, the move still happened.
+        print(f"cover-move: night-log append failed (non-fatal): {e}",
+              file=sys.stderr)
 
 
 def alert_state_change(state_label: str, angle: float) -> None:

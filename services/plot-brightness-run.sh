@@ -20,10 +20,14 @@ if [[ -s "$SKY_CSV" ]]; then
     SKY_ARGS=(--skycam "$SKY_CSV")
 fi
 
-# Temporary: SSH to starcam and harvest cover open/close events from the
-# systemd journal for the night window (noon-noon, London). Permanent fix
-# pending: starcam_night_daemon writes cover.csv into the night frame dir.
+# Prefer the per-night cover.csv that cover-move writes into the frame dir
+# (the canonical source). Fall back to scraping starcam's journal over SSH
+# when the file isn't present yet (legacy nights from before that landed).
+NIGHT_COVER_CSV="$HOME/starcam-frames/night/$NIGHT/cover.csv"
 COVER_CSV="$HOME/tmp/cover-$NIGHT.csv"
+if [[ -s "$NIGHT_COVER_CSV" ]]; then
+    cp "$NIGHT_COVER_CSV" "$COVER_CSV"
+else
 START_ISO="${NIGHT}T11:00:00Z"
 END_ISO="$(date -u -d "$NIGHT + 1 day 12:00" +%Y-%m-%dT%H:%M:%SZ)"
 echo "iso_utc,state" > "$COVER_CSV"
@@ -51,6 +55,7 @@ for line in sys.stdin:
     iso = datetime.datetime.utcfromtimestamp(ts_us / 1e6).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"{iso},{state}")
 ' >> "$COVER_CSV" || true
+fi
 
 COVER_ARGS=()
 if [[ "$(wc -l < "$COVER_CSV")" -gt 1 ]]; then
