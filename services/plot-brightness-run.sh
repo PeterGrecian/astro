@@ -6,10 +6,11 @@ set -euo pipefail
 
 source "$HOME/astro/.venv/bin/activate"
 
-# scan-skycam-brightness picks "last completed night" itself; its default
-# output is ~/tmp/skycam-<night>.csv. Mirror that path here so we can pass
-# the file to plot-brightness without parsing stdout.
-NIGHT="$("$HOME/super/bin/night-dir")"
+# Pick the most recently *completed* night: night-dir of "24h ago". Using
+# night-dir of "now" returns the current observing night, which during the
+# day has no frames yet (timer runs at 05:00 — yesterday's night just
+# ended). Subtracting 24h dodges the noon edge case either side.
+NIGHT="$("$HOME/super/bin/night-dir" "$(date -u -d '24 hours ago' +%s)")"
 SKY_CSV="$HOME/tmp/skycam-$NIGHT.csv"
 
 "$HOME/astro/bin/scan-skycam-brightness" --night "$NIGHT" --out "$SKY_CSV" || true
