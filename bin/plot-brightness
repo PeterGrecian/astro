@@ -14,8 +14,14 @@ nights draw solid, skycam dash-dot.
 Usage:
     plot-brightness <night-dir> [<night-dir> ...]
     plot-brightness <parent-dir>            # auto-discovers night dirs
+    plot-brightness *                       # from inside the parent dir;
+                                            # non-night siblings are skipped
     plot-brightness --skycam sky.csv [...] <night-dir> ...
+    plot-brightness --cover cover.csv ...   # green/red vlines per event
     plot-brightness --out path.png ...
+
+If more than 5 night dirs are found, the default selection picks first +
+middle + last 3. Pass an explicit list to override.
 """
 from __future__ import annotations
 
