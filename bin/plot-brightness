@@ -139,6 +139,9 @@ def main() -> int:
     ap.add_argument("--skycam", type=Path, nargs="+", default=[],
                     metavar="CSV", help="scan-skycam-brightness CSV(s) to "
                     "overlay (log2 crop_mean, dash-dot)")
+    ap.add_argument("--cover", type=Path, default=None, metavar="CSV",
+                    help="cover events CSV (iso_utc,state); plotted as "
+                    "vertical lines (green=open, red=closed)")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parent.parent
                     / "brightness.png",
@@ -211,6 +214,26 @@ def main() -> int:
     if not plotted:
         print("no data plotted", file=sys.stderr)
         return 1
+
+    # Cover events: vertical lines on the noon-anchored axis.
+    if args.cover is not None and args.cover.exists():
+        n_open = n_close = 0
+        with open(args.cover) as f:
+            for row in csv.DictReader(f):
+                try:
+                    t_utc = datetime.fromisoformat(row["iso_utc"].replace("Z", "+00:00"))
+                except (KeyError, ValueError):
+                    continue
+                t_local = t_utc.astimezone(LONDON)
+                x = to_noon_axis(np.array([t_local]), anchor_date)[0]
+                state = row.get("state", "").strip()
+                if state == "open":
+                    ax.axvline(x, color="#2ca02c", ls=":", lw=1.2, alpha=0.7)
+                    n_open += 1
+                elif state == "closed":
+                    ax.axvline(x, color="#d62728", ls=":", lw=1.2, alpha=0.7)
+                    n_close += 1
+        print(f"  cover: {n_open} open, {n_close} close events")
 
     ax.set_xlabel("local time (Europe/London, GMT/BST)")
     ax.set_ylabel("log2(mean ADU)")
