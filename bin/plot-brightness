@@ -155,11 +155,12 @@ def main() -> int:
 
     fig, ax = plt.subplots(figsize=(14, 6))
     anchor_date = datetime(2000, 1, 1).date()  # arbitrary; only shape matters
-    # Explicit, perceptually distinct palette (red, blue, yellow,
-    # green, orange, magenta, cyan, brown). Wraps if more nights.
-    palette = ["#e41a1c", "#377eb8", "#dca800", "#4daf4a", "#ff7f00",
-               "#984ea3", "#00ced1", "#a65628"]
-    colors = [palette[i % len(palette)] for i in range(len(night_dirs))]
+    # Sample a perceptually uniform colormap across the N nights so adjacent
+    # nights get adjacent hues (chronologically readable) and no two nights
+    # ever share a colour. viridis: dark purple → yellow.
+    cmap = plt.get_cmap("viridis")
+    n = max(len(night_dirs), 1)
+    colors = [cmap(i / max(n - 1, 1)) for i in range(len(night_dirs))]
 
     plotted = 0
     for nd, color in zip(night_dirs, colors):
@@ -178,8 +179,11 @@ def main() -> int:
 
     # Skycam overlay: same log2 axis, dashed lines so the two cameras
     # are visually distinct. crop_mean ~40 (dark) / ~80 (cloud-lit) maps
-    # to log2 ~5.3 / ~6.3, well below starcam's daytime range.
-    sky_palette = ["#377eb8", "#e41a1c", "#4daf4a", "#ff7f00", "#984ea3"]
+    # to log2 ~5.3 / ~6.3, well below starcam's daytime range. plasma so
+    # the dashed skycam lines stay visually distinct from the viridis
+    # solid starcam lines.
+    sky_cmap = plt.get_cmap("plasma")
+    sky_n = max(len(args.skycam), 1)
     for i, csv_path in enumerate(args.skycam):
         loaded = load_skycam(csv_path)
         if loaded is None:
@@ -189,7 +193,7 @@ def main() -> int:
         xs = to_noon_axis(times, anchor_date)
         ys = np.log2(np.maximum(vals, 1e-3))
         ax.plot(xs, ys, label=f"skycam {csv_path.stem}", ls="--", lw=1.2,
-                color=sky_palette[i % len(sky_palette)])
+                color=sky_cmap(i / max(sky_n - 1, 1)))
         print(f"  {csv_path.name}: {len(times)} pts, "
               f"crop_mean {vals.min():.1f}..{vals.max():.1f}")
         plotted += 1
