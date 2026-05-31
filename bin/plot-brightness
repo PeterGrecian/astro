@@ -153,14 +153,25 @@ def main() -> int:
         print("no night dirs found", file=sys.stderr)
         return 1
 
+    # Default selection: first + middle + last 3. Overlaying every night
+    # turns into spaghetti once N>6; picking boundary samples plus recent
+    # context keeps the plot readable. Order: first, middle, last3.
+    if len(night_dirs) > 5:
+        first = night_dirs[0]
+        middle = night_dirs[len(night_dirs) // 2]
+        last3 = night_dirs[-3:]
+        picked = [first, middle] + [n for n in last3 if n not in (first, middle)]
+        night_dirs = picked
+        print(f"selected {len(night_dirs)} of available nights: "
+              f"{', '.join(n.name for n in night_dirs)}", file=sys.stderr)
+
     fig, ax = plt.subplots(figsize=(14, 6))
     anchor_date = datetime(2000, 1, 1).date()  # arbitrary; only shape matters
-    # Sample a perceptually uniform colormap across the N nights so adjacent
-    # nights get adjacent hues (chronologically readable) and no two nights
-    # ever share a colour. viridis: dark purple → yellow.
-    cmap = plt.get_cmap("viridis")
-    n = max(len(night_dirs), 1)
-    colors = [cmap(i / max(n - 1, 1)) for i in range(len(night_dirs))]
+    # tab10: categorical palette, max distinctness for a handful of nights.
+    # Default selection caps N at 5; if a caller overrides with more, colours
+    # wrap (tab10 has 10) — still distinct up to 10.
+    cmap = plt.get_cmap("tab10")
+    colors = [cmap(i % 10) for i in range(len(night_dirs))]
 
     plotted = 0
     for nd, color in zip(night_dirs, colors):
