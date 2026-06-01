@@ -10,7 +10,7 @@ source "$HOME/astro/.venv/bin/activate"
 # night-dir of "now" returns the current observing night, which during the
 # day has no frames yet (timer runs at 05:00 — yesterday's night just
 # ended). Subtracting 24h dodges the noon edge case either side.
-NIGHT="$("$HOME/super/bin/night-dir" "$(date -u -d '24 hours ago' +%s)")"
+NIGHT="$(date -u -d '12 hours ago' +%Y-%m-%d)"
 SKY_CSV="$HOME/tmp/skycam-$NIGHT.csv"
 
 "$HOME/astro/bin/scan-skycam-brightness" --night "$NIGHT" --out "$SKY_CSV" || true
