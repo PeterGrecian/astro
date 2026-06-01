@@ -70,14 +70,27 @@ def utc_hour_dirs(night: str, start_local: time, end_local: time) -> list[tuple[
     return out
 
 
-def crop_mean(path: Path) -> float | None:
-    """Centre 50% crop mean of a grayscale-converted JPG. Matches
-    cover-watch.skycam_crop_mean."""
+# EXIF tag id for ExposureTime — hard-coded so we don't pay
+# PIL.ExifTags.TAGS lookup cost per frame.
+_EXIF_EXPOSURE_TIME = 0x829A
+
+
+def crop_mean_and_exposure(path: Path) -> tuple[float, float] | None:
+    """Return (centre-50%-crop mean, exposure_seconds) from a JPG.
+
+    The crop mean matches cover-watch.skycam_crop_mean. ExposureTime is
+    pulled from EXIF so callers can normalise out the skycam_daemon_v2
+    night-mode proportional controller (which targets a fixed crop mean,
+    making the raw value uninformative as a sky-brightness proxy).
+    """
     try:
-        img = np.asarray(Image.open(path).convert("L"))
+        im = Image.open(path)
+        exif = im._getexif() or {}
+        exp_s = float(exif.get(_EXIF_EXPOSURE_TIME, 0.0))
+        img = np.asarray(im.convert("L"))
         h, w = img.shape
         crop = img[h // 4:3 * h // 4, w // 4:3 * w // 4]
-        return float(crop.mean())
+        return float(crop.mean()), exp_s
     except Exception as e:
         print(f"  skip {path.name}: {e}", file=sys.stderr)
         return None
@@ -118,7 +131,11 @@ def main() -> int:
         print(f"mount not found: {args.mount}", file=sys.stderr)
         return 1
 
-    rows: list[tuple[str, float]] = []
+    # rows: (iso_utc, crop_mean, exposure_s, lum). `lum` is
+    # crop_mean / exposure_s — an exposure-normalised brightness whose
+    # absolute scale is arbitrary but whose temporal shape tracks actual
+    # scene luminance regardless of day/night mode handoff.
+    rows: list[tuple[str, float, float, float]] = []
     for date, hh in utc_hour_dirs(night, start_local, end_local):
         d = args.mount / date / hh
         if not d.is_dir():
@@ -130,11 +147,13 @@ def main() -> int:
                 epoch_ms = int(p.name.split("_", 1)[0])
             except ValueError:
                 continue
-            v = crop_mean(p)
-            if v is None:
+            r = crop_mean_and_exposure(p)
+            if r is None:
                 continue
+            cm, exp_s = r
+            lum = cm / exp_s if exp_s > 0 else 0.0
             iso = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).isoformat()
-            rows.append((iso, v))
+            rows.append((iso, cm, exp_s, lum))
         print(f"  {date}/{hh} (UTC): {len(jpgs)} sampled", file=sys.stderr)
 
     if not rows:
@@ -145,9 +164,9 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["iso_utc", "crop_mean"])
-        for iso, v in rows:
-            w.writerow([iso, f"{v:.4f}"])
+        w.writerow(["iso_utc", "crop_mean", "exposure_s", "lum"])
+        for iso, cm, exp_s, lum in rows:
+            w.writerow([iso, f"{cm:.4f}", f"{exp_s:.6f}", f"{lum:.4f}"])
     print(f"wrote {out} ({len(rows)} rows)")
     return 0
 

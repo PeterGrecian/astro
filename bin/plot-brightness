@@ -75,7 +75,14 @@ def load_night(night_dir: Path) -> tuple[np.ndarray, np.ndarray] | None:
 
 
 def load_skycam(csv_path: Path) -> tuple[np.ndarray, np.ndarray] | None:
-    """Return (times_local, crop_mean) from a scan-skycam-brightness CSV."""
+    """Return (times_local, lum) from a scan-skycam-brightness CSV.
+
+    Prefers `lum` (= crop_mean / exposure_s, exposure-normalised) so
+    night-mode frames — where the daemon's proportional controller pins
+    crop_mean near TARGET_BRIGHTNESS — still reflect actual sky
+    brightness. Falls back to `crop_mean` for legacy CSVs without the
+    column.
+    """
     rows: list[tuple[datetime, float]] = []
     with open(csv_path) as f:
         for row in csv.DictReader(f):
@@ -83,7 +90,8 @@ def load_skycam(csv_path: Path) -> tuple[np.ndarray, np.ndarray] | None:
                 t = datetime.fromisoformat(row["iso_utc"])
                 if t.tzinfo is None:
                     t = t.replace(tzinfo=timezone.utc)
-                rows.append((t.astimezone(LONDON), float(row["crop_mean"])))
+                val = float(row.get("lum") or row["crop_mean"])
+                rows.append((t.astimezone(LONDON), val))
             except (KeyError, ValueError):
                 continue
     if not rows:
