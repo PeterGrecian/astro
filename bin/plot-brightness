@@ -222,7 +222,7 @@ def main() -> int:
         ax.plot(xs, ys, label=f"{csv_path.stem}", ls="-.", lw=1.5,
                 color=sky_palette[i % len(sky_palette)])
         print(f"  {csv_path.name}: {len(times)} pts, "
-              f"crop_mean {vals.min():.1f}..{vals.max():.1f}")
+              f"lum {vals.min():.1f}..{vals.max():.1f}")
         plotted += 1
 
     if not plotted:
