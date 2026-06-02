@@ -503,6 +503,12 @@ SUMMARY_ARGS+=(
 )
 run write-run-summary "${SUMMARY_ARGS[@]}"
 
+# ---------- Stage H: publish to public starcam website ---------------
+step "H. publish-night"
+PUBLISH_ARGS=("$NIGHT")
+[ -n "$VARIANT" ] && PUBLISH_ARGS+=(--variant "$VARIANT")
+run publish-night "${PUBLISH_ARGS[@]}" || echo "publish-night failed (non-fatal)"
+
 step "night complete: $NIGHT"
 printf 'summary: %s\n' "$SUMMARY"
 column -s, -t "$SUMMARY"

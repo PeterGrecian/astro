@@ -57,6 +57,10 @@ argued this and it's right. Decision recorded in DECISIONS.md.
   pixel pitch 1.4 µm, focal length 3.60 mm. On-axis plate scale
   ~0.0206°/px at full res, ~0.0413°/px at 2×2 binned. Lens has barrel
   distortion (magnitude not yet characterised).
+- **Log-scale plots: base 2, not base 10.** Brightness, photon counts,
+  and other dynamic-range plots should use `ax.set_yscale("log", base=2)`
+  (matplotlib) so each gridline is one stop. Base 10 obscures the
+  per-stop structure that matches how we reason about exposure.
 - **Night dir = noon-noon rollover.** The "night of 2026-05-21" is
   2026-05-21 12:00 → 2026-05-22 12:00 (Europe/London noon, so the
   whole observing session lives under one date string).

@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""publish-night — make a night visible on the public starcam website.
+
+Runs the web-asset generator (night-web-assets) to produce summary.json
+and brightness.png, then uploads the small set of artefacts that the
+Lambda renderer needs to S3 under `nights/<YYYY-MM-DD>/`.
+
+Bucket is the existing starcam-berrylands-eu-west-1 (gardencam pattern).
+Objects are private; the Lambda renderer presigns URLs for the public
+night page (consistent with the existing gallery pattern).
+
+Usage:
+    publish-night <night-dir>
+    publish-night <night-dir> --variant max80
+    publish-night <night-dir> --dry-run        # local assets only, no upload
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+import boto3
+
+BUCKET = "starcam-berrylands-eu-west-1"
+
+CONTENT_TYPES = {
+    ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".yaml": "application/x-yaml",
+}
+
+# Filenames (after stripping variant prefix) that get uploaded.
+PUBLISH_NAMES = [
+    "summary.json",
+    "summary.yaml",
+    "brightness.png",
+    "all-night-derot.jpg",
+]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("night", type=Path)
+    ap.add_argument("--variant", default="")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="generate assets locally, skip S3 upload")
+    args = ap.parse_args()
+
+    night = args.night.resolve()
+    if not night.is_dir():
+        print(f"no such dir: {night}", file=sys.stderr)
+        return 2
+
+    # Step 1: generate summary.json + brightness.png from summary.yaml.
+    cmd = [sys.executable, str(Path(__file__).parent / "night-web-assets"),
+           str(night)]
+    if args.variant:
+        cmd += ["--variant", args.variant]
+    subprocess.run(cmd, check=True)
+
+    prefix = f"{args.variant}_" if args.variant else ""
+    night_name = night.name  # YYYY-MM-DD
+
+    # Collect per-hour sum jpgs too (they're cheap and the page wants them).
+    files = []
+    for name in PUBLISH_NAMES:
+        local = night / f"{prefix}{name}"
+        if local.exists():
+            files.append((local, name))
+    for hour_jpg in sorted(night.glob(f"{prefix}sum_*.jpg")):
+        files.append((hour_jpg, hour_jpg.name.removeprefix(prefix)))
+
+    if args.dry_run:
+        print(f"would upload {len(files)} files to s3://{BUCKET}/nights/{night_name}/")
+        for local, remote in files:
+            print(f"  {local.name} → nights/{night_name}/{remote}")
+        return 0
+
+    s3 = boto3.client("s3")
+    for local, remote in files:
+        key = f"nights/{night_name}/{remote}"
+        ctype = CONTENT_TYPES.get(local.suffix, "application/octet-stream")
+        s3.upload_file(
+            str(local), BUCKET, key,
+            ExtraArgs={"ContentType": ctype},
+        )
+        print(f"uploaded s3://{BUCKET}/{key}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

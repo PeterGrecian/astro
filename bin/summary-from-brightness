@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""summary-from-brightness — build a lightweight summary.yaml from per-hour
+brightness.csv files, for nights where the full pipeline never ran.
+
+The per-frame brightness CSVs (one per hour dir) carry mean/median/p95/max.
+We aggregate to a per-hour entry compatible with write-run-summary's schema,
+flag bright hours, and emit a yaml summary suitable for publish-night.
+
+No pole/derot data: verdict can be clear/cloudy/moon/no-data only — 'rain'
+needs a failed pole fit. Marks `data_source: brightness-csv` so it's clear
+the summary is lightweight, not pipeline output.
+
+Usage:
+    summary-from-brightness <night-dir>
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import statistics
+import sys
+from pathlib import Path
+
+import yaml
+
+
+SKY_THRESHOLD = 100.0   # matches pipeline default for 'skipped-bright'
+
+
+def aggregate_hour(csv_path: Path) -> dict:
+    means: list[float] = []
+    first_iso = None
+    for row in csv.DictReader(csv_path.open()):
+        try:
+            means.append(float(row["mean"]))
+        except (KeyError, ValueError):
+            continue
+        if first_iso is None:
+            first_iso = row.get("iso_utc", "").strip() or None
+    if not means:
+        return {}
+    mean = statistics.mean(means)
+    status = "skipped-bright" if mean > SKY_THRESHOLD else "ok"
+    return {
+        "nframes": len(means),
+        "mean_brightness": round(mean, 4),
+        "started_utc": first_iso[:19] + "Z" if first_iso else None,
+        "status": status,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("night", type=Path)
+    args = ap.parse_args()
+
+    night = args.night.resolve()
+    hours: list[dict] = []
+    # Walk only *non-binned* hour dirs (NN/, not NNb/) to avoid double counts.
+    for hour_dir in sorted(night.iterdir()):
+        if not hour_dir.is_dir() or not hour_dir.name.isdigit():
+            continue
+        csv_path = hour_dir / "brightness.csv"
+        if not csv_path.exists():
+            continue
+        entry = aggregate_hour(csv_path)
+        if not entry:
+            continue
+        entry["hh"] = hour_dir.name
+        hours.append(entry)
+
+    if not hours:
+        print(f"no brightness.csv files under {night}", file=sys.stderr)
+        return 2
+
+    agg = {
+        "hours_total": len(hours),
+        "hours_ok": sum(1 for h in hours if h["status"] == "ok"),
+        "hours_skipped_bright": sum(
+            1 for h in hours if h["status"] == "skipped-bright"),
+        "hours_skipped_empty": 0,
+        "hours_resumed": 0,
+        # Deliberately no pole_* fields — classify_night will skip 'rain'.
+    }
+
+    summary = {
+        "variant": "default",
+        "night": night.name,
+        "data_source": "brightness-csv",
+        "outputs": {},
+        "aggregate": agg,
+        "hours": hours,
+    }
+
+    out = night / "summary.yaml"
+    with out.open("w") as f:
+        yaml.safe_dump(summary, f, sort_keys=False, default_flow_style=False)
+    print(f"wrote {out}  ({len(hours)} hours)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

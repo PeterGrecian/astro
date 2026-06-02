@@ -28,10 +28,33 @@ import matplotlib.pyplot as plt
 import yaml
 
 
-VERDICT_RAIN_SPREAD_PX = 100.0
-VERDICT_CLEAR_SPREAD_PX = 50.0
+VERDICT_RAIN_MAD_PX = 80.0
+VERDICT_CLEAR_MAD_PX = 45.0
 VERDICT_MOON_SKIPPED_HOURS = 4
 VERDICT_CLEAR_MIN_HOURS_OK = 5
+
+
+def pole_mad(summary: dict) -> float | None:
+    """Median absolute deviation (px) of per-hour pole distance from median.
+
+    MAD is robust to twilight outliers: the first/last hour of darkness
+    typically has few stars and a bogus pole fit, which the raw max-spread
+    metric in summary.yaml ('pole_spread_px') punishes too harshly.
+    Returns None if fewer than 2 OK hours have poles.
+    """
+    import math
+    import statistics
+    poles = [(h.get("pole_x"), h.get("pole_y"))
+             for h in (summary.get("hours") or [])
+             if h.get("status") == "ok"
+             and h.get("pole_x") is not None
+             and h.get("pole_y") is not None]
+    if len(poles) < 2:
+        return None
+    med_x = statistics.median(p[0] for p in poles)
+    med_y = statistics.median(p[1] for p in poles)
+    dists = [math.hypot(x - med_x, y - med_y) for x, y in poles]
+    return statistics.median(dists)
 
 
 def classify_night(summary: dict) -> str:
@@ -39,19 +62,24 @@ def classify_night(summary: dict) -> str:
 
     Order matters: 'rain' (failed derot) wins over 'moon' (bright but
     locked); 'clear' requires both enough good hours and a tight pole fit.
+    Uses MAD of per-hour pole distance from the median pole so single-hour
+    twilight outliers don't flip a clear night to 'rain'.
     """
     agg = summary.get("aggregate", {}) or {}
     ok = agg.get("hours_ok", 0)
     skipped_bright = agg.get("hours_skipped_bright", 0)
-    spread = agg.get("pole_spread_px")
+    mad = pole_mad(summary)
     if ok == 0:
+        # Distinguish "literally no measurements" from "all hours too bright".
+        if skipped_bright > 0:
+            return "moon"
         return "no-data"
-    if spread is not None and spread > VERDICT_RAIN_SPREAD_PX:
+    if mad is not None and mad > VERDICT_RAIN_MAD_PX:
         return "rain"
     if skipped_bright >= VERDICT_MOON_SKIPPED_HOURS:
         return "moon"
     if (ok >= VERDICT_CLEAR_MIN_HOURS_OK
-            and spread is not None and spread < VERDICT_CLEAR_SPREAD_PX):
+            and mad is not None and mad < VERDICT_CLEAR_MAD_PX):
         return "clear"
     return "cloudy"
 
@@ -117,9 +145,13 @@ def plot_brightness(summary: dict, night: Path, out_path: Path) -> None:
         colour = "#34C759" if state == "open" else "#FF3B30"
         ax.axvline(x, color=colour, linestyle="--", alpha=0.4, linewidth=1)
 
-    ax.set_yscale("log")
+    ax.set_yscale("log", base=2)
     ax.set_xlabel("hour (UTC)")
-    ax.set_ylabel("mean brightness (log)")
+    ax.set_ylabel("mean brightness (log₂)")
+    from matplotlib.ticker import FuncFormatter
+    import math as _math
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda y, _pos: f"{_math.log2(y):.0f}" if y > 0 else ""))
     ax.set_title(f"{night.name} — per-hour brightness")
     tick_locs = list(range(20, 29))
     tick_labels = [f"{h % 24:02d}" for h in tick_locs]
