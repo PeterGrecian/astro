@@ -75,7 +75,19 @@ ACT_BEFORE = (4, 30)   # 04:30 local
 # drop the skycam gate and go starcam-only for both decisions.
 CLOUDY_STARCAM_MEAN = 75.0   # starcam mean >= this for N reads -> close (clear~48-52, cloud~85)
 CLOUDY_SKYCAM_CROP = 55.0    # skycam crop_mean >= this confirms cloud (clear ~22-25, cloud ~57+)
-DARK_SKYCAM_CROP = 40.0      # skycam crop_mean <= this for N reads -> open (clear floor ~22-25, cliff ~38)
+# OPEN signal: exposure-normalised skycam luminance (crop_mean / exposure_s).
+# Raw crop_mean is unreliable through the dusk transition because skycam
+# runs AE on the day side — as the scene darkens AE extends exposure and
+# pins crop_mean near AE target, so crop_mean stops dropping long before
+# the sky is actually dark. lum divides out the exposure-time response.
+# Reference values from the 2026-05-31 night:
+#   late afternoon AE:    lum ~ 8000–9000
+#   deep twilight (21Z):  lum ~ 60–70
+#   day->night flip (22Z): lum jumps to ~32 (manual long exposure)
+#   stable deep night:    lum ~ 29–32
+# 100 sits well below daylight floor and above all real night values,
+# so it fires reliably during late dusk and never mid-day.
+DARK_SKYCAM_LUM = 100.0
 CONSEC_NEEDED = 3
 LOCKOUT_S = 300              # no flip within 5 min of the last flip
 
@@ -139,15 +151,36 @@ def latest_skycam_jpgs(n: int) -> list[Path]:
     return files[-n:]
 
 
-def skycam_crop_mean(path: Path) -> float | None:
+# EXIF tag id for ExposureTime — hard-coded to avoid PIL.ExifTags lookup
+# cost on every tick.
+_EXIF_EXPOSURE_TIME = 0x829A
+
+
+def skycam_metrics(path: Path) -> tuple[float, float] | None:
+    """Return (crop_mean, lum) where lum = crop_mean / exposure_s.
+
+    crop_mean is the historical signal (still used for CLOUDY confirm).
+    lum is exposure-normalised so it tracks scene brightness through
+    skycam's AE-controlled day side — see DARK_SKYCAM_LUM block.
+    """
     try:
-        img = np.asarray(Image.open(path).convert("L"))
+        im = Image.open(path)
+        exif = im._getexif() or {}
+        exp_s = float(exif.get(_EXIF_EXPOSURE_TIME, 0.0))
+        img = np.asarray(im.convert("L"))
         h, w = img.shape
         crop = img[h // 4:3 * h // 4, w // 4:3 * w // 4]
-        return float(crop.mean())
+        cm = float(crop.mean())
+        lum = cm / exp_s if exp_s > 0 else 0.0
+        return cm, lum
     except Exception as e:
         log(f"failed to read {path.name}: {e}")
     return None
+
+
+def skycam_crop_mean(path: Path) -> float | None:
+    r = skycam_metrics(path)
+    return r[0] if r else None
 
 
 def skycam_latest_crop() -> float | None:
@@ -197,8 +230,14 @@ def main() -> int:
     if state == "open":
         # CLOSE decision: starcam's own brightness, read locally from buffer.
         means = recent_starcam_means(CONSEC_NEEDED)
-        sky = skycam_latest_crop()  # INTERIM: skycam is the proxy, used to gate
-        log(f"starcam means={means} skycam_crop={sky}")
+        # Read both crop_mean and lum so we accumulate paired data for
+        # future cloud-threshold calibration. Decision still uses
+        # crop_mean — no cloud-lit lum data yet to set a threshold from.
+        frames = latest_skycam_jpgs(1)
+        m = skycam_metrics(frames[0]) if frames else None
+        sky = m[0] if m else None
+        sky_lum = m[1] if m else None
+        log(f"starcam means={means} skycam_crop={sky} skycam_lum={sky_lum}")
         if len(means) < CONSEC_NEEDED:
             log(f"only {len(means)} starcam means; need {CONSEC_NEEDED}; no-op")
             return 0
@@ -224,13 +263,15 @@ def main() -> int:
         if len(frames) < CONSEC_NEEDED:
             log(f"only {len(frames)} skycam frames; need {CONSEC_NEEDED}; no-op")
             return 0
-        crops = [skycam_crop_mean(p) for p in frames]
-        log(f"skycam crop_means: {crops}")
-        if any(c is None for c in crops):
+        metrics = [skycam_metrics(p) for p in frames]
+        if any(m is None for m in metrics):
             log("missing skycam reads; no-op")
             return 0
-        if all(c <= DARK_SKYCAM_CROP for c in crops):
-            log(f"all <= {DARK_SKYCAM_CROP}: dark -> OPEN + start capture")
+        crops = [m[0] for m in metrics]
+        lums = [m[1] for m in metrics]
+        log(f"skycam crop_means: {crops} lums: {lums}")
+        if all(l <= DARK_SKYCAM_LUM for l in lums):
+            log(f"all lum <= {DARK_SKYCAM_LUM}: dark -> OPEN + start capture")
             if move_cover("open"):
                 set_capture(True)
         else:
