@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""night-web-assets — produce web-facing artefacts for one night.
+
+Reads `summary.yaml` (from write-run-summary) and emits, alongside it:
+  - summary.json     — same data plus a derived `verdict` field
+  - brightness.png   — per-hour mean brightness, with cover-event markers
+
+Both are designed for the public starcam web pages: summary.json is the
+single source of truth the Lambda renderer reads; brightness.png is the
+plot embedded in the per-night page.
+
+Usage:
+    night-web-assets <night-dir>
+    night-web-assets <night-dir> --variant max80
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import yaml
+
+
+VERDICT_RAIN_SPREAD_PX = 100.0
+VERDICT_CLEAR_SPREAD_PX = 50.0
+VERDICT_MOON_SKIPPED_HOURS = 4
+VERDICT_CLEAR_MIN_HOURS_OK = 5
+
+
+def classify_night(summary: dict) -> str:
+    """Derive a one-word verdict from the aggregate stats.
+
+    Order matters: 'rain' (failed derot) wins over 'moon' (bright but
+    locked); 'clear' requires both enough good hours and a tight pole fit.
+    """
+    agg = summary.get("aggregate", {}) or {}
+    ok = agg.get("hours_ok", 0)
+    skipped_bright = agg.get("hours_skipped_bright", 0)
+    spread = agg.get("pole_spread_px")
+    if ok == 0:
+        return "no-data"
+    if spread is not None and spread > VERDICT_RAIN_SPREAD_PX:
+        return "rain"
+    if skipped_bright >= VERDICT_MOON_SKIPPED_HOURS:
+        return "moon"
+    if (ok >= VERDICT_CLEAR_MIN_HOURS_OK
+            and spread is not None and spread < VERDICT_CLEAR_SPREAD_PX):
+        return "clear"
+    return "cloudy"
+
+
+def hour_to_x(hh: str) -> float:
+    """Map HH (20..23, 00..04) onto a continuous x-axis: 20→20, 00→24, 04→28."""
+    n = int(hh)
+    return float(n) if n >= 12 else float(n + 24)
+
+
+def read_cover_events(night: Path) -> list[tuple[float, str]]:
+    """Return [(x_axis_value, state), ...] from cover.csv if present.
+
+    x_axis_value is hours-since-midnight extended past 24 to keep evening
+    and morning on one line, matching hour_to_x.
+    """
+    csv_path = night / "cover.csv"
+    if not csv_path.exists():
+        return []
+    events: list[tuple[float, str]] = []
+    with csv_path.open() as f:
+        for row in csv.DictReader(f):
+            iso = row.get("iso_utc", "").strip()
+            state = row.get("state", "").strip()
+            if not iso or not state:
+                continue
+            try:
+                dt = datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            night_date = datetime.strptime(
+                night.name, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            delta_hours = (dt - night_date).total_seconds() / 3600.0
+            events.append((delta_hours, state))
+    return events
+
+
+def plot_brightness(summary: dict, night: Path, out_path: Path) -> None:
+    hours = summary.get("hours", []) or []
+    points = []
+    for h in hours:
+        hh = h.get("hh")
+        b = h.get("mean_brightness")
+        if hh is None or b is None:
+            continue
+        points.append((hour_to_x(hh), float(b), h.get("status", "")))
+    points.sort(key=lambda p: p[0])
+
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    if points:
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        ax.plot(xs, ys, marker="o", linewidth=1.5, color="#007AFF",
+                label="mean brightness")
+        for x, y, status in points:
+            if status == "skipped-bright":
+                ax.plot([x], [y], marker="o", markersize=10,
+                        markerfacecolor="none", markeredgecolor="#FF9500",
+                        markeredgewidth=2)
+
+    for x, state in read_cover_events(night):
+        colour = "#34C759" if state == "open" else "#FF3B30"
+        ax.axvline(x, color=colour, linestyle="--", alpha=0.4, linewidth=1)
+
+    ax.set_yscale("log")
+    ax.set_xlabel("hour (UTC)")
+    ax.set_ylabel("mean brightness (log)")
+    ax.set_title(f"{night.name} — per-hour brightness")
+    tick_locs = list(range(20, 29))
+    tick_labels = [f"{h % 24:02d}" for h in tick_locs]
+    ax.set_xticks(tick_locs)
+    ax.set_xticklabels(tick_labels)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=100, facecolor="white")
+    plt.close(fig)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("night", type=Path)
+    ap.add_argument("--variant", default="")
+    args = ap.parse_args()
+
+    night = args.night.resolve()
+    prefix = f"{args.variant}_" if args.variant else ""
+    summary_yaml = night / f"{prefix}summary.yaml"
+    if not summary_yaml.exists():
+        print(f"no {summary_yaml.name}", file=sys.stderr)
+        return 2
+
+    with summary_yaml.open() as f:
+        summary = yaml.safe_load(f)
+
+    summary["verdict"] = classify_night(summary)
+
+    plot_path = night / f"{prefix}brightness.png"
+    plot_brightness(summary, night, plot_path)
+    summary.setdefault("outputs", {})["brightness_png"] = plot_path.name
+
+    json_path = night / f"{prefix}summary.json"
+    with json_path.open("w") as f:
+        json.dump(summary, f, indent=2, sort_keys=False)
+
+    print(f"verdict: {summary['verdict']}")
+    print(f"wrote {json_path}")
+    print(f"wrote {plot_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

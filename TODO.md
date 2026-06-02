@@ -1,5 +1,7 @@
 # astro — TODO
 
+rain detector.  suggested that 10k pull up from GPIO and tinned veroboard.  
+
 periodically review the relationship between these repos:
 astro - image processing for astronomy
 Berrylands/gardencam - raspberry pi camera routines.  might need rehoming
