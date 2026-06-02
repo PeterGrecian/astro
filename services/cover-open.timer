@@ -1,9 +1,0 @@
-[Unit]
-Description=astro: open lens cover daily at 20:30 local (before night)
-
-[Timer]
-OnCalendar=*-*-* 20:30:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
