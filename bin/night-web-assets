@@ -30,7 +30,6 @@ import yaml
 
 VERDICT_RAIN_MAD_PX = 80.0
 VERDICT_CLEAR_MAD_PX = 45.0
-VERDICT_MOON_SKIPPED_HOURS = 4
 VERDICT_CLEAR_MIN_HOURS_OK = 5
 
 
@@ -60,24 +59,20 @@ def pole_mad(summary: dict) -> float | None:
 def classify_night(summary: dict) -> str:
     """Derive a one-word verdict from the aggregate stats.
 
-    Order matters: 'rain' (failed derot) wins over 'moon' (bright but
-    locked); 'clear' requires both enough good hours and a tight pole fit.
-    Uses MAD of per-hour pole distance from the median pole so single-hour
-    twilight outliers don't flip a clear night to 'rain'.
+    Three real verdicts: clear / cloudy / rain. 'no-data' for nights with
+    no measurements at all. Pole-MAD distinguishes rain (failed derot,
+    > VERDICT_RAIN_MAD_PX) from clear (tight pole fit). Everything in
+    between — including nights whose hours were all too bright (moonlight
+    or twilight) — is reported as cloudy.
     """
     agg = summary.get("aggregate", {}) or {}
     ok = agg.get("hours_ok", 0)
     skipped_bright = agg.get("hours_skipped_bright", 0)
     mad = pole_mad(summary)
-    if ok == 0:
-        # Distinguish "literally no measurements" from "all hours too bright".
-        if skipped_bright > 0:
-            return "moon"
+    if ok == 0 and skipped_bright == 0:
         return "no-data"
     if mad is not None and mad > VERDICT_RAIN_MAD_PX:
         return "rain"
-    if skipped_bright >= VERDICT_MOON_SKIPPED_HOURS:
-        return "moon"
     if (ok >= VERDICT_CLEAR_MIN_HOURS_OK
             and mad is not None and mad < VERDICT_CLEAR_MAD_PX):
         return "clear"

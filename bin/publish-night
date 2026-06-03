@@ -54,12 +54,25 @@ def main() -> int:
         print(f"no such dir: {night}", file=sys.stderr)
         return 2
 
-    # Step 1: generate summary.json + brightness.png from summary.yaml.
+    # Step 1: generate summary.json + per-night brightness.png from summary.yaml.
     cmd = [sys.executable, str(Path(__file__).parent / "night-web-assets"),
            str(night)]
     if args.variant:
         cmd += ["--variant", args.variant]
     subprocess.run(cmd, check=True)
+
+    # Step 2: regenerate the multi-night overlay plot at <parent>/brightness.png
+    # (used as the dashboard hero on /starcam/nights). Non-fatal if it fails.
+    overlay_local = night.parent / "brightness.png"
+    try:
+        subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "plot-brightness"),
+             str(night.parent), "--out", str(overlay_local)],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        print(f"plot-brightness failed (non-fatal): {e}", file=sys.stderr)
+        overlay_local = None
 
     prefix = f"{args.variant}_" if args.variant else ""
     night_name = night.name  # YYYY-MM-DD
@@ -77,6 +90,9 @@ def main() -> int:
         print(f"would upload {len(files)} files to s3://{BUCKET}/nights/{night_name}/")
         for local, remote in files:
             print(f"  {local.name} → nights/{night_name}/{remote}")
+        if overlay_local and overlay_local.exists():
+            print(f"would upload {overlay_local.name} → nights/brightness.png "
+                  f"(dashboard hero)")
         return 0
 
     s3 = boto3.client("s3")
@@ -88,6 +104,15 @@ def main() -> int:
             ExtraArgs={"ContentType": ctype},
         )
         print(f"uploaded s3://{BUCKET}/{key}")
+
+    # Overlay plot lives at the bucket root, not under a date prefix —
+    # it's the always-current dashboard hero.
+    if overlay_local and overlay_local.exists():
+        s3.upload_file(
+            str(overlay_local), BUCKET, "nights/brightness.png",
+            ExtraArgs={"ContentType": "image/png"},
+        )
+        print(f"uploaded s3://{BUCKET}/nights/brightness.png")
     return 0
 
 
