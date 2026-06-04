@@ -8,6 +8,7 @@ move and stop it after. Requires passwordless sudo for
 `systemctl start/stop pigpiod` (installed by the astro-camera role
 via /etc/sudoers.d/peter-pigpiod).
 """
+import argparse
 import subprocess
 import sys
 import time
@@ -20,19 +21,25 @@ STATE_PATH = Path.home() / ".cover-state"
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("usage: cover-move <angle_deg> <state_label>", file=sys.stderr)
-        sys.exit(2)
-    target_deg = float(sys.argv[1])
-    state_label = sys.argv[2]
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("angle_deg", type=float)
+    ap.add_argument("state_label")
+    ap.add_argument("--no-alert", action="store_true",
+                    help="skip Slack/xMatters notification")
+    args = ap.parse_args()
+    target_deg = args.angle_deg
+    state_label = args.state_label
 
     subprocess.run(["sudo", "systemctl", "start", "pigpiod"], check=True)
+    factory = None
     try:
         time.sleep(0.3)
-        from gpiozero import Servo
+        from gpiozero import Device, Servo
         from gpiozero.pins.pigpio import PiGPIOFactory
 
-        servo = Servo(SIGNAL_PIN, pin_factory=PiGPIOFactory())
+        factory = PiGPIOFactory()
+        Device.pin_factory = factory
+        servo = Servo(SIGNAL_PIN, pin_factory=factory)
         current = 0.0
         servo.value = 0.0
         time.sleep(0.3)
@@ -46,14 +53,24 @@ def main():
         servo.value = max(-1.0, min(1.0, target_deg / 90.0))
         time.sleep(0.5)
         servo.detach()
+        servo.close()
     finally:
+        # Tear pigpio down cleanly BEFORE stopping pigpiod, so
+        # gpiozero's __del__ doesn't try to talk to a dead socket and
+        # spew BrokenPipeError tracebacks.
+        if factory is not None:
+            try:
+                factory.close()
+            except Exception:
+                pass
         subprocess.run(["sudo", "systemctl", "stop", "pigpiod"], check=False)
 
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(f"{state_label}\n{target_deg}\n{int(time.time())}\n")
     print(f"cover now {state_label} (angle={target_deg})")
     append_night_log(state_label, target_deg)
-    alert_state_change(state_label, target_deg)
+    if not args.no_alert:
+        alert_state_change(state_label, target_deg)
 
 
 def append_night_log(state_label: str, angle: float) -> None:

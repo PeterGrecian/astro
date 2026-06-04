@@ -2,9 +2,9 @@
 # cover — drive the lens cover servo on starcam.
 #
 # Usage:
-#   cover open       # smoothly rotate to OPEN_ANGLE
-#   cover close      # smoothly rotate to CLOSE_ANGLE
-#   cover status     # read state from starcam, no servo touched
+#   cover open [--no-alert]    # smoothly rotate to OPEN_ANGLE
+#   cover close [--no-alert]   # smoothly rotate to CLOSE_ANGLE
+#   cover status               # read state from starcam, no servo touched
 #
 # Angles characterised 2026-05-25 (see ~/cover-sweep.csv on starcam):
 #   open  = +60°    well inside the open plateau
@@ -31,20 +31,25 @@ CLOSE_ANGLE=-60
 
 usage() {
     cat <<EOF
-usage: cover {open|close|status}
+usage: cover {open|close} [--no-alert]
+       cover status
 
   open    move cover to +${OPEN_ANGLE}° (lens unobstructed)
   close   move cover to ${CLOSE_ANGLE}° (lens blocked)
   status  print current state ('open', 'closed', 'unknown')
+
+options:
+  --no-alert   skip the Slack/xMatters state-change notification
 EOF
 }
 
 cmd_move() {
     local angle="$1" label="$2"
+    shift 2
     if [ "$(hostname)" = starcam ]; then
-        python3 "$HELPER" "$angle" "$label"
+        python3 "$HELPER" "$angle" "$label" "$@"
     else
-        ssh "$STARCAM" "python3 $HELPER $angle $label"
+        ssh "$STARCAM" "python3 $HELPER $angle $label $*"
     fi
 }
 
@@ -74,10 +79,12 @@ cmd_status() {
     fi
 }
 
-case "${1:-}" in
-    open)   cmd_move "$OPEN_ANGLE" open ;;
-    close)  cmd_move "$CLOSE_ANGLE" closed ;;
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+    open)   cmd_move "$OPEN_ANGLE" open "$@" ;;
+    close)  cmd_move "$CLOSE_ANGLE" closed "$@" ;;
     status) cmd_status ;;
     -h|--help|"") usage; exit 0 ;;
-    *) echo "unknown: $1" >&2; usage; exit 2 ;;
+    *) echo "unknown: $cmd" >&2; usage; exit 2 ;;
 esac
