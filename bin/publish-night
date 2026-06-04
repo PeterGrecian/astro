@@ -22,6 +22,9 @@ import sys
 from pathlib import Path
 
 import boto3
+import numpy as np
+from PIL import Image
+from astropy.io import fits
 
 BUCKET = "starcam-berrylands-eu-west-1"
 
@@ -39,6 +42,10 @@ PUBLISH_NAMES = [
     "brightness.png",
     "all-night-derot.jpg",
 ]
+
+
+def prefix_for_assets(variant: str) -> str:
+    return f"{variant}_" if variant else ""
 
 
 def main() -> int:
@@ -60,6 +67,34 @@ def main() -> int:
     if args.variant:
         cmd += ["--variant", args.variant]
     subprocess.run(cmd, check=True)
+
+    # Step 1b: render per-hour derot FITS to derot_<HH>.jpg, matching the
+    # all-night derot stretch (p50 → p99.5). These are the per-hour hero
+    # candidates and the grid thumbnails for the website.
+    bin_suffix = f"-{args.variant}" if args.variant else "b"
+    for hour_bin in sorted(night.iterdir()):
+        if not hour_bin.is_dir():
+            continue
+        if not (hour_bin.name.endswith(bin_suffix)
+                and hour_bin.name[:-len(bin_suffix)].isdigit()):
+            continue
+        hh = hour_bin.name[:-len(bin_suffix)]
+        derot_fits = hour_bin / "final" / "derot.fits.fz"
+        if not derot_fits.exists():
+            continue
+        derot_jpg = night / f"{prefix_for_assets(args.variant)}derot_{hh}.jpg"
+        try:
+            with fits.open(derot_fits) as h:
+                arr = next(hdu.data for hdu in h if hdu.data is not None)
+            lo = float(np.percentile(arr, 50.0))
+            hi = float(np.percentile(arr, 99.5))
+            if hi <= lo:
+                hi = lo + 1.0
+            norm = np.clip((arr - lo) / (hi - lo), 0, 1)
+            Image.fromarray((norm * 255).astype(np.uint8)).save(
+                derot_jpg, quality=92)
+        except Exception as e:
+            print(f"per-hour derot {hh} → jpg failed: {e}", file=sys.stderr)
 
     # Step 2: regenerate the multi-night overlay plot at <parent>/brightness.png
     # (used as the dashboard hero on /starcam/nights). Non-fatal if it fails.
@@ -85,6 +120,8 @@ def main() -> int:
             files.append((local, name))
     for hour_jpg in sorted(night.glob(f"{prefix}sum_*.jpg")):
         files.append((hour_jpg, hour_jpg.name.removeprefix(prefix)))
+    for derot_jpg in sorted(night.glob(f"{prefix}derot_*.jpg")):
+        files.append((derot_jpg, derot_jpg.name.removeprefix(prefix)))
 
     if args.dry_run:
         print(f"would upload {len(files)} files to s3://{BUCKET}/nights/{night_name}/")
