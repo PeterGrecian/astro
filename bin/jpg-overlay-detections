@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""jpg-overlay-detections — burn detection circles into an existing JPG.
+
+Reads a detect-stars CSV and an existing JPG (already stretched +
+upscaled, e.g. via fits-to-jpg --crop-tile X --scale N). Maps each
+detection's (centroid_x, centroid_y) — which are FULL-FRAME image
+coords — onto the JPG, accounting for crop offset and upscale.
+
+Output: same JPG with circles + SNR labels overlaid.
+
+Usage:
+    jpg-overlay-detections \\
+        --in-jpg A5-tile.jpg \\
+        --detections A5-detections.csv \\
+        --crop-tile A5 \\
+        --scale 3 \\
+        --full-w 1296 --full-h 972 \\
+        --out A5-tile-marked.jpg
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import math
+import sys
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def colour_for_snr(snr):
+    if snr >= 30:
+        return (60, 255, 100, 255)   # green
+    if snr >= 10:
+        return (255, 220, 60, 255)   # yellow
+    return (255, 100, 100, 255)      # red
+
+
+def radius_for_flux(flux, min_r=3.0, max_r=12.0):
+    if flux <= 0:
+        return min_r
+    s = (math.log10(max(flux, 1.0)) - 3) / 4
+    s = max(0.0, min(1.0, s))
+    return min_r + s * (max_r - min_r)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--in-jpg", type=Path, required=True)
+    ap.add_argument("--detections", type=Path, required=True)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--crop-tile", default=None,
+                    help="if the JPG is a tile crop, supply its label "
+                         "(A1..H6) so detection coords are offset")
+    ap.add_argument("--scale", type=int, default=3,
+                    help="upscale factor used when the JPG was rendered")
+    ap.add_argument("--full-w", type=int, default=1296)
+    ap.add_argument("--full-h", type=int, default=972)
+    ap.add_argument("--label", default="snr",
+                    choices=["snr", "flux", "fwhm", "none", "id"])
+    ap.add_argument("--label-font-size", type=int, default=14)
+    ap.add_argument("--circle-width", type=int, default=2)
+    args = ap.parse_args()
+
+    pil = Image.open(args.in_jpg).convert("RGB")
+    draw = ImageDraw.Draw(pil, "RGBA")
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+            args.label_font_size)
+    except OSError:
+        font = ImageFont.load_default()
+
+    # Offset for crop.
+    off_x = off_y = 0
+    if args.crop_tile is not None:
+        x0, y0, _x1, _y1 = tile_bounds(args.crop_tile,
+                                       args.full_w, args.full_h)
+        off_x, off_y = x0, y0
+
+    rows = list(csv.DictReader(open(args.detections)))
+    drawn = 0
+    skipped = 0
+    img_w, img_h = pil.size
+    for r in rows:
+        cx_full = float(r["centroid_x"])
+        cy_full = float(r["centroid_y"])
+        flux = float(r.get("flux", 0))
+        snr = float(r.get("snr", 0))
+        rad_unscaled = radius_for_flux(flux)
+
+        cx_img = (cx_full - off_x) * args.scale
+        cy_img = (cy_full - off_y) * args.scale
+        rad_img = rad_unscaled * args.scale
+
+        if (cx_img < -rad_img or cx_img > img_w + rad_img
+                or cy_img < -rad_img or cy_img > img_h + rad_img):
+            skipped += 1
+            continue
+
+        col = colour_for_snr(snr)
+        draw.ellipse([cx_img - rad_img, cy_img - rad_img,
+                      cx_img + rad_img, cy_img + rad_img],
+                     outline=col, width=args.circle_width)
+
+        if args.label != "none":
+            if args.label == "snr":
+                text = f"{snr:.0f}"
+            elif args.label == "flux":
+                text = f"{flux:.0f}"
+            elif args.label == "fwhm":
+                text = f"{float(r.get('fwhm_mean', 0)):.1f}"
+            elif args.label == "id":
+                text = str(r.get("detection_id", ""))
+            tx = int(cx_img + rad_img + 3)
+            ty = int(cy_img - rad_img - 2)
+            bbox = draw.textbbox((tx, ty), text, font=font)
+            draw.rectangle(bbox, fill=(0, 0, 0, 200))
+            draw.text((tx, ty), text, fill=col, font=font)
+        drawn += 1
+
+    pil.save(args.out, quality=92)
+    print(f"wrote {args.out}  ({drawn} drawn, {skipped} off-canvas)")
+
+
+if __name__ == "__main__":
+    main()
