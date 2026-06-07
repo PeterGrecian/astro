@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""solve-detections — run astrometry.net solve-field on a detect-stars CSV.
+
+Builds an XYLS (FITS table of x, y, flux) from the CSV, invokes
+solve-field with sensible defaults for our binned starcam, and prints
+the resulting WCS to stdout (and saves to .wcs / .json).
+
+Requires `solve-field` (apt: astrometry.net + index files).
+
+Examples:
+  solve-detections A5-dense2.csv \\
+      --image-size 1296,972 \\
+      --scale-low 80 --scale-high 200 \\
+      --out-prefix ~/tmp/A5
+
+The scale arguments are arcsec/pixel; for binned starcam the actual
+value is around 110-150"/px, so a generous window catches it.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("detections", type=Path)
+    ap.add_argument("--image-size", default="1296,972")
+    ap.add_argument("--scale-low", type=float, default=80,
+                    help="lower bound on plate scale (arcsec/pixel)")
+    ap.add_argument("--scale-high", type=float, default=200,
+                    help="upper bound on plate scale")
+    ap.add_argument("--ra", type=float, default=None,
+                    help="approx field RA (deg); restricts search")
+    ap.add_argument("--dec", type=float, default=None,
+                    help="approx field Dec (deg); restricts search")
+    ap.add_argument("--search-radius", type=float, default=15,
+                    help="search radius (deg) if --ra/--dec given")
+    ap.add_argument("--out-prefix", type=Path, required=True)
+    ap.add_argument("--keep", action="store_true",
+                    help="keep solve-field intermediate files")
+    ap.add_argument("--max-stars", type=int, default=200,
+                    help="use top-N brightest detections (helps solve-field)")
+    args = ap.parse_args()
+
+    W, H = (int(x) for x in args.image_size.split(","))
+
+    # Read detections, sort by flux desc, take top N.
+    rows = list(csv.DictReader(open(args.detections)))
+    rows.sort(key=lambda r: -float(r.get("flux", 0)))
+    rows = rows[:args.max_stars]
+    print(f"using top {len(rows)} brightest detections "
+          f"(image {W}x{H})")
+
+    # Build XYLS — FITS table with X, Y, FLUX columns.
+    xs = np.array([float(r["centroid_x"]) + 1 for r in rows])  # 1-indexed
+    ys = np.array([float(r["centroid_y"]) + 1 for r in rows])
+    flux = np.array([float(r["flux"]) for r in rows])
+
+    args.out_prefix.parent.mkdir(parents=True, exist_ok=True)
+    xyls_path = args.out_prefix.with_suffix(".xyls")
+    col_x = fits.Column(name="X", format="E", array=xs)
+    col_y = fits.Column(name="Y", format="E", array=ys)
+    col_f = fits.Column(name="FLUX", format="E", array=flux)
+    hdu = fits.BinTableHDU.from_columns([col_x, col_y, col_f])
+    hdu.header["IMAGEW"] = W
+    hdu.header["IMAGEH"] = H
+    primary = fits.PrimaryHDU()
+    fits.HDUList([primary, hdu]).writeto(xyls_path, overwrite=True)
+    print(f"wrote {xyls_path}")
+
+    # solve-field command
+    cmd = [
+        "solve-field",
+        str(xyls_path),
+        "--width", str(W),
+        "--height", str(H),
+        "--scale-units", "arcsecperpix",
+        "--scale-low", str(args.scale_low),
+        "--scale-high", str(args.scale_high),
+        "--overwrite",
+        "--no-plots",
+        "--cpulimit", "120",
+        "--out", args.out_prefix.name,
+        "--dir", str(args.out_prefix.parent),
+    ]
+    if args.ra is not None and args.dec is not None:
+        cmd.extend([
+            "--ra", str(args.ra),
+            "--dec", str(args.dec),
+            "--radius", str(args.search_radius),
+        ])
+    print(f"running: {' '.join(cmd)}")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    print(proc.stdout[-2000:])
+    if proc.returncode != 0:
+        print(proc.stderr, file=sys.stderr)
+        return proc.returncode
+
+    wcs_path = args.out_prefix.with_suffix(".wcs")
+    if not wcs_path.exists():
+        print(f"solve-field did not produce {wcs_path}", file=sys.stderr)
+        return 1
+
+    # Parse the wcs and write a JSON summary compatible with cross-match-gaia.
+    with fits.open(wcs_path) as h:
+        hdr = h[0].header
+        from astropy.wcs import WCS as AWCS
+        w = AWCS(hdr)
+        crval = w.wcs.crval
+        crpix = w.wcs.crpix
+        cd = w.wcs.cd
+        plate_scale = float(np.hypot(*cd[0]) * 3600.0)
+    print()
+    print(f"=== solved WCS ===")
+    print(f"  CRPIX:        ({crpix[0]:.3f}, {crpix[1]:.3f})")
+    print(f"  CRVAL:        ({crval[0]:.6f}, {crval[1]:.6f}) deg")
+    print(f"  plate scale:  {plate_scale:.3f} arcsec/pixel")
+
+    # Build JSON compatible with cross-match-gaia.load_wcs.
+    json_path = args.out_prefix.with_suffix(".json")
+    json_path.write_text(json.dumps({
+        "anchors": [],
+        "image_size": [W, H],
+        "plate_scale_arcsec_per_pixel": plate_scale,
+        "derived_plate_scale": plate_scale,
+        "derived_pa_deg": None,
+        "input_plate_scale": None,
+        "input_pa_deg": None,
+        "wcs_header": {k: str(v) if isinstance(v, bool) else v
+                        for k, v in dict(hdr).items()},
+    }, indent=2))
+    print(f"wrote {json_path}")
+
+    # Cleanup intermediates unless --keep.
+    if not args.keep:
+        for ext in (".axy", ".match", ".rdls", ".corr", ".xyls",
+                    ".solved", "-indx.xyls"):
+            p = args.out_prefix.with_suffix(ext)
+            if p.exists():
+                p.unlink()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""wcs-from-anchors — build a TAN WCS from one or two pixel↔sky anchors.
+
+ONE-anchor mode (requires --plate-scale and --pa):
+    Pin a pixel to a celestial position, given an assumed plate scale
+    and position angle. Useful when only one known star can be
+    confidently identified.
+
+TWO-anchor mode:
+    Pixel A ↔ sky A and pixel B ↔ sky B together determine
+    (plate scale, position angle, reference pixel) — no assumptions.
+
+The output is a standard FITS WCS keyword header you can paste into
+any tool that reads WCS, plus a small JSON sidecar with the
+parameters in readable form, plus a starcam-binned WCS template (so
+tools that just need to ingest "the WCS for this stack" can.
+
+PA convention here: position angle is the rotation of the
+"sky-north" direction in the image, measured CCW from image-y-up.
+0° means sky-north points up in the image; +90° means sky-north
+points to the right.
+
+For our binned starcam-style frames the default reference frame is
+"sky coordinates with north up, east left." Image y-down is handled
+via the CD matrix.
+
+Examples:
+  # One-anchor: Vega in A5 at (15.46, 683.21) on a 1296x972 binned
+  # frame, assumed 148"/px and PA = 5° rotation:
+  wcs-from-anchors \\
+      --anchor 15.46,683.21,18:36:56.336,+38:47:01.28 \\
+      --plate-scale 148 --pa 5 \\
+      --image-size 1296,972 \\
+      --out a5-wcs.json
+
+  # Two-anchor:
+  wcs-from-anchors \\
+      --anchor 15.46,683.21,18:36:56.336,+38:47:01.28 \\
+      --anchor 142.7,678.4,18:44:20.4,+39:40:12 \\
+      --image-size 1296,972 \\
+      --out wcs.json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+from astropy.wcs import WCS
+
+
+def parse_anchor(arg: str) -> tuple[float, float, SkyCoord]:
+    """Parse a CLI anchor 'px,py,RA,Dec' string.
+    RA and Dec may be HH:MM:SS / ±DD:MM:SS, or decimal degrees."""
+    parts = arg.split(",")
+    if len(parts) != 4:
+        raise ValueError(f"need 'px,py,ra,dec' (4 parts), got {arg}")
+    px = float(parts[0])
+    py = float(parts[1])
+    ra_str = parts[2].strip()
+    dec_str = parts[3].strip()
+    try:
+        # Decimal degrees?
+        ra = float(ra_str)
+        dec = float(dec_str)
+        sky = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs")
+    except ValueError:
+        sky = SkyCoord(ra=ra_str, dec=dec_str,
+                       unit=(u.hourangle, u.deg), frame="icrs")
+    return px, py, sky
+
+
+def make_wcs_one_anchor(anchor, plate_scale_arcsec, pa_deg, image_size):
+    """Build a TAN WCS pinning anchor pixel ↔ anchor sky, with given
+    plate scale (arcsec/pixel) and PA (deg, north-from-y-up CCW)."""
+    px, py, sky = anchor
+    cdelt = plate_scale_arcsec / 3600.0  # deg / px
+    # Image y-down: y-axis CDELT is negative if north is up.
+    # CD matrix combines plate scale and rotation.
+    rad = math.radians(pa_deg)
+    cosp = math.cos(rad)
+    sinp = math.sin(rad)
+    # Standard CD: a small image-x corresponds to +RA*cos(dec), image-y
+    # to +Dec. With y-down convention and PA rotation:
+    #   CD[0,0] = -cdelt * cosp   (RA increases left in image-y-down)
+    #   CD[0,1] =  cdelt * sinp
+    #   CD[1,0] =  cdelt * sinp
+    #   CD[1,1] =  cdelt * cosp
+    cd = np.array([
+        [-cdelt * cosp,  cdelt * sinp],
+        [ cdelt * sinp,  cdelt * cosp],
+    ])
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [px + 1, py + 1]  # 1-indexed FITS convention
+    wcs.wcs.crval = [sky.ra.deg, sky.dec.deg]
+    wcs.wcs.cd = cd
+    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    wcs.wcs.cunit = ["deg", "deg"]
+    wcs.array_shape = (image_size[1], image_size[0])
+    return wcs
+
+
+def make_wcs_two_anchors(anchor_a, anchor_b, image_size):
+    """Build a TAN WCS from two pixel↔sky anchors. Derives plate scale
+    and PA from the pair; centres CRPIX on anchor_a."""
+    pxa, pya, ska = anchor_a
+    pxb, pyb, skb = anchor_b
+    # Sky separation between the two anchors.
+    sep = ska.separation(skb).deg  # degrees
+    pix_dx = pxb - pxa
+    pix_dy = pyb - pya
+    pix_d = math.hypot(pix_dx, pix_dy)
+    if pix_d == 0:
+        raise SystemExit("anchors at same pixel")
+    cdelt = sep / pix_d  # deg / px
+    plate_scale_arcsec = cdelt * 3600.0
+
+    # PA — angle of anchor_b relative to anchor_a, on the sky vs in the
+    # image. Sky angle: position-angle of B from A, measured east of
+    # north.
+    pa_sky_deg = ska.position_angle(skb).to(u.deg).value
+    # Image angle: anchor B vector from A, in image coords (y down).
+    # In y-down image coords, "up" (y decreasing) corresponds to north
+    # if PA=0. The image PA is atan2(dx, -dy) measured CCW from +y-up.
+    pa_img_deg = math.degrees(math.atan2(pix_dx, -pix_dy))
+    pa_deg = pa_img_deg - pa_sky_deg
+    pa_deg = (pa_deg + 180.0) % 360.0 - 180.0
+
+    # Reuse the one-anchor builder with the derived params, anchored at A.
+    return make_wcs_one_anchor(
+        anchor_a, plate_scale_arcsec, pa_deg, image_size), plate_scale_arcsec, pa_deg
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--anchor", action="append", required=True,
+                    metavar="PX,PY,RA,DEC",
+                    help="anchor pixel ↔ sky position; specify 1 or 2 times")
+    ap.add_argument("--plate-scale", type=float, default=None,
+                    help="plate scale (arcsec/pixel); required if 1 anchor")
+    ap.add_argument("--pa", type=float, default=None,
+                    help="position angle (deg, north CCW from image y-up); "
+                         "required if 1 anchor")
+    ap.add_argument("--image-size", default="1296,972",
+                    help="W,H of the image the WCS will be applied to")
+    ap.add_argument("--out", type=Path, required=True,
+                    help="output JSON path; companion .fits-header also written")
+    args = ap.parse_args()
+
+    anchors = [parse_anchor(a) for a in args.anchor]
+    W, H = (int(x) for x in args.image_size.split(","))
+    print(f"image: {W}x{H}")
+    for i, (px, py, sky) in enumerate(anchors):
+        print(f"  anchor {i+1}: pixel ({px:.2f},{py:.2f}) ↔ "
+              f"{sky.to_string('hmsdms', precision=2)}")
+
+    derived_plate = None
+    derived_pa = None
+    if len(anchors) == 1:
+        if args.plate_scale is None or args.pa is None:
+            print("one anchor requires --plate-scale and --pa",
+                  file=sys.stderr)
+            return 1
+        wcs = make_wcs_one_anchor(anchors[0], args.plate_scale, args.pa,
+                                   (W, H))
+    elif len(anchors) == 2:
+        wcs, derived_plate, derived_pa = make_wcs_two_anchors(
+            anchors[0], anchors[1], (W, H))
+        print(f"  derived plate scale: {derived_plate:.4f} arcsec/px "
+              f"({derived_plate * 1296 / 3600:.3f}° across W)")
+        print(f"  derived PA:          {derived_pa:+.3f}°")
+    else:
+        print(f"need 1 or 2 anchors; got {len(anchors)}", file=sys.stderr)
+        return 1
+
+    # Sanity check — feed CRPIX back through to get back to CRVAL.
+    crpix_x, crpix_y = wcs.wcs.crpix[0] - 1, wcs.wcs.crpix[1] - 1
+    sky_at_crpix = wcs.pixel_to_world(crpix_x, crpix_y)
+    print(f"  WCS sanity: CRPIX → "
+          f"{sky_at_crpix.to_string('hmsdms', precision=2)}")
+    sep = sky_at_crpix.separation(anchors[0][2])
+    print(f"  vs anchor 1 sky: separation = {sep.arcsec:.3f}\"")
+
+    # Write outputs.
+    header = wcs.to_header()
+    fits_lines = [f"{k:8s}= {repr(v)}" for k, v in header.items()]
+
+    # JSON summary
+    cdelt_per_px = math.hypot(*wcs.wcs.cd[0]) * 3600.0
+    summary = {
+        "anchors": [
+            {"px": float(px), "py": float(py),
+             "ra_deg": float(sky.ra.deg), "dec_deg": float(sky.dec.deg),
+             "ra_str": sky.ra.to_string(unit=u.hourangle, sep=":",
+                                          precision=3),
+             "dec_str": sky.dec.to_string(unit=u.deg, sep=":",
+                                            precision=2,
+                                            alwayssign=True)}
+            for px, py, sky in anchors
+        ],
+        "image_size": [W, H],
+        "plate_scale_arcsec_per_pixel": float(cdelt_per_px),
+        "derived_plate_scale": derived_plate,
+        "derived_pa_deg": derived_pa,
+        "input_plate_scale": args.plate_scale,
+        "input_pa_deg": args.pa,
+        "wcs_header": dict(header),
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(summary, indent=2))
+    print(f"\nwrote {args.out}")
+
+    fits_path = args.out.with_suffix(".wcs-header")
+    fits_path.write_text("\n".join(fits_lines) + "\n")
+    print(f"wrote {fits_path}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

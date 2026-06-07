@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""cross-match-gaia — match detect-stars detections to Gaia DR3.
+
+Pipeline:
+  1. Read a detect-stars CSV.
+  2. Read a WCS (wcs-from-anchors JSON, or any FITS-WCS header).
+  3. For each detection, convert (centroid_x, centroid_y) → (ra, dec).
+  4. Query Gaia DR3 in a circle around the centroid of the field,
+     with radius = max separation × 1.2.
+  5. Cross-match each detection to its nearest Gaia entry within
+     --tol arcseconds.
+  6. Write matches.csv with detection fields + Gaia source_id, G-mag,
+     RA/Dec, and the residual (us − Gaia) in pixels and arcsec.
+
+Also prints a one-line summary: N detections, N matches, median
+photometric offset (us-flux vs Gaia-G), median astrometric residual.
+
+Useful as a first pass calibration. If most bright detections match
+within a few arcsec, the WCS is approximately right and the
+photometric zeropoint is meaningful. Astrometric residuals reveal
+remaining distortion.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+from astropy.wcs import WCS
+from astroquery.gaia import Gaia
+
+
+def load_wcs(path: Path):
+    """Load WCS from a wcs-from-anchors JSON or from a FITS file."""
+    if path.suffix == ".json":
+        data = json.loads(path.read_text())
+        from astropy.io import fits as astrofits
+        h = astrofits.Header()
+        for k, v in data["wcs_header"].items():
+            h[k] = v
+        wcs = WCS(h)
+        wcs.array_shape = tuple(reversed(data["image_size"]))
+        return wcs, float(data["plate_scale_arcsec_per_pixel"])
+    raise SystemExit(f"unsupported WCS file: {path}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("detections", type=Path)
+    ap.add_argument("--wcs", type=Path, required=True,
+                    help="wcs-from-anchors .json")
+    ap.add_argument("--tol", type=float, default=120.0,
+                    help="cross-match tolerance (arcseconds)")
+    ap.add_argument("--gaia-radius", type=float, default=None,
+                    help="Gaia query radius (deg); auto if omitted "
+                         "(field diagonal / 2 + margin)")
+    ap.add_argument("--gmag-max", type=float, default=12.0,
+                    help="Gaia G-mag upper bound for query")
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    wcs, plate_scale = load_wcs(args.wcs)
+    print(f"WCS plate scale: {plate_scale:.3f} arcsec/pixel")
+
+    rows = list(csv.DictReader(open(args.detections)))
+    if not rows:
+        print("no detections", file=sys.stderr)
+        return 1
+    print(f"loaded {len(rows)} detections")
+
+    # Pixel → sky for each detection.
+    xs = np.array([float(r["centroid_x"]) for r in rows])
+    ys = np.array([float(r["centroid_y"]) for r in rows])
+    sky = wcs.pixel_to_world(xs, ys)
+    if not isinstance(sky, SkyCoord):
+        sky = SkyCoord(sky)
+
+    # Determine Gaia query centre & radius.
+    centre_ra = float(np.median(sky.ra.deg))
+    centre_dec = float(np.median(sky.dec.deg))
+    centre = SkyCoord(centre_ra * u.deg, centre_dec * u.deg, frame="icrs")
+    seps = sky.separation(centre)
+    max_sep_deg = float(seps.deg.max())
+    if args.gaia_radius is not None:
+        radius_deg = args.gaia_radius
+    else:
+        radius_deg = max_sep_deg * 1.4 + 0.5 / 60.0  # add margin
+    print(f"field centre: {centre.to_string('hmsdms', precision=2)}")
+    print(f"max detection separation from centre: {max_sep_deg * 60:.2f}'")
+    print(f"Gaia query radius: {radius_deg * 60:.2f}'")
+
+    # Query Gaia DR3.
+    print(f"querying Gaia DR3 (gmag <= {args.gmag_max})...")
+    query = (
+        f"SELECT source_id, ra, dec, phot_g_mean_mag, parallax, pmra, pmdec "
+        f"FROM gaiadr3.gaia_source "
+        f"WHERE 1 = CONTAINS("
+        f"POINT('ICRS', ra, dec), "
+        f"CIRCLE('ICRS', {centre.ra.deg:.6f}, {centre.dec.deg:.6f}, "
+        f"{radius_deg:.6f})) "
+        f"AND phot_g_mean_mag <= {args.gmag_max}"
+    )
+    job = Gaia.launch_job(query)
+    gaia = job.get_results()
+    print(f"  {len(gaia)} Gaia entries within {radius_deg * 60:.2f}'")
+
+    if len(gaia) == 0:
+        print("nothing to match", file=sys.stderr)
+        return 1
+
+    gaia_sky = SkyCoord(ra=gaia["ra"], dec=gaia["dec"], frame="icrs")
+    gmag = np.array(gaia["phot_g_mean_mag"])
+
+    # Cross-match each detection to its nearest Gaia source.
+    idx, sep2d, _ = sky.match_to_catalog_sky(gaia_sky)
+    tol_deg = args.tol / 3600.0
+    matched = sep2d.deg <= tol_deg
+
+    # Write output.
+    out_rows = []
+    for i, row in enumerate(rows):
+        if matched[i]:
+            g = idx[i]
+            out_rows.append({
+                **row,
+                "matched": "1",
+                "det_ra_deg": float(sky.ra[i].deg),
+                "det_dec_deg": float(sky.dec[i].deg),
+                "gaia_source_id": int(gaia["SOURCE_ID"][g]),
+                "gaia_ra_deg": float(gaia["ra"][g]),
+                "gaia_dec_deg": float(gaia["dec"][g]),
+                "gaia_g_mag": float(gmag[g]),
+                "sep_arcsec": float(sep2d[i].arcsec),
+                "sep_pixels": float(sep2d[i].arcsec / plate_scale),
+            })
+        else:
+            out_rows.append({
+                **row,
+                "matched": "0",
+                "det_ra_deg": float(sky.ra[i].deg),
+                "det_dec_deg": float(sky.dec[i].deg),
+                "gaia_source_id": "",
+                "gaia_ra_deg": "",
+                "gaia_dec_deg": "",
+                "gaia_g_mag": "",
+                "sep_arcsec": "",
+                "sep_pixels": "",
+            })
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.out, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(out_rows[0].keys()))
+        w.writeheader()
+        for r in out_rows:
+            w.writerow(r)
+
+    n_matched = int(matched.sum())
+    print()
+    print(f"=== summary ===")
+    print(f"  detections: {len(rows)}")
+    print(f"  matched within {args.tol}\" : {n_matched}")
+    if n_matched > 0:
+        matched_rows = [r for r, m in zip(out_rows, matched) if m]
+        seps = np.array([float(r["sep_arcsec"]) for r in matched_rows])
+        flux = np.array([float(r["flux"]) for r in matched_rows])
+        gmag_m = np.array([float(r["gaia_g_mag"]) for r in matched_rows])
+        # Photometric: gmag ≈ -2.5*log10(flux) + zeropoint
+        # zeropoint per row = gmag + 2.5*log10(flux)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            zp = gmag_m + 2.5 * np.log10(np.where(flux > 0, flux, np.nan))
+        valid = np.isfinite(zp)
+        zp_v = zp[valid]
+        print(f"  astrometric: median sep "
+              f"{float(np.median(seps)):.2f}\", "
+              f"RMS {float(np.sqrt(np.mean(seps ** 2))):.2f}\"")
+        if zp_v.size:
+            print(f"  photometric zeropoint (G_mag + 2.5*log10(flux)): "
+                  f"median {float(np.median(zp_v)):.3f}, "
+                  f"std {float(np.std(zp_v)):.3f}")
+    print(f"\nwrote {args.out}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
