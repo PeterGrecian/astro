@@ -24,6 +24,117 @@ pipeline-night could be renamed starfinder-daily or something  starcatcher
 Live work list. Move items to DECISIONS.md once they crystallise
 into a load-bearing choice; delete done items.
 
+## Roadmap (2026-06-07)
+
+Six steps from "we can detect stars" to "deliverable pipeline."
+Each item is small enough to scope on its own; the order is the
+intended dependency chain — earlier items unblock later ones.
+
+### 1. Catalog comparison vs. a third-party catalog
+
+  Compare our per-tile detection lists (detect-stars output) to a
+  real star catalog (Gaia DR3 via astroquery, or local Tycho-2 for
+  bright end). Need an approximate WCS first:
+
+  - Anchor on Vega — RA 18h36m56.336s, Dec +38°47'01.28" (J2000).
+    Vega lands at A5 centroid (15.5, 683.2) under our current pole.
+    Pick a second known bright star anywhere in the frame; the two
+    anchors give a 2-point fit for plate scale + orientation.
+  - Cross-match our centroids to Gaia entries within a few px radius.
+  - Output: per-detection (ra, dec) + cross-match to Gaia source ID.
+  - First validation: median (us − catalog) magnitude offset gives
+    photometric zeropoint; spread gives photometric error.
+
+  New tools wanted:
+    bin/wcs-from-anchors    — quick 2-anchor RA/Dec/scale/PA fit
+    bin/cross-match-gaia    — query Gaia, attach source_id + Gmag
+
+### 2. Quality measurements
+
+  Pull from each detection's already-recorded columns
+  (fwhm, ecc, tangent_sharpness, snr) and aggregate them:
+
+  - Per-tile: median FWHM, dispersion in FWHM, fraction of
+    detections passing the streak filter (ecc < threshold).
+  - Per-night: typical seeing (median FWHM across tiles), sky
+    quality (median sky_local, sky_sigma).
+  - Per-pole-fit: residuals of (detection - predicted-by-pole),
+    decomposed into tangent vs radial directions (the latter
+    indicates pole accuracy).
+
+  New tool wanted:
+    bin/quality-report      — reads detections.csv (or many), emits
+                              JSON + markdown summary
+
+### 3. Patch-based local-pole speedup
+
+  The tangent-pole fitter currently full-frame warps × 600 frames
+  per pole evaluation (~3 min per tile). Per-tile work only needs
+  small patches around the K candidate stars. Cost should drop
+  ~500× to seconds per tile.
+
+  Architecture in [[zonal-derot-strategy]] and
+  [[tracking-is-iterated-derot]]. Implementation steps:
+
+  - For each candidate, identify a small patch (40-60 px square)
+    around its predicted position under the trial pole.
+  - cv2.warpAffine on that patch only; accumulate per-candidate.
+  - Compute tangent sharpness within each patch.
+  - Sum across candidates as before.
+
+  Speed win unlocks: full-frame sweep in seconds, multi-night
+  sweeps in minutes, Pi4 viability.
+
+  New tool wanted:
+    bin/fit-tile-pole-tangent-patches  (or replace the existing
+                                         tool's inner loop)
+
+### 4. k1 compensation for whole-frame web deliverable
+
+  Apply the fitted (k1, k2) distortion model to undistort frames
+  before derot. Produces a single-pole-everywhere-works image:
+  the website-friendly "whole sky" view.
+
+  Tested against the per-tile poles → if a single-pole derot of
+  the undistorted frame matches the previous per-tile-pole stacks
+  within ~1px everywhere, the model is good.
+
+  New tools wanted:
+    bin/undistort-frame       — applies k1, k2 inversely
+    bin/render-whole-sky      — undistort → derot → JPG for the web
+
+### 5. Multi-night catalog aggregation
+
+  Once a night's detection catalog is good, aggregate across
+  multiple nights. Cross-match by (ra, dec) once WCS is in place.
+  Outputs:
+
+  - Per-star magnitude time series (variability)
+  - Per-star astrometric residuals (proper motion at low precision)
+  - Catalog completeness over nights (which stars detected when)
+
+  Storage: detections.csv per (night, tile) as raw; a SQLite
+  index at ~/astro/catalog/index.db for cross-night queries.
+
+  3 nights of starcam data already on muppet (2026-05-20,
+  2026-05-22, 2026-05-30) — first multi-night dataset.
+
+### 6. Pi 4 port
+
+  Astrocam is a Pi 4. The pipeline needs to run on-host (no
+  shipping raw frames to puppy). Required:
+
+  - Capture → derot-accumulate per tile on the Pi.
+  - Patch-based pole-fit (item 3) is the enabler — full-frame
+    warps are too slow for Pi 4 sustained rate.
+  - Local detection (detect-stars) per tile.
+  - Periodic upload of detections.csv to puppy/S3.
+
+  The cam-bench/derot-bench results already confirm Pi 4
+  CPU is sufficient for capture + bin2 + fits.fz at any sane
+  cadence. The remaining blocker is item 3.
+
+---
 
 storage comments:
 moved 2026-05-20 to muppet
