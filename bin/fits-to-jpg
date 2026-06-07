@@ -1,14 +1,35 @@
 #!/usr/bin/env python3
-"""fits-to-jpg — quick visual dump of .fits.fz frames as .jpg.
+"""fits-to-jpg — render .fits.fz to .jpg with tight contrast + upscale.
 
-For eyeballing tiny sim frames where Siril is overkill. Linear stretch
-from min..max per frame (or fixed if --vmax given), grayscale, scaled
-up by --scale for visibility.
+Two invocation styles:
 
-Usage:
-    fits-to-jpg                       # ~/astro/sim/*.fits.fz → same dir
-    fits-to-jpg --in <dir> --scale 8
-    fits-to-jpg --vmax 1000           # fixed white-point across frames
+  Per-file (preferred for derot stacks and single artefacts):
+    fits-to-jpg <input.fits.fz> <output.jpg> [options]
+
+  Directory sweep (the original use, for sim frames):
+    fits-to-jpg --in <dir> [--out <dir>] [options]
+
+Contrast / stretch:
+  --vmin / --vmax            fixed black / white points (counts)
+  --plo / --phi              percentile stretch (default 2 .. 99.7)
+  --linear-minmax            old behaviour: lo=min, hi=max per frame
+  --tile <label>             auto-stretch on a tile region (A1..H6)
+                              so faint detail outside the bright stuff
+                              still shows up; whole frame still rendered
+
+Upscale:
+  --scale <N>                NEAREST upscale (default 3 — readable on
+                              a normal-density screen for binned starcam
+                              frames)
+  --scale 1                  no upscale
+
+Crop:
+  --crop-tile <label>        crop output to that tile (A1..H6, 8x6 grid)
+
+Examples:
+  fits-to-jpg stack.fits.fz stack.jpg --tile A5 --scale 3
+  fits-to-jpg stack.fits.fz tile.jpg --crop-tile A5 --scale 3
+  fits-to-jpg --in ~/astro/sim --scale 4 --linear-minmax
 """
 from __future__ import annotations
 
@@ -20,16 +41,88 @@ import numpy as np
 from astropy.io import fits
 from PIL import Image
 
+GRID_COLS = 8
+GRID_ROWS = 6
 
-def stretch(img: np.ndarray, vmin: float | None,
-            vmax: float | None) -> np.ndarray:
-    lo = float(img.min()) if vmin is None else vmin
-    hi = float(img.max()) if vmax is None else vmax
+
+def tile_bounds(label: str, W: int, H: int) -> tuple[int, int, int, int]:
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def load_2d(path: Path) -> np.ndarray:
+    with fits.open(path) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data.astype(np.float32)
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def stretch_uint8(img: np.ndarray, lo: float, hi: float) -> np.ndarray:
     if hi <= lo:
         hi = lo + 1.0
-    norm = (img.astype(np.float32) - lo) / (hi - lo)
-    norm = np.clip(norm, 0.0, 1.0)
+    norm = np.clip((img.astype(np.float32) - lo) / (hi - lo), 0.0, 1.0)
     return (norm * 255).astype(np.uint8)
+
+
+def derive_range(img: np.ndarray, args, tile_ref: np.ndarray | None = None
+                 ) -> tuple[float, float]:
+    """Return (lo, hi) given the CLI args."""
+    if args.linear_minmax:
+        return float(img.min()), float(img.max())
+    if args.vmin is not None or args.vmax is not None:
+        lo = float(args.vmin) if args.vmin is not None else float(img.min())
+        hi = float(args.vmax) if args.vmax is not None else float(img.max())
+        return lo, hi
+    # Percentile stretch — taken from tile if specified, else whole image.
+    sample = tile_ref if tile_ref is not None else img
+    lo, hi = np.percentile(sample, [args.plo, args.phi])
+    return float(lo), float(hi)
+
+
+def render_one(in_path: Path, out_path: Path, args) -> None:
+    img = load_2d(in_path)
+    H, W = img.shape
+
+    # Reference region for percentile (or fixed-range) calculation.
+    # If --tile is given, use it. Else if --crop-tile is given, default
+    # to that (so crops auto-stretch themselves rather than using the
+    # whole-image range).
+    tile_ref = None
+    stretch_tile = args.tile or args.crop_tile
+    if stretch_tile is not None:
+        x0, y0, x1, y1 = tile_bounds(stretch_tile, W, H)
+        tile_ref = img[y0:y1, x0:x1]
+
+    lo, hi = derive_range(img, args, tile_ref)
+
+    # Possible crop.
+    if args.crop_tile is not None:
+        cx0, cy0, cx1, cy1 = tile_bounds(args.crop_tile, W, H)
+        img = img[cy0:cy1, cx0:cx1]
+
+    u8 = stretch_uint8(img, lo, hi)
+
+    if args.scale > 1:
+        h_, w_ = u8.shape
+        u8 = np.array(Image.fromarray(u8).resize(
+            (w_ * args.scale, h_ * args.scale), Image.NEAREST))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(u8).save(out_path, quality=args.quality)
+    src_shape = f"{W}x{H}"
+    out_shape = f"{u8.shape[1]}x{u8.shape[0]}"
+    note = ""
+    if args.tile:
+        note += f" stretch-tile={args.tile}"
+    if args.crop_tile:
+        note += f" crop-tile={args.crop_tile}"
+    print(f"  {in_path.name} → {out_path}  "
+          f"({src_shape} → {out_shape}) "
+          f"lo={lo:.0f} hi={hi:.0f}{note}")
 
 
 def main() -> int:
@@ -38,42 +131,59 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    ap.add_argument("--in", dest="in_dir", type=Path,
-                    default=Path.home() / "astro" / "sim",
-                    help="input directory of .fits.fz")
+    # Either (positional in_path, out_path) OR (--in <dir> [--out <dir>]).
+    ap.add_argument("paths", nargs="*",
+                    help="input.fits.fz [output.jpg]")
+    ap.add_argument("--in", dest="in_dir", type=Path, default=None,
+                    help="input directory of .fits.fz (legacy sweep mode)")
     ap.add_argument("--out", type=Path, default=None,
-                    help="output directory (default: same as input)")
-    ap.add_argument("--scale", type=int, default=4,
-                    help="upscale factor (nearest-neighbour)")
+                    help="output directory in sweep mode")
+    ap.add_argument("--scale", type=int, default=3,
+                    help="NEAREST upscale factor (default 3; 1 = none)")
+    ap.add_argument("--plo", type=float, default=2.0,
+                    help="percentile for black point (default 2)")
+    ap.add_argument("--phi", type=float, default=99.7,
+                    help="percentile for white point (default 99.7)")
     ap.add_argument("--vmin", type=float, default=None,
-                    help="black point (default: per-frame min)")
+                    help="fixed black point (counts)")
     ap.add_argument("--vmax", type=float, default=None,
-                    help="white point (default: per-frame max)")
+                    help="fixed white point (counts)")
+    ap.add_argument("--linear-minmax", action="store_true",
+                    help="lo=min, hi=max (legacy behaviour)")
+    ap.add_argument("--tile", default=None,
+                    help="A1..H6: derive percentile stretch from this "
+                         "tile only (preserves faint detail outside the "
+                         "bright stuff)")
+    ap.add_argument("--crop-tile", default=None,
+                    help="A1..H6: render only this tile region")
+    ap.add_argument("--quality", type=int, default=92)
     args = ap.parse_args()
 
-    out_dir = args.out or args.in_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if args.paths and len(args.paths) >= 1:
+        in_path = Path(args.paths[0])
+        if not in_path.exists():
+            print(f"not found: {in_path}", file=sys.stderr)
+            return 1
+        if len(args.paths) >= 2:
+            out_path = Path(args.paths[1])
+        else:
+            # Auto-name: alongside the input.
+            out_path = in_path.with_suffix(".jpg") \
+                if in_path.suffix != ".fz" else \
+                in_path.with_name(in_path.name.replace(".fits.fz", ".jpg"))
+        render_one(in_path, out_path, args)
+        return 0
 
-    fns = sorted(args.in_dir.glob("*.fits.fz"))
+    # Sweep mode.
+    in_dir = args.in_dir or (Path.home() / "astro" / "sim")
+    out_dir = args.out or in_dir
+    fns = sorted(in_dir.glob("*.fits.fz"))
     if not fns:
-        print(f"no .fits.fz in {args.in_dir}", file=sys.stderr)
+        print(f"no .fits.fz in {in_dir}", file=sys.stderr)
         return 1
-
     for fn in fns:
-        with fits.open(fn) as h:
-            hdu = next(x for x in h if x.data is not None and x.data.ndim == 2)
-            img = hdu.data
-        u8 = stretch(img, args.vmin, args.vmax)
-        if args.scale > 1:
-            h_, w_ = u8.shape
-            u8 = np.array(Image.fromarray(u8).resize(
-                (w_ * args.scale, h_ * args.scale),
-                Image.NEAREST))
-        out_path = out_dir / (fn.name.replace(".fits.fz", ".jpg"))
-        Image.fromarray(u8).save(out_path, quality=92)
-        print(f"  {fn.name} → {out_path.name}  "
-              f"({img.shape[1]}x{img.shape[0]} → {u8.shape[1]}x{u8.shape[0]})")
-
+        out_path = out_dir / fn.name.replace(".fits.fz", ".jpg")
+        render_one(fn, out_path, args)
     print(f"done — {len(fns)} jpgs in {out_dir}")
     return 0
 
