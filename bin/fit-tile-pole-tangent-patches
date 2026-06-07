@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""fit-tile-pole-tangent-patches — patch-based variant of fit-tile-pole-tangent.
+
+SAME objective as fit-tile-pole-tangent (maximise sum of tangent-direction
+sharpness across K candidates), but only the small patches around each
+candidate's predicted position get warped — not the whole frame. Cost
+per pole evaluation drops by ~(frame_area / (K * patch_area)).
+
+Pipeline per pole evaluation:
+  1. For each of K candidates with seed-stack position (cx, cy):
+     a. Allocate a (P x P) float32 patch accumulator.
+     b. For each frame i with angle a_i:
+        - Compute the frame-side patch centre: rotate (cx, cy) by -a_i
+          about the trial pole — that's where this star's photons sit
+          in frame i if the trial pole is right.
+        - Extract a (P+m) x (P+m) crop from frame i around that centre,
+          with a margin m to cover residual misalignment and warp
+          interpolation.
+        - Warp the crop by a_i about the trial pole, sampling into the
+          P x P patch accumulator at the candidate's reference position.
+        - Add to the accumulator.
+     c. Compute tangent sharpness of the accumulator's peak using the
+        same line-sampling code as the whole-frame version.
+  2. Score = sum of K tangent sharpness values. (Higher is better;
+     Nelder-Mead minimises -score.)
+
+Useful CLI invariants — kept the same as fit-tile-pole-tangent so
+they're directly comparable:
+  --top, --search-radius, --line-half-len, --grid-range, --grid-n.
+
+Adds:
+  --patch         output patch size (must contain the star + margin)
+                  (default 40)
+  --crop-margin   extra px taken from each frame to cover the warp
+                  affecting pixels at the patch edge (default 12)
+
+Output mirrors fit-tile-pole-tangent — stack-final, candidates, score
+trace, pole.txt — for direct comparison.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+from scipy.optimize import minimize
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def load_frame(path):
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
+
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def find_top_peaks(stack, tile_label, k, min_sep=20):
+    H, W = stack.shape
+    x0, y0, x1, y1 = tile_bounds(tile_label, W, H)
+    sub = stack[y0:y1, x0:x1]
+    smoothed = cv2.boxFilter(sub, ddepth=-1, ksize=(3, 3))
+    dil = cv2.dilate(smoothed, np.ones((5, 5), np.uint8))
+    mask = (smoothed == dil) & (smoothed > smoothed.mean())
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return []
+    peaks = smoothed[ys, xs]
+    order = np.argsort(-peaks)
+    accepted = []
+    for i in order:
+        x = int(xs[i]) + x0
+        y = int(ys[i]) + y0
+        v = float(peaks[i])
+        if any(abs(x - ax) < min_sep and abs(y - ay) < min_sep
+               for ax, ay, _ in accepted):
+            continue
+        accepted.append((x, y, v))
+        if len(accepted) >= k:
+            break
+    return accepted
+
+
+def rotate_point(x, y, pole, angle_deg):
+    """Rotate (x, y) about pole by angle_deg, matching OpenCV's
+    cv2.getRotationMatrix2D convention (image coords with y-down).
+
+    For y-down coords, positive `angle_deg` rotates clockwise visually
+    but the algebra is [[cos, sin], [-sin, cos]] — the transpose of the
+    math-convention CCW rotation. This must match getRotationMatrix2D
+    so that a point's frame-position and stack-position transformations
+    compose consistently.
+    """
+    rad = np.deg2rad(angle_deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dx, dy = x - pole[0], y - pole[1]
+    return pole[0] + c * dx + s * dy, pole[1] - s * dx + c * dy
+
+
+def search_peak_in_patch(patch, cx, cy, radius):
+    """Find brightest pixel within `radius` of (cx, cy) inside `patch`.
+    Coordinates are local to the patch."""
+    H, W = patch.shape
+    x0 = max(0, int(round(cx)) - radius)
+    y0 = max(0, int(round(cy)) - radius)
+    x1 = min(W, int(round(cx)) + radius + 1)
+    y1 = min(H, int(round(cy)) + radius + 1)
+    sub = patch[y0:y1, x0:x1]
+    if sub.size == 0:
+        return -1, -1
+    iy, ix = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    return x0 + ix, y0 + iy
+
+
+def tangent_sharpness_in_patch(patch, x, y, pole_in_patch,
+                                line_half_len=10):
+    """Like fit-tile-pole-tangent's tangent_sharpness, but the pole is
+    given in the patch's coordinate frame."""
+    H, W = patch.shape
+    dx = x - pole_in_patch[0]
+    dy = y - pole_in_patch[1]
+    r = np.hypot(dx, dy)
+    if r < 1.0:
+        return 0.0
+    tx, ty = -dy / r, dx / r
+    ts = np.arange(-line_half_len, line_half_len + 1, dtype=np.float32)
+    xs = x + tx * ts
+    ys = y + ty * ts
+    keep = (xs >= 0) & (xs < W - 1) & (ys >= 0) & (ys < H - 1)
+    if keep.sum() < 5:
+        return 0.0
+    xs = xs[keep]
+    ys = ys[keep]
+    x0i = np.floor(xs).astype(np.int32)
+    y0i = np.floor(ys).astype(np.int32)
+    fx = (xs - x0i).astype(np.float32)
+    fy = (ys - y0i).astype(np.float32)
+    v00 = patch[y0i, x0i]
+    v10 = patch[y0i, x0i + 1]
+    v01 = patch[y0i + 1, x0i]
+    v11 = patch[y0i + 1, x0i + 1]
+    samples = (v00 * (1 - fx) * (1 - fy)
+               + v10 * fx * (1 - fy)
+               + v01 * (1 - fx) * fy
+               + v11 * fx * fy)
+    peak = float(samples.max())
+    mean = float(samples.mean())
+    return peak / mean if mean > 0 else 0.0
+
+
+def build_candidate_stack(raw_data, angles_deg, pole, cx_stack, cy_stack,
+                          patch, crop_margin):
+    """Build an accumulator (patch x patch) for one candidate at trial pole.
+
+    The patch is centred (in the OUTPUT/stack reference frame) at
+    (cx_stack, cy_stack). For each frame, we:
+      - Compute the frame-side centre: rotate (cx_stack, cy_stack) by -angle
+        about the trial pole.
+      - Extract a (patch + 2*crop_margin) crop from the frame around
+        that centre.
+      - Warp the crop by +angle about the trial pole, into the patch
+        accumulator centred on (cx_stack, cy_stack) in stack coords.
+    Returns the accumulator (float32, shape patch x patch), plus the
+    pole position expressed in patch-local coords.
+    """
+    half = patch // 2
+    crop_half = half + crop_margin
+    # Patch covers stack coords [cx_stack - half, cx_stack + half] x
+    # [cy_stack - half, cy_stack + half]. Pole in patch-local coords:
+    pole_in_patch = (pole[0] - (cx_stack - half),
+                     pole[1] - (cy_stack - half))
+
+    acc = np.zeros((patch, patch), dtype=np.float32)
+
+    H_frame, W_frame = raw_data[0].shape
+    for img, ang in zip(raw_data, angles_deg):
+        # Frame-side centre for this rotation.
+        fx, fy = rotate_point(cx_stack, cy_stack, pole, -ang)
+        # Crop bounds in frame coords.
+        fx_i, fy_i = int(round(fx)), int(round(fy))
+        fx0 = max(0, fx_i - crop_half)
+        fy0 = max(0, fy_i - crop_half)
+        fx1 = min(W_frame, fx_i + crop_half + 1)
+        fy1 = min(H_frame, fy_i + crop_half + 1)
+        if fx1 - fx0 < 4 or fy1 - fy0 < 4:
+            continue
+        crop = img[fy0:fy1, fx0:fx1]
+        # Need to warp `crop` (frame-local coords with origin (fx0, fy0))
+        # by +ang about the trial pole. The result should land in `acc`
+        # (patch-local coords with origin (cx_stack - half, cy_stack - half)).
+        #
+        # Affine map from input (xi, yi) → output (xo, yo):
+        #   first translate input crop coords to frame coords:
+        #     X = xi + fx0,  Y = yi + fy0
+        #   rotate about pole by +ang:
+        #     X' = pole_x + cos(a)(X - pole_x) - sin(a)(Y - pole_y)
+        #     Y' = pole_y + sin(a)(X - pole_x) + cos(a)(Y - pole_y)
+        #   shift to patch coords:
+        #     xo = X' - (cx_stack - half)
+        #     yo = Y' - (cy_stack - half)
+        #
+        # cv2.warpAffine wants a 2x3 matrix M such that
+        #   dst(xo, yo) = src(M * [xo, yo, 1]^T)
+        # i.e. M maps OUTPUT coords back to INPUT coords. So we build the
+        # inverse of the above and pass it directly.
+        # Build the full transform the same way the whole-frame version
+        # does (cv2.getRotationMatrix2D + cv2.warpAffine, no inverse flag),
+        # then compose with the crop/patch translations on either side.
+        #
+        # Whole-frame derot uses M_rot = getRotationMatrix2D(pole, ang),
+        # mapping frame coords → stack coords (rotation about pole by
+        # +ang in OpenCV's image-coord CCW convention).
+        #
+        # We want: input is `crop` whose pixel (xi, yi) sits at frame
+        # coords (xi + fx0, yi + fy0). Output is `acc` whose pixel
+        # (xo, yo) sits at stack coords (xo + ox, yo + oy) with
+        # ox = cx_stack - half, oy = cy_stack - half.
+        #
+        # forward map xi → xo:
+        #   1) translate crop → frame:  X = xi + fx0
+        #   2) rotate about pole:       X' = M_rot @ [X, Y, 1]^T
+        #   3) translate stack → patch: xo = X' - ox
+        #
+        # As one 2x3 affine:  M = T_patch @ M_rot @ T_crop
+        # where T_crop adds (fx0, fy0) and T_patch subtracts (ox, oy).
+        M_rot = cv2.getRotationMatrix2D(pole, ang, 1.0)
+        # Build full 3x3 representations for clean composition.
+        ox = cx_stack - half
+        oy = cy_stack - half
+        M_rot3 = np.vstack([M_rot, [0.0, 0.0, 1.0]])
+        T_crop = np.array([[1.0, 0.0, fx0],
+                           [0.0, 1.0, fy0],
+                           [0.0, 0.0, 1.0]])
+        T_patch = np.array([[1.0, 0.0, -ox],
+                            [0.0, 1.0, -oy],
+                            [0.0, 0.0, 1.0]])
+        full = T_patch @ M_rot3 @ T_crop          # input(xi,yi) → output(xo,yo)
+        # cv2.warpAffine does a *dense* output, populated by sampling the
+        # source — which means it needs the INVERSE map (output → input).
+        # Invert and pass with WARP_INVERSE_MAP so cv2 uses our matrix
+        # directly without re-inverting.
+        M_inv = np.linalg.inv(full)
+        M = M_inv[:2, :].astype(np.float32)
+        warped = cv2.warpAffine(
+            crop.astype(np.float32), M, (patch, patch),
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+        acc += warped
+
+    return acc, pole_in_patch
+
+
+def score_pole_patches(pole, raw_data, angles_deg, candidates,
+                       patch, crop_margin, search_radius, line_half_len):
+    total = 0.0
+    n_found = 0
+    for cx_s, cy_s, _ in candidates:
+        acc, pole_in_patch = build_candidate_stack(
+            raw_data, angles_deg, pole, cx_s, cy_s, patch, crop_margin)
+        half = patch // 2
+        # Search for the actual peak near the patch centre.
+        ax, ay = search_peak_in_patch(acc, half, half, search_radius)
+        if ax < 0:
+            continue
+        s = tangent_sharpness_in_patch(acc, ax, ay, pole_in_patch,
+                                        line_half_len)
+        total += s
+        n_found += 1
+    return total, n_found
+
+
+def save_jpg(arr, path):
+    if arr is None or arr.size == 0:
+        return
+    lo, hi = np.percentile(arr, [2, 99.7])
+    if hi <= lo:
+        hi = lo + 1.0
+    u8 = (np.clip((arr - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
+    Image.fromarray(u8).save(path, quality=92)
+
+
+def save_fits(arr, path, meta):
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=arr.astype(np.int32),
+                             compression_type="RICE_1")
+    for k, v in meta.items():
+        comp.header[k] = v
+    fits.HDUList([primary, comp]).writeto(path, overwrite=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("dir", type=Path)
+    ap.add_argument("--tile", required=True)
+    ap.add_argument("--seed-pole-x", type=float, required=True)
+    ap.add_argument("--seed-pole-y", type=float, required=True)
+    ap.add_argument("--start", type=int, default=1)
+    ap.add_argument("--n-frames", type=int, default=600)
+    ap.add_argument("--top", type=int, default=5)
+    ap.add_argument("--patch", type=int, default=40)
+    ap.add_argument("--crop-margin", type=int, default=12)
+    ap.add_argument("--search-radius", type=int, default=8)
+    ap.add_argument("--line-half-len", type=int, default=10)
+    ap.add_argument("--grid-range", type=float, default=80.0)
+    ap.add_argument("--grid-n", type=int, default=5)
+    ap.add_argument("--omega", type=float, default=-0.000219)
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name.split(".")[0].isdigit()
+           and int(f.name.split(".")[0]) >= args.start]
+    fns = fns[:args.n_frames]
+    print(f"frames: {fns[0].name}..{fns[-1].name} ({len(fns)})")
+
+    print("loading...")
+    raw_data = []
+    epochs = []
+    for fn in fns:
+        d, ep = load_frame(fn)
+        raw_data.append(d.astype(np.float32))
+        epochs.append(ep)
+    if any(e is None for e in epochs):
+        angles_deg = [float(np.degrees(i * args.omega))
+                      for i in range(len(fns))]
+    else:
+        e0 = epochs[0]
+        angles_deg = [float(np.degrees(((e - e0) / 3000.0) * args.omega))
+                      for e in epochs]
+    print(f"angle range: {angles_deg[0]:.4f}° .. {angles_deg[-1]:.4f}°")
+
+    seed_pole = (args.seed_pole_x, args.seed_pole_y)
+
+    # We need a SEED stack to find candidates. Use whole-frame for one pass.
+    print("building one-off seed-pole whole-frame stack...")
+    stack = None
+    for d, ang in zip(raw_data, angles_deg):
+        h, w = d.shape
+        M = cv2.getRotationMatrix2D(seed_pole, ang, 1.0)
+        derot = cv2.warpAffine(d, M, (w, h),
+                                flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0)
+        stack = derot if stack is None else stack + derot
+    cands = find_top_peaks(stack, args.tile, args.top)
+    print(f"top-{args.top} peaks in {args.tile}:")
+    for i, (x, y, p) in enumerate(cands):
+        print(f"  #{i+1}: ({x:4d},{y:4d}) peak={p:>10.0f}")
+    if not cands:
+        print("no candidates", file=sys.stderr)
+        return 1
+
+    score_trace = []
+    t_start = time.perf_counter()
+
+    def evaluate(p):
+        s, n = score_pole_patches(
+            tuple(p), raw_data, angles_deg, cands,
+            args.patch, args.crop_margin,
+            args.search_radius, args.line_half_len)
+        score_trace.append((float(p[0]), float(p[1]), s, n))
+        return s, n
+
+    print(f"\ngrid scan {args.grid_n}x{args.grid_n} over ±{args.grid_range} px:")
+    xs = np.linspace(seed_pole[0] - args.grid_range,
+                     seed_pole[0] + args.grid_range, args.grid_n)
+    ys = np.linspace(seed_pole[1] - args.grid_range,
+                     seed_pole[1] + args.grid_range, args.grid_n)
+    best = None
+    print("    x \\ y  " + "  ".join(f"{y:7.1f}" for y in ys))
+    for x in xs:
+        row = []
+        for y in ys:
+            s, n = evaluate([x, y])
+            row.append(s)
+            if best is None or s > best[0]:
+                best = (s, float(x), float(y), n)
+        print(f"  {x:7.1f}  " + "  ".join(f"{s:7.2f}" for s in row))
+    print(f"\ngrid best: ({best[1]:.2f},{best[2]:.2f}) score={best[0]:.3f}")
+
+    print("\nNelder-Mead refinement...")
+    def neg(p):
+        s, _ = evaluate([float(p[0]), float(p[1])])
+        return -s
+
+    res = minimize(neg, x0=[best[1], best[2]], method="Nelder-Mead",
+                   options={"xatol": 0.1, "fatol": 0.005, "maxiter": 200})
+    final_pole = (float(res.x[0]), float(res.x[1]))
+    final_score = -float(res.fun)
+    elapsed = time.perf_counter() - t_start
+    print(f"final pole: ({final_pole[0]:.2f}, {final_pole[1]:.2f}) "
+          f"score={final_score:.3f}")
+    print(f"\nwall time: {elapsed:.1f} s  "
+          f"({len(score_trace)} pole evaluations, "
+          f"{elapsed/len(score_trace)*1000:.0f} ms/eval)")
+
+    # For comparison output: build a whole-frame stack at the final
+    # pole, plus per-candidate patches.
+    print("\nbuilding output stack at final pole...")
+    final_stack = None
+    for d, ang in zip(raw_data, angles_deg):
+        h, w = d.shape
+        M = cv2.getRotationMatrix2D(final_pole, ang, 1.0)
+        derot = cv2.warpAffine(d, M, (w, h),
+                                flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0)
+        final_stack = derot if final_stack is None else final_stack + derot
+
+    tile_dir = args.out / args.tile
+    tile_dir.mkdir(parents=True, exist_ok=True)
+    save_fits(final_stack, tile_dir / "stack-final.fits.fz",
+              {"TILE": args.tile,
+               "POLEX": final_pole[0], "POLEY": final_pole[1],
+               "NFRAMES": len(fns),
+               "OMEGA": args.omega,
+               "SCORE": final_score,
+               "METHOD": "patch-based"})
+    save_jpg(final_stack, tile_dir / "stack-final.jpg")
+    H, W = final_stack.shape
+    x0, y0, x1, y1 = tile_bounds(args.tile, W, H)
+    save_jpg(final_stack[y0:y1, x0:x1], tile_dir / "stack-tile.jpg")
+
+    with open(tile_dir / "score-trace.csv", "w", newline="") as f:
+        w_ = csv.writer(f)
+        w_.writerow(["pole_x", "pole_y", "score", "n_found"])
+        for row in score_trace:
+            w_.writerow(row)
+    (tile_dir / "pole.txt").write_text(
+        f"tile: {args.tile}\n"
+        f"method: patch-based\n"
+        f"seed_pole: {seed_pole}\n"
+        f"grid_best: ({best[1]:.3f}, {best[2]:.3f})  score={best[0]:.3f}\n"
+        f"final_pole: ({final_pole[0]:.3f}, {final_pole[1]:.3f})  "
+        f"score={final_score:.3f}\n"
+        f"n_frames: {len(fns)}\n"
+        f"n_evaluations: {len(score_trace)}\n"
+        f"wall_time_s: {elapsed:.3f}\n"
+        f"ms_per_eval: {elapsed/len(score_trace)*1000:.1f}\n"
+        f"patch: {args.patch}  crop_margin: {args.crop_margin}\n"
+    )
+
+    summary_path = args.out / "tile-poles.csv"
+    write_header = not summary_path.exists()
+    with open(summary_path, "a", newline="") as f:
+        w_ = csv.writer(f)
+        if write_header:
+            w_.writerow(["tile", "method", "seed_x", "seed_y",
+                         "final_x", "final_y", "d_from_seed",
+                         "score", "n_cands", "n_frames",
+                         "n_evals", "wall_s"])
+        w_.writerow([args.tile, "patches",
+                     seed_pole[0], seed_pole[1],
+                     final_pole[0], final_pole[1],
+                     float(np.hypot(final_pole[0] - seed_pole[0],
+                                    final_pole[1] - seed_pole[1])),
+                     final_score, len(cands), len(fns),
+                     len(score_trace), elapsed])
+    print(f"\nappended to {summary_path}")
+
+
+if __name__ == "__main__":
+    main()
