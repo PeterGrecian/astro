@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""photo-compare — rank-based photometric comparison: our detections vs Gaia.
+
+For a fixed anchor star (e.g. Capella) at known RA/Dec, query Gaia DR3
+for the top-N brightest stars within `radius` of that anchor, then
+match those to our top-N brightest detections by rank order. Report
+the implied photometric zeropoint and its scatter.
+
+No WCS required — works on brightness rank alone. Useful for
+sanity-checking that our detection list overlaps with the sky's
+bright-star content in the right region.
+
+Use --bright-override "G_for_rank1,G_for_rank2,..." to inject known
+non-Gaia V magnitudes (e.g. Capella V=0.08 instead of Gaia's masked
+saturation value).
+
+Examples:
+  photo-compare ~/astro-catalog/2026-05-30/01b/A5-detections.csv \\
+      --anchor-ra 79.1722 --anchor-dec 45.998 \\
+      --radius 8 --gmax 6 \\
+      --bright-override 0.08
+"""
+import argparse
+import csv
+import math
+import warnings
+import sys
+from pathlib import Path
+warnings.filterwarnings("ignore")
+import numpy as np
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+from astroquery.gaia import Gaia
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("detections", type=Path)
+    ap.add_argument("--anchor-ra", type=float, required=True,
+                    help="anchor RA (degrees) — usually our brightest star")
+    ap.add_argument("--anchor-dec", type=float, required=True,
+                    help="anchor Dec (degrees)")
+    ap.add_argument("--radius", type=float, default=8.0,
+                    help="Gaia query radius (degrees)")
+    ap.add_argument("--gmax", type=float, default=6.0,
+                    help="Gaia G-mag limit")
+    ap.add_argument("--top", type=int, default=12,
+                    help="how many ranks to compare")
+    ap.add_argument("--bright-override", default="",
+                    help="comma-list of V/G mags to substitute for"
+                         " ranks 1..N (Gaia masks bright stars)")
+    args = ap.parse_args()
+
+    # Detections
+    detections = list(csv.DictReader(open(args.detections)))
+    detections.sort(key=lambda d: -float(d["flux"]))
+    detections = detections[:args.top]
+    print(f"loaded {len(detections)} detections (top {args.top} by flux)")
+
+    # Gaia
+    anchor = SkyCoord(args.anchor_ra*u.deg, args.anchor_dec*u.deg, frame="icrs")
+    q = (f"SELECT TOP {args.top * 5} SOURCE_ID, ra, dec, phot_g_mean_mag "
+         f"FROM gaiadr3.gaia_source "
+         f"WHERE 1=CONTAINS(POINT('ICRS', ra, dec), "
+         f"CIRCLE('ICRS', {args.anchor_ra}, {args.anchor_dec}, {args.radius})) "
+         f"AND phot_g_mean_mag <= {args.gmax} "
+         f"ORDER BY phot_g_mean_mag ASC")
+    r = Gaia.launch_job(q).get_results()
+    gaia = []
+    for row in r[:args.top]:
+        s = SkyCoord(row["ra"]*u.deg, row["dec"]*u.deg, frame="icrs")
+        gaia.append({"g": float(row["phot_g_mean_mag"]),
+                    "ra": float(row["ra"]), "dec": float(row["dec"]),
+                    "sky_d": anchor.separation(s).deg,
+                    "pa": anchor.position_angle(s).to(u.deg).value,
+                    "id": int(row["SOURCE_ID"])})
+    print(f"got {len(gaia)} Gaia bright stars within {args.radius}° "
+          f"(G ≤ {args.gmax})")
+
+    # Bright override
+    overrides = [float(x) for x in args.bright_override.split(",")
+                 if x.strip()] if args.bright_override else []
+
+    # Rank-by-rank comparison
+    print()
+    print(f"{'#':>3} {'log10(flux)':>11} {'G':>6} {'src':>10} {'zp':>9}")
+    zps = []
+    n = min(len(detections), len(gaia), args.top)
+    for i in range(n):
+        log_f = math.log10(float(detections[i]["flux"]))
+        if i < len(overrides):
+            g = overrides[i]
+            src = "override"
+        else:
+            g = gaia[i]["g"]
+            src = "Gaia"
+        zp = g + 2.5 * log_f
+        zps.append(zp)
+        print(f"#{i+1:<2d} {log_f:>11.3f} {g:>6.2f} {src:>10} {zp:>9.3f}")
+
+    zps = np.array(zps)
+    print(f"\nzp median: {np.median(zps):.3f}, std: {np.std(zps):.3f}")
+    if np.std(zps) < 0.25:
+        print("✓ tight zeropoint — rank match is plausible")
+    elif np.std(zps) < 0.6:
+        print("~ moderate scatter — some rank confusion or distortion")
+    else:
+        print("✗ large scatter — rank match is unreliable")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
