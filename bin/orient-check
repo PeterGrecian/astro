@@ -1,0 +1,48 @@
+"""For each high-confidence match (Polaris near pole, Kochab at 364 px),
+compute the IMAGE DIRECTION (angle) from pole to that star, and compare
+to the SKY DIRECTION (azimuth of the star relative to the pole's 
+zenith). The difference is the image rotation."""
+import math
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.time import Time
+import astropy.units as u
+import warnings
+warnings.filterwarnings("ignore")
+
+site = EarthLocation(lat=51.4*u.deg, lon=-0.3*u.deg)
+t = Time("2026-05-30T01:00:00", scale='utc')
+aa = AltAz(obstime=t, location=site)
+
+# Image pole pixel (corrected)
+PX, PY = 714, 344
+
+# Known stars with their image-position hypothesis
+candidates = [
+    # (name, pixel_x, pixel_y, ra_deg, dec_deg, V)
+    ("Polaris", 714, 344, 37.9546, 89.2643, 1.97),
+    ("Kochab", 352, 386, 222.6764, 74.1554, 2.06),
+    # A5 #1 - testing each plausible identity:
+    ("Alioth?", 15, 683, 193.507, 55.9598, 1.76),
+    ("Mizar?", 15, 683, 200.981, 54.9255, 2.27),
+    ("Eltanin?", 15, 683, 269.151, 51.488, 2.23),
+    ("Deneb?", 15, 683, 310.358, 45.2803, 1.25),
+    ("Vega?", 15, 683, 279.2347, 38.7837, 0.03),
+]
+
+print(f"{'name':<15} {'px,py':<10} {'pole_d':<7} {'img_ang':<7} {'sky_az':<7} {'rot':<7}")
+for name, x, y, ra, dec, v in candidates:
+    # Image angle from pole (CCW from +x)
+    dx, dy = x - PX, y - PY
+    img_pole_d = math.hypot(dx, dy)
+    img_angle = math.degrees(math.atan2(dy, dx)) % 360
+    # Sky position
+    s = SkyCoord(ra*u.deg, dec*u.deg, frame='icrs')
+    p = s.transform_to(aa)
+    # The "direction from pole on the sky" is naturally azimuth — Polaris (pole)
+    # is at az ~0, and any other star has some az.
+    sky_az = p.az.deg
+    # Rotation: img_angle - sky_az (modulo 360)
+    rot = (img_angle - sky_az) % 360
+    if rot > 180: rot -= 360
+    print(f"{name:<15} ({x:<3},{y:<3}) {img_pole_d:<7.1f} {img_angle:<7.1f} "
+          f"{sky_az:<7.1f} {rot:<+7.1f}")

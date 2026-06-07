@@ -1,0 +1,85 @@
+"""For known bright northern stars, predict where they should land in
+our image using only:
+  - their angular distance from the pole (sky)
+  - the pole pixel position in the image
+  - the image plate scale (~155-160 arcsec/binned px at A5; but
+    NOT constant across image due to lens distortion)
+
+We'll compute pole-distance only (which is the most robust thing
+because it's just a radial coordinate from the known pole pixel),
+and report which of our detections are at that pole-distance.
+
+This is orientation-invariant: doesn't depend on which way is east/west.
+"""
+import csv
+import math
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.time import Time
+import astropy.units as u
+
+site = EarthLocation(lat=51.4*u.deg, lon=-0.3*u.deg)
+t = Time("2026-05-30T01:00:00", scale='utc')
+aa = AltAz(obstime=t, location=site)
+
+pole_x, pole_y = 889.95, 175.23  # A5's local pole; will be off due to distortion
+PLATE = 156.6  # arcsec/binned px, central estimate
+
+# Known bright northern stars
+known = [
+    ("Polaris", 37.9546, 89.2643, 1.97),
+    ("Kochab β UMi", 222.6764, 74.1554, 2.06),
+    ("Pherkad γ UMi", 230.182, 71.8336, 3.05),
+    ("Alioth", 193.507, 55.9598, 1.76),
+    ("Mizar", 200.981, 54.9255, 2.27),
+    ("Alkaid", 206.886, 49.3133, 1.86),
+    ("Dubhe α UMa", 165.932, 61.7511, 1.81),
+    ("Merak β UMa", 165.460, 56.3824, 2.34),
+    ("Megrez δ UMa", 183.857, 57.0326, 3.31),
+    ("Phecda γ UMa", 178.458, 53.6948, 2.41),
+    ("Vega α Lyr", 279.2347, 38.7837, 0.03),
+    ("Deneb α Cyg", 310.358, 45.2803, 1.25),
+    ("Eltanin γ Dra", 269.151, 51.488, 2.23),
+    ("Mirfak α Per", 51.0808, 49.8612, 1.79),
+    ("Algol β Per", 47.0422, 40.9557, 2.12),
+    ("Capella α Aur", 79.1722, 45.998, 0.08),
+    ("Schedar α Cas", 10.1268, 56.5373, 1.94),
+    ("Caph β Cas", 2.2945, 59.1498, 2.27),
+    ("γ Cas", 14.1775, 60.7167, 2.04),
+    ("δ Cas (Ruchbah)", 21.4566, 60.2351, 2.66),
+]
+
+# Load detections
+rows = list(csv.DictReader(open("/home/peter/tmp/cam-grab/whole-detections.csv")))
+
+# For each known star, compute alt/az and pole-distance, then predict
+# pixel-distance from pole and find matching detection.
+print(f"{'name':<22} {'V':<5} {'pole_d°':<7} {'alt':<5} {'az':<6} "
+      f"{'pix_d_pred':<10} {'best_det':<25}")
+matched = []
+for name, ra, dec, v in known:
+    s = SkyCoord(ra*u.deg, dec*u.deg, frame='icrs')
+    p = s.transform_to(aa)
+    if p.alt.deg < 5:
+        continue
+    pole_d_deg = 90 - dec
+    pix_d_pred = pole_d_deg * 3600 / PLATE
+    # Find detection at that pixel-distance from pole, brightest
+    cands = []
+    for r in rows:
+        x = float(r["centroid_x"])
+        y = float(r["centroid_y"])
+        d = math.hypot(x - pole_x, y - pole_y)
+        flux = float(r["flux"])
+        if abs(d - pix_d_pred) < 80:  # ±80 pixels = ±3.5°
+            cands.append((abs(d - pix_d_pred), d, x, y, flux, r["tile"]))
+    cands.sort()
+    if cands:
+        diff, d, x, y, flux, tile = cands[0]
+        best = f"d={d:.0f} ({x:.0f},{y:.0f}) flux={flux:.0f} tile={tile}"
+    else:
+        best = "—"
+    print(f"{name:<22} {v:<5.2f} {pole_d_deg:<7.2f} {p.alt.deg:<5.1f} "
+          f"{p.az.deg:<6.1f} {pix_d_pred:<10.1f} {best}")

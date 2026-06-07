@@ -1,0 +1,214 @@
+"""Project Gaia stars onto an existing A5 tile JPG using a rough WCS
+centred on Capella, and burn them in as labelled circles for visual ID.
+
+The projection uses a polar coord system about the celestial pole that
+matches the *measured* (pole_pixel, plate_scale, rotation) for our
+image — so it'll be approximately right near Capella and increasingly
+distorted toward the centre of the frame. For A5 (corner) it should be
+good to ~1 px on the Gaia stars closest to Capella, growing to maybe
+5-10 px for the further ones.
+
+Use to visually confirm star identifications:
+  - tag colour: green = Gaia G≤4, yellow = G≤5, cyan = G≤6
+  - radius: shrinks with G mag
+  - label: short Bayer-greek name where known, else G mag
+
+Reads:
+  - A5 stack JPG (cropped to A5, 3x upscaled)
+  - A5 detect-stars CSV (for our detections in red)
+  - polar WCS parameters (Capella pixel, pole pixel, plate scale, rotation)
+"""
+import argparse
+import csv
+import math
+import warnings
+import sys
+from pathlib import Path
+warnings.filterwarnings("ignore")
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+from astroquery.gaia import Gaia
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def polar_pix(ra_deg, dec_deg, pole_px, pole_py, plate_arcsec_per_px,
+              theta0_deg):
+    """Given Gaia (ra, dec), return pixel (x, y) under our polar model.
+
+    Model:
+        r_sky = 90 - Dec        (degrees from NCP)
+        theta_sky = RA          (radians or deg)
+
+        r_pix = r_sky * 3600 / plate_arcsec_per_px
+        theta_pix = theta_sky + theta0
+
+        x = pole_px + r_pix * cos(theta_pix)
+        y = pole_py + r_pix * sin(theta_pix)
+
+    Sign of theta increasing: image-x CCW (+x = right = east).
+    """
+    r_sky_deg = 90.0 - dec_deg
+    r_pix = r_sky_deg * 3600.0 / plate_arcsec_per_px
+    theta_pix_deg = ra_deg + theta0_deg
+    rad = math.radians(theta_pix_deg)
+    x = pole_px + r_pix * math.cos(rad)
+    y = pole_py + r_pix * math.sin(rad)
+    return x, y
+
+
+def find_theta0(capella_x, capella_y, pole_px, pole_py,
+                plate_arcsec_per_px):
+    """Compute theta0 such that Capella projects to (capella_x, capella_y).
+
+    Capella RA = 79.1722, Dec = 45.998 → r_sky = 44.002°
+    Required: pole+r_pix*(cos, sin) = (capella_x, capella_y)
+    => theta_pix = atan2(capella_y-pole_py, capella_x-pole_px)
+    => theta0 = theta_pix - capella_RA
+    """
+    rad = math.atan2(capella_y - pole_py, capella_x - pole_px)
+    theta_pix_deg = math.degrees(rad)
+    theta0 = theta_pix_deg - 79.1722
+    return theta0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in-jpg", type=Path, required=True)
+    ap.add_argument("--detections", type=Path, default=None,
+                    help="optional detect-stars CSV to also overlay")
+    ap.add_argument("--crop-tile", default="A5")
+    ap.add_argument("--scale", type=int, default=3)
+    ap.add_argument("--full-w", type=int, default=1296)
+    ap.add_argument("--full-h", type=int, default=972)
+    ap.add_argument("--capella-pixel", default="15.46,683.21")
+    ap.add_argument("--pole-pixel", default="889.95,175.23")
+    ap.add_argument("--plate-scale", type=float, default=156.6,
+                    help="arcsec / px")
+    ap.add_argument("--n-stars", type=int, default=20,
+                    help="how many brightest Gaia stars to overlay")
+    ap.add_argument("--gmax", type=float, default=6.0)
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    capella_x, capella_y = (float(v) for v in args.capella_pixel.split(","))
+    pole_px, pole_py = (float(v) for v in args.pole_pixel.split(","))
+
+    theta0 = find_theta0(capella_x, capella_y, pole_px, pole_py,
+                          args.plate_scale)
+    print(f"theta0 (rotation): {theta0:.3f}°")
+    print(f"  (this is the rotation between image +x and sky RA=0 "
+          f"direction at the pole)")
+
+    # Query Gaia: brightest stars within ~10° of Capella (covers the
+    # A5 corner reliably plus a margin).
+    q = (f"SELECT TOP 100 SOURCE_ID, ra, dec, phot_g_mean_mag "
+         f"FROM gaiadr3.gaia_source "
+         f"WHERE 1=CONTAINS(POINT('ICRS',ra,dec),"
+         f"CIRCLE('ICRS',79.1722,45.998,10)) "
+         f"AND phot_g_mean_mag <= {args.gmax} "
+         f"ORDER BY phot_g_mean_mag ASC")
+    r = Gaia.launch_job(q).get_results()
+    print(f"queried Gaia: {len(r)} bright stars within 10° of Capella")
+
+    # Capella is masked from Gaia — inject manually
+    stars = [{"ra": 79.1722, "dec": 45.998, "g": 0.08,
+              "src": "Capella (V)", "id": "Capella"}]
+    for row in r[:args.n_stars]:
+        stars.append({"ra": float(row["ra"]),
+                      "dec": float(row["dec"]),
+                      "g": float(row["phot_g_mean_mag"]),
+                      "src": "Gaia",
+                      "id": str(int(row["SOURCE_ID"]))})
+
+    # Load JPG
+    pil = Image.open(args.in_jpg).convert("RGB")
+    draw = ImageDraw.Draw(pil, "RGBA")
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 12)
+    except OSError:
+        font = ImageFont.load_default()
+
+    # crop offset → image
+    off_x = off_y = 0
+    if args.crop_tile:
+        x0, y0, _, _ = tile_bounds(args.crop_tile, args.full_w,
+                                    args.full_h)
+        off_x, off_y = x0, y0
+
+    img_w, img_h = pil.size
+
+    def to_image(full_x, full_y):
+        return (full_x - off_x) * args.scale, (full_y - off_y) * args.scale
+
+    # Overlay our detections in red (small unfilled circles)
+    if args.detections:
+        det_rows = list(csv.DictReader(open(args.detections)))
+        det_rows.sort(key=lambda d: -float(d["flux"]))
+        for i, d in enumerate(det_rows[:30], 1):
+            cx_f = float(d["centroid_x"])
+            cy_f = float(d["centroid_y"])
+            cx, cy = to_image(cx_f, cy_f)
+            if cx < 0 or cx > img_w or cy < 0 or cy > img_h:
+                continue
+            draw.ellipse([cx-4, cy-4, cx+4, cy+4],
+                         outline=(255, 80, 80, 255), width=2)
+            txt = f"d{i}"
+            draw.text((cx + 5, cy + 4), txt,
+                      fill=(255, 80, 80, 255), font=font)
+
+    # Overlay Gaia in green/yellow/cyan by mag
+    print(f"\nOverlaying {len(stars)} stars:")
+    plotted = 0
+    for i, s in enumerate(stars):
+        x_full, y_full = polar_pix(s["ra"], s["dec"], pole_px, pole_py,
+                                    args.plate_scale, theta0)
+        x_img, y_img = to_image(x_full, y_full)
+        if x_img < -50 or x_img > img_w + 50 or y_img < -50 or y_img > img_h + 50:
+            print(f"  G={s['g']:.2f} at ({x_full:.0f},{y_full:.0f}) "
+                  f"= image ({x_img:.0f},{y_img:.0f}) — off canvas")
+            continue
+        # colour by G
+        if s["g"] < 1:
+            col = (255, 255, 255, 255)  # Capella: white
+        elif s["g"] < 3:
+            col = (80, 255, 100, 255)   # green
+        elif s["g"] < 4:
+            col = (255, 220, 80, 255)   # yellow
+        elif s["g"] < 5:
+            col = (100, 200, 255, 255)  # cyan
+        else:
+            col = (180, 180, 180, 200)  # grey
+        # radius by G
+        r = max(4, 12 - int(s["g"] * 1.5))
+        draw.ellipse([x_img - r, y_img - r, x_img + r, y_img + r],
+                     outline=col, width=2)
+        # Label
+        if s["id"] == "Capella":
+            lbl = "Capella"
+        else:
+            lbl = f"G{s['g']:.1f}"
+        draw.text((x_img + r + 2, y_img - r), lbl, fill=col, font=font)
+        plotted += 1
+        print(f"  G={s['g']:.2f} ra={s['ra']:.3f} dec={s['dec']:.3f} "
+              f"→ image ({x_img:.0f},{y_img:.0f})")
+
+    pil.save(args.out, quality=92)
+    print(f"\nwrote {args.out} ({plotted} stars plotted)")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

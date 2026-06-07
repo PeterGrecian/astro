@@ -1,0 +1,73 @@
+"""For each of the top-5 A5 detections, compute pixel distance from
+Capella (#1) and predict the sky distance (using assumed plate scale).
+Then query Gaia for stars at that sky-distance from Capella, ranked
+by likely brightness, and report candidates."""
+import csv
+import math
+import sys
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+from astroquery.gaia import Gaia
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+
+# Known: Capella = A5 detection #1
+CAPELLA_RA, CAPELLA_DEC = 79.1722, 45.998
+CAPELLA = SkyCoord(CAPELLA_RA*u.deg, CAPELLA_DEC*u.deg, frame='icrs')
+PLATE_SCALE_ARCSEC = 156.6  # from solve-field
+
+# Detections #1..#5 from A5-dense2.csv
+detections = [
+    (15.46, 683.21, 5138531, "#1 Capella (known)"),
+    (115.76, 762.28, 699838,  "#2"),
+    (131.93, 741.09, 411796,  "#3"),
+    (125.50, 674.32, 198631,  "#4"),
+    (65.47, 692.07, 103954,   "#5"),
+]
+
+# For each one, work out pixel distance from #1 and predicted sky distance
+print(f"{'name':<25} {'pix_d':>6} {'sky_d°':>8}")
+for x, y, flux, name in detections:
+    px_d = math.hypot(x - 15.46, y - 683.21)
+    sky_d = px_d * PLATE_SCALE_ARCSEC / 3600.0
+    print(f"{name:<25} {px_d:>6.1f} {sky_d:>8.3f}")
+
+# Now query Gaia for ALL stars brighter than G=6 within 15° of Capella
+print("\nQuerying Gaia for bright stars (G≤6) within 15° of Capella...")
+q = f"""SELECT TOP 300 SOURCE_ID, ra, dec, phot_g_mean_mag,
+    DISTANCE(POINT('ICRS', ra, dec),
+             POINT('ICRS', {CAPELLA_RA}, {CAPELLA_DEC})) AS sky_d_deg
+FROM gaiadr3.gaia_source
+WHERE 1=CONTAINS(POINT('ICRS', ra, dec),
+                CIRCLE('ICRS', {CAPELLA_RA}, {CAPELLA_DEC}, 15))
+AND phot_g_mean_mag <= 6
+ORDER BY phot_g_mean_mag ASC"""
+job = Gaia.launch_job(q)
+r = job.get_results()
+print(f"got {len(r)} stars\n")
+
+# For each detection, find candidates within ±10% of predicted sky-distance
+TOL_PCT = 0.15
+print(f"--- Candidate sky-distance matches (tol ±{TOL_PCT*100:.0f}%) ---")
+for x, y, flux, name in detections[1:]:  # skip #1 (Capella)
+    px_d = math.hypot(x - 15.46, y - 683.21)
+    sky_d_pred = px_d * PLATE_SCALE_ARCSEC / 3600.0
+    tol = sky_d_pred * TOL_PCT
+    print(f"\n{name} pixel ({x:.1f}, {y:.1f}) pix_d={px_d:.1f} "
+          f"sky_d_pred={sky_d_pred:.3f}° (tol ±{tol:.3f}°)")
+    candidates = []
+    for row in r:
+        sd = float(row['sky_d_deg'])
+        if abs(sd - sky_d_pred) <= tol:
+            candidates.append((float(row['phot_g_mean_mag']),
+                              float(row['ra']), float(row['dec']),
+                              sd, int(row['SOURCE_ID'])))
+    candidates.sort()  # by mag
+    for g, ra, dec, sd, sid in candidates[:8]:
+        # Also show position angle from Capella
+        s = SkyCoord(ra*u.deg, dec*u.deg, frame='icrs')
+        pa = CAPELLA.position_angle(s).to(u.deg).value
+        print(f"  G={g:5.2f}  RA={ra:8.3f} Dec={dec:7.3f}  "
+              f"sky_d={sd:.3f}°  PA={pa:6.2f}°  id={sid}")

@@ -1,0 +1,152 @@
+"""Overlay Gaia bright stars on A5 using the CORRECTED polar projection."""
+import csv, math
+import warnings
+warnings.filterwarnings("ignore")
+import sys
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.time import Time
+import astropy.units as u
+from astroquery.gaia import Gaia
+
+# Calibration
+PX, PY = 714, 344
+PLATE = 156.6
+ROT_DEG = -157.5
+OBS_TIME = Time("2026-05-30T01:00:00", scale='utc')
+SITE = EarthLocation(lat=51.4*u.deg, lon=-0.3*u.deg)
+AA = AltAz(obstime=OBS_TIME, location=SITE)
+
+# Crop / scale
+CROP_TILE = "A5"
+SCALE = 3
+GRID_COLS, GRID_ROWS = 8, 6
+FULL_W, FULL_H = 1296, 972
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh))
+
+def predict_pixel(ra, dec):
+    """Predict (x, y) from sky position."""
+    s = SkyCoord(ra*u.deg, dec*u.deg, frame='icrs')
+    p = s.transform_to(AA)
+    if p.alt.deg < 0:
+        return None, None
+    pole_d = 90 - dec
+    r_pix = pole_d * 3600 / PLATE
+    img_ang = (p.az.deg + ROT_DEG) % 360
+    rad = math.radians(img_ang)
+    x = PX + r_pix * math.cos(rad)
+    y = PY + r_pix * math.sin(rad)
+    return x, y
+
+# Query Gaia for bright stars in the NW sky (Big Dipper area)
+print("Querying Gaia for bright stars in Ursa Major / Minor area...")
+q = """SELECT TOP 200 SOURCE_ID, ra, dec, phot_g_mean_mag
+FROM gaiadr3.gaia_source
+WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 193.5, 56.0, 25))
+AND phot_g_mean_mag <= 6
+ORDER BY phot_g_mean_mag ASC"""
+r = Gaia.launch_job(q).get_results()
+print(f"got {len(r)} Gaia stars")
+
+# Plus the bright named ones that Gaia saturates
+named_extras = [
+    ("Polaris", 37.9546, 89.2643, 1.97),
+    ("Kochab", 222.6764, 74.1554, 2.06),
+    ("Pherkad", 230.182, 71.8336, 3.05),
+    ("Alioth", 193.507, 55.9598, 1.76),
+    ("Mizar", 200.981, 54.9255, 2.27),
+    ("Alkaid", 206.886, 49.3133, 1.86),
+    ("Dubhe", 165.932, 61.7511, 1.81),
+    ("Merak", 165.460, 56.3824, 2.34),
+    ("Megrez", 183.857, 57.0326, 3.31),
+    ("Phecda", 178.458, 53.6948, 2.41),
+]
+
+stars = []
+for row in r:
+    stars.append({"name": f"G{row['phot_g_mean_mag']:.2f}",
+                  "ra": float(row['ra']), "dec": float(row['dec']),
+                  "g": float(row['phot_g_mean_mag'])})
+for name, ra, dec, mag in named_extras:
+    if not any(abs(s['ra']-ra)<0.01 for s in stars):
+        stars.append({"name": name, "ra": ra, "dec": dec, "g": mag})
+
+# Load JPG
+pil = Image.open("/home/peter/tmp/cam-grab/A5-tilecrop-3x.jpg").convert("RGB")
+draw = ImageDraw.Draw(pil, "RGBA")
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 12)
+    font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 14)
+except OSError:
+    font = font_lg = ImageFont.load_default()
+
+img_w, img_h = pil.size
+ox, oy = tile_bounds(CROP_TILE, FULL_W, FULL_H)
+
+def to_image(full_x, full_y):
+    return (full_x - ox) * SCALE, (full_y - oy) * SCALE
+
+# Overlay our detections (red small circles)
+det_rows = list(csv.DictReader(open("/home/peter/tmp/cam-grab/A5-dense2.csv")))
+det_rows.sort(key=lambda d: -float(d["flux"]))
+for i, d in enumerate(det_rows[:30], 1):
+    cx_f = float(d["centroid_x"])
+    cy_f = float(d["centroid_y"])
+    cx, cy = to_image(cx_f, cy_f)
+    if cx < 0 or cx > img_w or cy < 0 or cy > img_h:
+        continue
+    draw.ellipse([cx-4, cy-4, cx+4, cy+4], outline=(255, 80, 80, 255), width=2)
+    draw.text((cx + 5, cy + 4), f"d{i}", fill=(255, 80, 80, 255), font=font)
+
+# Overlay Gaia predicted positions
+plotted_on = 0
+plotted_off = 0
+for s in stars:
+    x_full, y_full = predict_pixel(s['ra'], s['dec'])
+    if x_full is None:
+        continue
+    x_img, y_img = to_image(x_full, y_full)
+    if x_img < -50 or x_img > img_w + 50 or y_img < -50 or y_img > img_h + 50:
+        plotted_off += 1
+        continue
+    # Colour by brightness
+    g = s['g']
+    if g < 2:
+        col = (80, 255, 100, 255)   # bright green
+    elif g < 3:
+        col = (180, 255, 120, 255)  # green-yellow
+    elif g < 4:
+        col = (255, 220, 80, 255)   # yellow
+    elif g < 5:
+        col = (100, 200, 255, 255)  # cyan
+    else:
+        col = (180, 180, 220, 200)  # grey-blue
+    # radius by brightness
+    rad = max(3, 14 - int(g * 1.5))
+    draw.ellipse([x_img-rad, y_img-rad, x_img+rad, y_img+rad], outline=col, width=2)
+    # Label
+    if s['name'].startswith("G"):
+        lbl = f"G{g:.1f}"
+        f_use = font
+    else:
+        lbl = f"{s['name']} ({g:.1f})"
+        f_use = font_lg
+    draw.text((x_img + rad + 2, y_img - rad), lbl, fill=col, font=f_use)
+    plotted_on += 1
+
+print(f"plotted {plotted_on} stars on canvas, {plotted_off} off canvas")
+
+# Add a legend
+draw.text((10, 10), f"Polar projection: pole=({PX},{PY}), rot={ROT_DEG}°, plate={PLATE}\"/px",
+          fill=(255, 255, 255), font=font_lg)
+draw.text((10, 30), "RED=our detections  GREEN=Gaia/named bright  YELLOW=G<4  CYAN=G<5",
+          fill=(255, 255, 255), font=font)
+
+pil.save("/home/peter/tmp/cam-grab/A5-corrected-overlay.jpg", quality=92)
+print("wrote /home/peter/tmp/cam-grab/A5-corrected-overlay.jpg")

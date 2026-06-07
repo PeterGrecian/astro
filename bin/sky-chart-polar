@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""sky-chart-polar — polar projection sky chart matching our camera's
+orientation.
+
+Uses POSITION ANGLE from Polaris (not local azimuth) so the projection is
+geometrically correct. Draws:
+  - Bright Gaia stars at predicted pixel positions
+  - Polaris-to-zenith meridian line
+  - Concentric declination circles
+  - Constellation lines for Big Dipper, Little Dipper, Cassiopeia
+"""
+import argparse, math, warnings
+from pathlib import Path
+warnings.filterwarnings("ignore")
+import sys
+from PIL import Image, ImageDraw, ImageFont
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.time import Time
+import astropy.units as u
+from astroquery.gaia import Gaia
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--out", type=Path, required=True)
+ap.add_argument("--width", type=int, default=1296)
+ap.add_argument("--height", type=int, default=972)
+ap.add_argument("--pole-x", type=float, default=714)
+ap.add_argument("--pole-y", type=float, default=344)
+ap.add_argument("--plate-scale", type=float, default=156.6)
+ap.add_argument("--rot-deg", type=float, default=-157.5,
+                help="img_angle = position_angle + rot_deg "
+                     "(with +y down in image)")
+ap.add_argument("--obs-time", default="2026-05-30T01:00:00")
+ap.add_argument("--site-lat", type=float, default=51.4)
+ap.add_argument("--site-lon", type=float, default=-0.3)
+ap.add_argument("--gmax", type=float, default=5.0)
+ap.add_argument("--n-query", type=int, default=300)
+args = ap.parse_args()
+
+site = EarthLocation(lat=args.site_lat*u.deg, lon=args.site_lon*u.deg)
+t = Time(args.obs_time, scale='utc')
+aa = AltAz(obstime=t, location=site)
+POLARIS = SkyCoord(37.9546*u.deg, 89.2643*u.deg, frame='icrs')
+LATITUDE = args.site_lat
+
+# Zenith on the sky for this site at this time
+# In the alt-az frame, zenith is alt=90, az=arbitrary; in ICRS it has
+# RA = LST, Dec = lat
+lst_deg = t.sidereal_time('mean', longitude=args.site_lon*u.deg).deg
+zenith_sc = SkyCoord(lst_deg*u.deg, args.site_lat*u.deg, frame='icrs')
+zenith_pa = POLARIS.position_angle(zenith_sc).to(u.deg).value
+zenith_sep_deg = POLARIS.separation(zenith_sc).deg
+print(f"Zenith: RA={lst_deg:.2f}° Dec={args.site_lat}° "
+      f"sep_from_polaris={zenith_sep_deg:.2f}° "
+      f"position_angle={zenith_pa:.2f}°", file=sys.stderr)
+
+def project(ra, dec):
+    """Sky → image pixel via polar projection."""
+    sc = SkyCoord(ra*u.deg, dec*u.deg, frame='icrs')
+    pa = POLARIS.position_angle(sc).to(u.deg).value
+    sep_deg = POLARIS.separation(sc).deg
+    r_pix = sep_deg * 3600 / args.plate_scale
+    img_ang = (pa + args.rot_deg) % 360
+    rad = math.radians(img_ang)
+    x = args.pole_x + r_pix * math.cos(rad)
+    y = args.pole_y + r_pix * math.sin(rad)
+    return x, y, sep_deg, pa
+
+# Query Gaia
+q = f"""SELECT TOP {args.n_query} SOURCE_ID, ra, dec, phot_g_mean_mag
+FROM gaiadr3.gaia_source
+WHERE dec > 20
+AND phot_g_mean_mag <= {args.gmax}
+ORDER BY phot_g_mean_mag ASC"""
+print(f"Querying Gaia (G≤{args.gmax})...", file=sys.stderr)
+r = Gaia.launch_job(q).get_results()
+
+# Named bright stars (Gaia masks some)
+named = [
+    ("Polaris", 37.9546, 89.2643, 1.97),
+    ("Kochab", 222.6764, 74.1554, 2.06),
+    ("Pherkad", 230.182, 71.8336, 3.05),
+    ("Alioth", 193.507, 55.9598, 1.76),
+    ("Mizar", 200.981, 54.9255, 2.27),
+    ("Alkaid", 206.886, 49.3133, 1.86),
+    ("Dubhe", 165.932, 61.7511, 1.81),
+    ("Merak", 165.460, 56.3824, 2.34),
+    ("Megrez", 183.857, 57.0326, 3.31),
+    ("Phecda", 178.458, 53.6948, 2.41),
+    ("Schedar", 10.1268, 56.5373, 1.94),
+    ("Caph", 2.2945, 59.1498, 2.27),
+    ("γ Cas", 14.1775, 60.7167, 2.04),
+    ("δ Cas", 21.4566, 60.2351, 2.66),
+    ("ε Cas", 28.5992, 63.67, 3.34),
+    ("Capella", 79.1722, 45.998, 0.08),
+    ("Mirfak", 51.0808, 49.8612, 1.79),
+    ("Algol", 47.0422, 40.9557, 2.12),
+    ("Vega", 279.2347, 38.7837, 0.03),
+    ("Deneb", 310.358, 45.2803, 1.25),
+    ("Eltanin", 269.151, 51.488, 2.23),
+]
+
+stars = []
+for row in r:
+    stars.append({"name": "", "ra": float(row['ra']),
+                  "dec": float(row['dec']),
+                  "g": float(row['phot_g_mean_mag'])})
+for name, ra, dec, mag in named:
+    matched = False
+    for s in stars:
+        if abs(s['ra']-ra)<0.05 and abs(s['dec']-dec)<0.05:
+            s['name'] = name
+            matched = True
+            break
+    if not matched:
+        stars.append({"name": name, "ra": ra, "dec": dec, "g": mag})
+
+# Filter to visible
+visible = {}
+for s in stars:
+    sc = SkyCoord(s['ra']*u.deg, s['dec']*u.deg, frame='icrs')
+    p = sc.transform_to(aa)
+    if p.alt.deg < 5:
+        continue
+    x, y, _, _ = project(s['ra'], s['dec'])
+    s_out = {**s, "alt": p.alt.deg, "az": p.az.deg, "x": x, "y": y}
+    key = s['name'] if s['name'] else f"G{s['g']:.2f}_{s['ra']:.2f}"
+    visible[key] = s_out
+
+img = Image.new("RGB", (args.width, args.height), color=(8, 12, 25))
+draw = ImageDraw.Draw(img, "RGBA")
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 12)
+    font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 16)
+except OSError:
+    font = font_lg = ImageFont.load_default()
+
+# Declination circles
+for dec_step in [80, 70, 60, 50, 40, 30, 20]:
+    r_pix = (90 - dec_step) * 3600 / args.plate_scale
+    draw.ellipse([args.pole_x-r_pix, args.pole_y-r_pix,
+                  args.pole_x+r_pix, args.pole_y+r_pix],
+                 outline=(35, 35, 55), width=1)
+
+# Meridian: Polaris to zenith — south on sky from Polaris
+r_zen = zenith_sep_deg * 3600 / args.plate_scale
+img_ang_zen = (zenith_pa + args.rot_deg) % 360
+rad = math.radians(img_ang_zen)
+zen_x = args.pole_x + r_zen * math.cos(rad)
+zen_y = args.pole_y + r_zen * math.sin(rad)
+print(f"Zenith projected to image ({zen_x:.0f}, {zen_y:.0f})", file=sys.stderr)
+# Draw line from Polaris to zenith
+draw.line([args.pole_x, args.pole_y, zen_x, zen_y],
+          fill=(255, 80, 80, 200), width=2)
+# Label
+draw.text((zen_x - 30, zen_y - 25), "ZENITH",
+          fill=(255, 100, 100), font=font_lg)
+
+# Constellation lines
+def draw_constellation(names, colour=(80, 150, 255, 180)):
+    last = None
+    for n in names:
+        if n in visible:
+            v = visible[n]
+            if last is not None:
+                draw.line([last['x'], last['y'], v['x'], v['y']],
+                          fill=colour, width=1)
+            last = v
+        else:
+            last = None
+
+# Big Dipper
+draw_constellation(["Alkaid", "Mizar", "Alioth", "Megrez", "Phecda",
+                     "Merak", "Dubhe", "Megrez"])
+# Little Dipper
+draw_constellation(["Polaris", "Pherkad", "Kochab"])
+# Cassiopeia W
+draw_constellation(["Caph", "Schedar", "γ Cas", "δ Cas", "ε Cas"])
+
+# Stars
+for k, s in sorted(visible.items(), key=lambda kv: kv[1]['g']):
+    g = s['g']
+    if g < 1.5:
+        sz, col = 14, (255, 255, 255)
+    elif g < 2.5:
+        sz, col = 10, (255, 240, 200)
+    elif g < 3.5:
+        sz, col = 6, (220, 220, 240)
+    elif g < 4.5:
+        sz, col = 4, (180, 180, 220)
+    else:
+        sz, col = 2, (140, 140, 200)
+    # Stars off-canvas: don't render (else label position absurd)
+    if not (-30 < s['x'] < args.width + 30 and -30 < s['y'] < args.height + 30):
+        continue
+    draw.ellipse([s['x']-sz, s['y']-sz, s['x']+sz, s['y']+sz], fill=col)
+    if s['name']:
+        draw.text((s['x']+sz+3, s['y']-sz), s['name'],
+                  fill=(255, 220, 100), font=font_lg)
+
+# Polaris marker
+draw.ellipse([args.pole_x-3, args.pole_y-3, args.pole_x+3, args.pole_y+3],
+             outline=(255, 100, 100), width=1)
+
+# Title
+draw.text((10, args.height-25),
+          f"Polar sky: pole=({args.pole_x:.0f},{args.pole_y:.0f}) "
+          f"plate={args.plate_scale}\"/px rot={args.rot_deg}°  "
+          f"red=meridian to zenith",
+          fill=(255, 255, 255), font=font_lg)
+
+img.save(args.out, quality=92)
+print(f"wrote {args.out}", file=sys.stderr)

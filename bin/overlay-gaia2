@@ -1,0 +1,155 @@
+"""Re-project with east = +x reversed (i.e., flip horizontally
+relative to standard).
+
+If east-left convention, the polar projection is:
+  x_pix = pole_px - r_pix * cos(theta_pix)   # NOTE: minus, not plus
+  y_pix = pole_py + r_pix * sin(theta_pix)
+"""
+import argparse
+import csv
+import math
+import warnings
+import sys
+from pathlib import Path
+warnings.filterwarnings("ignore")
+from PIL import Image, ImageDraw, ImageFont
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+from astroquery.gaia import Gaia
+
+GRID_COLS = 8
+GRID_ROWS = 6
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--in-jpg", type=Path, required=True)
+ap.add_argument("--detections", type=Path)
+ap.add_argument("--crop-tile", default="A5")
+ap.add_argument("--scale", type=int, default=3)
+ap.add_argument("--full-w", type=int, default=1296)
+ap.add_argument("--full-h", type=int, default=972)
+ap.add_argument("--plate-scale", type=float, default=156.6)
+ap.add_argument("--gmax", type=float, default=6.0)
+ap.add_argument("--n-stars", type=int, default=30)
+ap.add_argument("--flip-x", action="store_true",
+                help="east is to the left (x reversed)")
+ap.add_argument("--theta0", type=float, default=None,
+                help="rotation; computed from Capella if omitted")
+ap.add_argument("--out", type=Path, required=True)
+args = ap.parse_args()
+
+# Anchor
+capella_pixel = (15.46, 683.21)
+pole_pixel = (889.95, 175.23)
+
+def to_image_coords(full_x, full_y):
+    if args.crop_tile:
+        x0, y0, _, _ = tile_bounds(args.crop_tile, args.full_w, args.full_h)
+    else:
+        x0 = y0 = 0
+    return (full_x - x0) * args.scale, (full_y - y0) * args.scale
+
+# Compute θ0 from Capella anchor
+# Capella sky coord: (RA=79.1722, Dec=45.998)
+# Polar model:
+#   r_pix = (90 - Dec) * 3600 / plate_scale
+#   theta_pix = RA + θ0
+#   With flip_x: x = pole_x - r*cos(θ), else x = pole_x + r*cos(θ)
+#   y = pole_y + r*sin(θ)
+capella_r_pix = (90 - 45.998) * 3600 / args.plate_scale
+print(f"Capella r_pix (predicted): {capella_r_pix:.1f}")
+print(f"Capella → pole pixel distance (measured): "
+      f"{math.hypot(15.46-889.95, 683.21-175.23):.1f}")
+# (If these match within 10%, plate scale is roughly right at A5.)
+
+# Required: (capella_x, capella_y) = (pole_x ± r*cos(θ), pole_y + r*sin(θ))
+# So: cos(θ) = ±(capella_x - pole_x) / r_pix
+#     sin(θ) = (capella_y - pole_y) / r_pix
+if args.flip_x:
+    sign_cos = -1
+else:
+    sign_cos = +1
+cos_needed = sign_cos * (capella_pixel[0] - pole_pixel[0]) / capella_r_pix
+sin_needed = (capella_pixel[1] - pole_pixel[1]) / capella_r_pix
+theta_pix = math.degrees(math.atan2(sin_needed, cos_needed))
+if args.theta0 is None:
+    theta0 = theta_pix - 79.1722  # since theta_pix = RA + theta0
+else:
+    theta0 = args.theta0
+print(f"theta_pix for Capella: {theta_pix:.2f}°")
+print(f"theta0: {theta0:.2f}° (flip-x={args.flip_x})")
+
+# Query Gaia
+q = f"""SELECT TOP 200 SOURCE_ID, ra, dec, phot_g_mean_mag
+FROM gaiadr3.gaia_source
+WHERE 1=CONTAINS(POINT('ICRS',ra,dec),CIRCLE('ICRS',79.1722,45.998,10))
+AND phot_g_mean_mag <= {args.gmax}
+ORDER BY phot_g_mean_mag ASC"""
+r = Gaia.launch_job(q).get_results()
+stars = [{"ra": 79.1722, "dec": 45.998, "g": 0.08, "id": "Capella"}]
+for row in r[:args.n_stars]:
+    stars.append({"ra": float(row["ra"]), "dec": float(row["dec"]),
+                  "g": float(row["phot_g_mean_mag"]),
+                  "id": str(int(row["SOURCE_ID"]))})
+
+# Plot
+pil = Image.open(args.in_jpg).convert("RGB")
+draw = ImageDraw.Draw(pil, "RGBA")
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 12)
+except OSError:
+    font = ImageFont.load_default()
+
+img_w, img_h = pil.size
+
+# Overlay our detections
+if args.detections:
+    det_rows = list(csv.DictReader(open(args.detections)))
+    det_rows.sort(key=lambda d: -float(d["flux"]))
+    for i, d in enumerate(det_rows[:30], 1):
+        cx_f = float(d["centroid_x"])
+        cy_f = float(d["centroid_y"])
+        cx, cy = to_image_coords(cx_f, cy_f)
+        if cx < 0 or cx > img_w or cy < 0 or cy > img_h:
+            continue
+        draw.ellipse([cx-4, cy-4, cx+4, cy+4],
+                     outline=(255, 80, 80, 255), width=2)
+        draw.text((cx + 5, cy + 4), f"d{i}",
+                  fill=(255, 80, 80, 255), font=font)
+
+plotted = 0
+for s in stars:
+    r_sky = 90 - s["dec"]
+    r_pix = r_sky * 3600 / args.plate_scale
+    theta_pix = s["ra"] + theta0
+    rad = math.radians(theta_pix)
+    full_x = pole_pixel[0] + sign_cos * r_pix * math.cos(rad)
+    full_y = pole_pixel[1] + r_pix * math.sin(rad)
+    x_img, y_img = to_image_coords(full_x, full_y)
+    if x_img < -50 or x_img > img_w + 50 or y_img < -50 or y_img > img_h + 50:
+        continue
+    if s["g"] < 1:
+        col = (255, 255, 255, 255)
+    elif s["g"] < 3:
+        col = (80, 255, 100, 255)
+    elif s["g"] < 4:
+        col = (255, 220, 80, 255)
+    elif s["g"] < 5:
+        col = (100, 200, 255, 255)
+    else:
+        col = (180, 180, 180, 200)
+    rad_px = max(4, 14 - int(s["g"] * 1.5))
+    draw.ellipse([x_img - rad_px, y_img - rad_px, x_img + rad_px, y_img + rad_px],
+                 outline=col, width=2)
+    lbl = "Capella" if s["id"] == "Capella" else f"G{s['g']:.1f}"
+    draw.text((x_img + rad_px + 2, y_img - rad_px), lbl, fill=col, font=font)
+    plotted += 1
+
+pil.save(args.out, quality=92)
+print(f"plotted {plotted} stars")
+print(f"wrote {args.out}")

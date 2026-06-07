@@ -1,0 +1,198 @@
+"""Generate a planetarium-style chart of the NW sky at obs time,
+oriented the same as our camera frame (zenith at bottom, pole top-right,
+east left, west right). Side by side with our whole-frame image."""
+import math
+import warnings
+import sys
+warnings.filterwarnings("ignore")
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.time import Time
+import astropy.units as u
+from astroquery.gaia import Gaia
+
+OBS_TIME = Time("2026-05-30T01:00:00", scale='utc')
+SITE = EarthLocation(lat=51.4*u.deg, lon=-0.3*u.deg)
+AA = AltAz(obstime=OBS_TIME, location=SITE)
+
+# Camera frame approximate field
+# Pole at top-right means we're looking N-NW
+# Zenith at bottom means camera tilts upward → north horizon at top
+# (Camera sensor mounted with up = north-horizon direction)
+# East left, west right (camera's left edge points to higher sky-east)
+
+# Let's render: sky stars in (azimuth, altitude) projected to a square,
+# with:
+#   azimuth axis: x = (azimuth - centre_az) → west at right, east at left
+#                 i.e. x increases with az going clockwise from north
+#   altitude axis: y = (90 - altitude) → zenith at bottom (alt=90 → y=0)
+#                  i.e. high altitude → low y (bottom)
+# Wait — image y INCREASES downward. So "zenith at bottom of image" means
+# zenith has LARGE y. → y = altitude (in some units)
+# And "east at left, west at right" means x increases west-ward.
+
+# So: rendering the SKY (looking up at it from below):
+#   x_chart = (az - centre_az_deg) * scale   # az=0 N, increases east-ish
+#   y_chart = altitude * scale (or similar so high alt = high y)
+# Wait, but "zenith at BOTTOM of image" means alt=90 is at high y (image bottom).
+# So y_chart = altitude * scale ... no wait, image y INCREASES going down.
+# Image bottom = high y. Zenith at image bottom → alt=90 maps to high y.
+# So y_chart = altitude_in_some_unit, and higher altitude = larger y.
+
+# But also our camera's "up" in image = camera's "north horizon"; if we
+# point straight north and have zenith at bottom, the image y axis runs
+# from north-horizon (top, y=0) to zenith (bottom, y=large).
+# So altitude maps to y as: y = (90 - altitude) * scale (inverted).
+# Wait: alt=0 (horizon) → y=0 (image top); alt=90 (zenith) → y=large (image bottom).
+# So y = altitude * scale. Larger altitude = larger y (further down image).
+
+CHART_W, CHART_H = 1296, 972
+# Camera looks: az_centre roughly 20° E of N = 20°? Or based on the
+# pole pixel at (714, 344) ~ centre-right, ~1/3 from top → that's
+# az_centre roughly N + some tilt east.
+
+# Cleaner: just make a sky chart that:
+#  - spans the NW sky from az=270° to az=360° (=0°), so the visible
+#    range is az 270..360.
+#  - spans altitude 5° to 70° vertically.
+
+AZ_MIN, AZ_MAX = 250, 50  # wraps through 360
+AZ_RANGE = (AZ_MAX - AZ_MIN) % 360  # = 160 if AZ_MAX>AZ_MIN else
+AZ_RANGE = (50 - 250) % 360  # = 160
+ALT_MIN, ALT_MAX = 5, 70
+
+def az_to_x(az):
+    """Map azimuth to chart x.  East left, west right.
+    az 0 = north (centre-ish), az 270 = west (right), az 90 = east (left)."""
+    # Shift so that az_min is at right edge (large x), az_max at left.
+    # WEST IS RIGHT means: az going clockwise (N→E→S→W) maps to x decreasing.
+    # So: x = (centre_az - az) % 360 (mod 360, going west-positive)
+    centre_az = (AZ_MIN + AZ_RANGE / 2) % 360  # = 250 + 80 = 330
+    # Difference in degrees from centre, with east positive (left)
+    delta = (az - centre_az + 540) % 360 - 180  # in [-180, 180]
+    # delta positive = east of centre, should map to LEFT (small x)
+    # delta negative = west of centre, should map to RIGHT (large x)
+    # So x = centre_chart - delta * scale
+    centre_x = CHART_W / 2
+    scale = CHART_W / AZ_RANGE
+    x = centre_x - delta * scale
+    return x
+
+def alt_to_y(alt):
+    """Map altitude to chart y. Zenith at bottom (alt 90 → large y)."""
+    # alt = ALT_MIN → y near 0 (top); alt = ALT_MAX → y near CHART_H (bottom).
+    if alt < ALT_MIN: return -1000
+    if alt > ALT_MAX: return CHART_H + 1000
+    return ((alt - ALT_MIN) / (ALT_MAX - ALT_MIN)) * CHART_H
+
+# Query Gaia bright stars in the field
+print("Querying Gaia for bright stars at NW azimuths...")
+# Get all G<5 across northern sky
+q = """SELECT TOP 500 SOURCE_ID, ra, dec, phot_g_mean_mag
+FROM gaiadr3.gaia_source
+WHERE dec > 30
+AND phot_g_mean_mag <= 5.0
+ORDER BY phot_g_mean_mag ASC"""
+r = Gaia.launch_job(q).get_results()
+print(f"got {len(r)} stars")
+
+# Plus named bright ones
+named = [
+    ("Polaris", 37.9546, 89.2643, 1.97),
+    ("Kochab", 222.6764, 74.1554, 2.06),
+    ("Pherkad", 230.182, 71.8336, 3.05),
+    ("Alioth", 193.507, 55.9598, 1.76),
+    ("Mizar", 200.981, 54.9255, 2.27),
+    ("Alkaid", 206.886, 49.3133, 1.86),
+    ("Dubhe", 165.932, 61.7511, 1.81),
+    ("Merak", 165.460, 56.3824, 2.34),
+    ("Megrez", 183.857, 57.0326, 3.31),
+    ("Phecda", 178.458, 53.6948, 2.41),
+]
+stars = []
+for row in r:
+    stars.append({"name": "", "ra": float(row['ra']), "dec": float(row['dec']),
+                  "g": float(row['phot_g_mean_mag'])})
+for name, ra, dec, mag in named:
+    if not any(abs(s['ra']-ra)<0.01 for s in stars):
+        stars.append({"name": name, "ra": ra, "dec": dec, "g": mag})
+    else:
+        # Update name
+        for s in stars:
+            if abs(s['ra']-ra)<0.01 and abs(s['dec']-dec)<0.01:
+                s['name'] = name
+                break
+
+# Convert each to alt/az and chart x,y
+chart_stars = []
+for s in stars:
+    sc = SkyCoord(s['ra']*u.deg, s['dec']*u.deg, frame='icrs')
+    p = sc.transform_to(AA)
+    alt, az = p.alt.deg, p.az.deg
+    if alt < ALT_MIN or alt > ALT_MAX:
+        continue
+    # Is az in our range? Az wraps: range is 250..360..50
+    az_in_range = (az >= 250) or (az <= 50)
+    if not az_in_range:
+        continue
+    x = az_to_x(az)
+    y = alt_to_y(alt)
+    chart_stars.append({**s, "alt": alt, "az": az, "x": x, "y": y})
+
+# Make the chart
+chart = Image.new("RGB", (CHART_W, CHART_H), color=(8, 12, 25))
+draw = ImageDraw.Draw(chart, "RGBA")
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 14)
+    font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 18)
+except OSError:
+    font = font_lg = ImageFont.load_default()
+
+# Grid lines
+for az in [270, 300, 330, 360, 30]:
+    x = az_to_x(az)
+    if 0 < x < CHART_W:
+        draw.line([(x, 0), (x, CHART_H)], fill=(40, 40, 60), width=1)
+        label = "N" if az == 360 else f"{az if az<=360 else az-360}°"
+        if az == 360: label = "N"
+        elif az == 270: label = "W"
+        elif az == 90 or az == 30 or az == 60: label = f"NE {az}°"
+        elif az < 90: label = f"NE {az}°"
+        else: label = f"NW {az}°"
+        draw.text((x+5, 10), label, fill=(120, 120, 160), font=font)
+
+for alt in [10, 20, 30, 40, 50, 60]:
+    y = alt_to_y(alt)
+    draw.line([(0, y), (CHART_W, y)], fill=(40, 40, 60), width=1)
+    draw.text((10, y-15), f"alt {alt}°", fill=(120, 120, 160), font=font)
+
+# Plot stars
+for s in sorted(chart_stars, key=lambda s: s['g']):
+    g = s['g']
+    if g < 1.5:
+        rad = 14; col = (255, 255, 255)
+    elif g < 2.5:
+        rad = 11; col = (255, 240, 200)
+    elif g < 3.5:
+        rad = 8; col = (220, 220, 240)
+    elif g < 4.5:
+        rad = 5; col = (180, 180, 220)
+    else:
+        rad = 3; col = (140, 140, 200)
+    draw.ellipse([s['x']-rad, s['y']-rad, s['x']+rad, s['y']+rad],
+                 fill=col)
+    if s['name']:
+        draw.text((s['x']+rad+3, s['y']-rad), s['name'],
+                  fill=(255, 220, 100), font=font_lg)
+    elif g < 3:
+        draw.text((s['x']+rad+3, s['y']-rad), f"G{g:.1f}",
+                  fill=(180, 180, 180), font=font)
+
+# Title
+draw.text((10, CHART_H-30),
+          f"NW sky 2026-05-30 01:00 UTC from Surbiton (zenith at BOTTOM, east LEFT, west RIGHT)",
+          fill=(255, 255, 255), font=font_lg)
+
+chart.save("/home/peter/tmp/cam-grab/sky-chart-NW.jpg", quality=92)
+print("wrote /home/peter/tmp/cam-grab/sky-chart-NW.jpg")

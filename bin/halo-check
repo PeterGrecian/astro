@@ -1,0 +1,49 @@
+import csv, math
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+
+pil = Image.open("/home/peter/tmp/cam-grab/A5-tilecrop-3x.jpg").convert("RGB")
+draw = ImageDraw.Draw(pil, "RGBA")
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 14)
+except OSError:
+    font = ImageFont.load_default()
+
+# A5 crop offset
+OX, OY = 0, 648
+SCALE = 3
+
+dets = list(csv.DictReader(open("/home/peter/tmp/cam-grab/A5-dense2.csv")))
+dets.sort(key=lambda d: -float(d["flux"]))
+
+# Detection 1 (Capella) position in image coords
+d1_full_x, d1_full_y = float(dets[0]["centroid_x"]), float(dets[0]["centroid_y"])
+d1_img_x = (d1_full_x - OX) * SCALE
+d1_img_y = (d1_full_y - OY) * SCALE
+
+for i, d in enumerate(dets[:15], 1):
+    x_full, y_full = float(d["centroid_x"]), float(d["centroid_y"])
+    x_img = (x_full - OX) * SCALE
+    y_img = (y_full - OY) * SCALE
+    flux = float(d["flux"])
+    if i == 1:
+        col = (255,255,255,255)
+        rad = 10
+    elif i <= 5:
+        col = (100, 255, 255, 255)  # cyan for d2-d5
+        rad = 8
+    else:
+        col = (255, 150, 150, 200)
+        rad = 6
+    draw.ellipse([x_img-rad, y_img-rad, x_img+rad, y_img+rad], outline=col, width=2)
+    if i == 1:
+        lbl = "Capella d1"
+    else:
+        lbl = f"d{i}"
+    draw.text((x_img + rad + 2, y_img - rad), lbl, fill=col, font=font)
+    # Draw a faint line from d1 to d2-d5
+    if 2 <= i <= 5:
+        draw.line([d1_img_x, d1_img_y, x_img, y_img], fill=(100, 255, 255, 150), width=1)
+
+pil.save("/home/peter/tmp/cam-grab/A5-halo-check.jpg", quality=92)
+print("wrote /home/peter/tmp/cam-grab/A5-halo-check.jpg")

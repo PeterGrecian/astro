@@ -1,5 +1,8 @@
 # astro — TODO
 
+see TODO_fit.MD for matching to catalog (parked 2026-06-07; orientation
+not yet confirmed by visual side-by-side).
+
 rain detector.  suggested that 10k pull up from GPIO and tinned veroboard.  
 
 periodically review the relationship between these repos:

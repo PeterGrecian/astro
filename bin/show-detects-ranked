@@ -1,0 +1,11 @@
+"""Print detections numbered #1..#N by flux desc."""
+import csv, sys
+rows = list(csv.DictReader(open(sys.argv[1])))
+rows.sort(key=lambda r: -float(r["flux"]))
+print(f"{'#':>3} {'centroid_x':>10} {'centroid_y':>10} {'flux':>10} "
+      f"{'snr':>6} {'fwhm':>5} {'ecc':>5} {'tsharp':>6} {'peak':>9}")
+for i, r in enumerate(rows, 1):
+    print(f"#{i:<2d} {float(r['centroid_x']):>10.2f} {float(r['centroid_y']):>10.2f} "
+          f"{float(r['flux']):>10.0f} {float(r['snr']):>6.1f} "
+          f"{float(r['fwhm_mean']):>5.2f} {float(r['eccentricity']):>5.2f} "
+          f"{float(r['tangent_sharpness']):>6.2f} {float(r['peak_counts']):>9.0f}")

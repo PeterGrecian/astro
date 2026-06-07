@@ -1,0 +1,98 @@
+"""Test whether d2, d3, d4 form a recognizable star pattern with d1=Capella.
+
+For each combination of 3 Gaia stars near Capella, compute the
+"relative geometry signature":
+  - distances from anchor (d1) to each of the 3 stars
+  - distances between the 3 stars
+  - angles (relative to the anchor's local frame)
+
+And compare to our measurement of d2, d3, d4 relative to d1.
+
+Use distance-only (scale + rotation invariant) first — that's the most
+robust. Then refine with angles.
+"""
+import math
+import warnings
+import itertools
+warnings.filterwarnings("ignore")
+from astroquery.gaia import Gaia
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+
+# Our detections
+DETS = {
+    1: (15.46, 683.21, 5138531, "Capella"),
+    2: (115.76, 762.28, 699838, None),
+    3: (131.93, 741.09, 411796, None),
+    4: (125.50, 674.32, 198631, None),
+    5: (129.07, 666.65, 140889, None),
+}
+
+# Relative positions of d2, d3, d4, d5 from d1=Capella, in pixels
+relative_pix = {}
+for k, (x, y, flux, name) in DETS.items():
+    if k == 1: continue
+    dx = x - DETS[1][0]
+    dy = y - DETS[1][1]
+    r = math.hypot(dx, dy)
+    relative_pix[k] = (dx, dy, r, flux)
+    print(f"d{k}: relative pixel offset ({dx:+.1f}, {dy:+.1f}), "
+          f"r={r:.1f} px, flux={flux}")
+
+# Get all bright stars within 8° of Capella
+CAPELLA = SkyCoord(79.1722*u.deg, 45.998*u.deg, frame='icrs')
+q = f"""SELECT TOP 200 SOURCE_ID, ra, dec, phot_g_mean_mag
+FROM gaiadr3.gaia_source
+WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 79.1722, 45.998, 8))
+AND phot_g_mean_mag <= 6
+ORDER BY phot_g_mean_mag ASC"""
+r = Gaia.launch_job(q).get_results()
+print(f"\n{len(r)} bright stars (G≤6) within 8° of Capella")
+
+# Convert each to (sky_d_from_Capella, position_angle, G)
+gaia_stars = []
+for row in r:
+    s = SkyCoord(row['ra']*u.deg, row['dec']*u.deg, frame='icrs')
+    sky_d_deg = CAPELLA.separation(s).deg
+    pa_deg = CAPELLA.position_angle(s).to(u.deg).value
+    gaia_stars.append({
+        "id": int(row["SOURCE_ID"]),
+        "ra": float(row["ra"]),
+        "dec": float(row["dec"]),
+        "g": float(row["phot_g_mean_mag"]),
+        "sky_d": sky_d_deg,
+        "pa": pa_deg,
+    })
+
+# How many bright stars at each radius?
+print(f"\nGaia bright stars sorted by sky_d from Capella:")
+for s in sorted(gaia_stars, key=lambda s: s["sky_d"])[:30]:
+    print(f"  G={s['g']:5.2f}  sky_d={s['sky_d']:.3f}°  PA={s['pa']:6.2f}°  "
+          f"RA={s['ra']:7.3f}  Dec={s['dec']:6.3f}")
+
+# Now: for our d2, the predicted sky_d (using plate scale 156.6") is
+# 127.7 px × 156.6"/3600° = 5.55°. We expect a Gaia star at ~5.55° from
+# Capella with the right brightness rank.
+# But the plate scale at A5's CORNER may not be 156.6 — could be more or
+# less. So scan a range of plate scales.
+
+print("\n=== Scan plate scales: best match for each detection ===")
+for det_id in [2, 3, 4, 5]:
+    dx, dy, r_pix, flux = relative_pix[det_id]
+    print(f"\n--- d{det_id} (r_pix={r_pix:.1f}, flux={flux}) ---")
+    print(f"{'plate':>7} {'r_sky':>7} {'best_G':>7} {'sky_d':>7} {'PA_diff':>8}")
+    # for each plate scale, find the brightest star at the right radius
+    for plate in [120, 130, 140, 150, 156.6, 165, 175, 185, 200]:
+        r_sky_deg = r_pix * plate / 3600
+        # find brightest within 0.5° of this r_sky
+        cands = [s for s in gaia_stars
+                 if abs(s["sky_d"] - r_sky_deg) < 0.5]
+        if not cands:
+            continue
+        cands.sort(key=lambda s: s["g"])
+        c = cands[0]
+        # also compute angle in image from d1 to det
+        img_angle_rad = math.atan2(dy, dx)
+        img_angle_deg = math.degrees(img_angle_rad)
+        print(f"{plate:>7.1f} {r_sky_deg:>7.3f} {c['g']:>7.2f} "
+              f"{c['sky_d']:>7.3f} {c['pa']:>8.2f}")
