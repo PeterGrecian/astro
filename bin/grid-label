@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Auto-stretched JPG with a labelled grid overlay for cell-rejection inspection."""
+import argparse
+from pathlib import Path
+import numpy as np
+from astropy.io import fits
+from PIL import Image, ImageDraw, ImageFont
+
+ap = argparse.ArgumentParser()
+ap.add_argument("input")
+ap.add_argument("output")
+ap.add_argument("--cols", type=int, default=8)
+ap.add_argument("--rows", type=int, default=6)
+ap.add_argument("--stretch-lo", type=float, default=2.0, help="percentile for black")
+ap.add_argument("--stretch-hi", type=float, default=99.5, help="percentile for white")
+args = ap.parse_args()
+
+with fits.open(args.input) as h:
+    for hdu in h:
+        if hdu.data is not None and hdu.data.ndim == 2:
+            data = hdu.data
+            break
+    else:
+        raise SystemExit("no 2D image")
+print(f"loaded {data.shape} {data.dtype} min={data.min()} max={data.max()} mean={data.mean():.1f}")
+
+# Auto-stretch via percentile
+lo = np.percentile(data, args.stretch_lo)
+hi = np.percentile(data, args.stretch_hi)
+print(f"stretch lo={lo:.1f} hi={hi:.1f}")
+img = np.clip((data - lo) / (hi - lo + 1e-9), 0, 1)
+img8 = (img * 255).astype(np.uint8)
+
+# Upscale 2x so labels are readable
+pil = Image.fromarray(img8, mode="L").convert("RGB")
+W, H = pil.size
+SCALE = 2
+pil = pil.resize((W * SCALE, H * SCALE), Image.NEAREST)
+
+draw = ImageDraw.Draw(pil)
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 22)
+except OSError:
+    font = ImageFont.load_default()
+
+cw = W * SCALE / args.cols
+rh = H * SCALE / args.rows
+
+# Grid lines
+grid_color = (255, 255, 0)
+for c in range(1, args.cols):
+    x = int(c * cw)
+    draw.line([(x, 0), (x, H * SCALE)], fill=grid_color, width=1)
+for r in range(1, args.rows):
+    y = int(r * rh)
+    draw.line([(0, y), (W * SCALE, y)], fill=grid_color, width=1)
+
+# Labels: A1 .. H6 (col letter, row number) top-left of each cell
+for r in range(args.rows):
+    for c in range(args.cols):
+        label = f"{chr(ord('A')+c)}{r+1}"
+        x = int(c * cw + 6)
+        y = int(r * rh + 6)
+        # Black backing rectangle for legibility
+        bbox = draw.textbbox((x, y), label, font=font)
+        draw.rectangle(bbox, fill=(0, 0, 0))
+        draw.text((x, y), label, fill=(255, 255, 0), font=font)
+
+pil.save(args.output, quality=92)
+print(f"wrote {args.output}")

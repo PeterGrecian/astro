@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""derot-windows — chained derot-stacks over an hour at a stipulated pole.
+
+Divide the input frames into consecutive windows of W frames each.
+For each window, derot every frame to that window's frame-0 reference
+about the stipulated pole, sum, and emit a FITS + JPG stack.
+
+Also emit a manifest CSV with per-window metadata:
+  window, frame_first, frame_last, epoch_ms_first, epoch_ms_last,
+  angle_first_deg, angle_last_deg
+
+  angle_first_deg is the angle (relative to the FIRST frame of WINDOW 0)
+  at which that window's reference frame sits. Chaining candidates
+  across windows means rotating from window-N's coords to window-(N+1)'s
+  coords by (angle_first[N+1] - angle_first[N]) about the stipulated
+  pole.
+
+Output is identical in shape (HxW image) to the input — no cropping —
+so candidate positions are directly comparable between windows.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+
+def load_frame(path: Path) -> tuple[np.ndarray, int | None]:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def derotate(img: np.ndarray, pole: tuple[float, float],
+             angle_deg: float) -> np.ndarray:
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def save_jpg(stack: np.ndarray, path: Path) -> None:
+    lo, hi = np.percentile(stack, [2, 99.5])
+    if hi <= lo:
+        hi = lo + 1.0
+    u8 = np.clip((stack - lo) / (hi - lo), 0, 1) * 255
+    Image.fromarray(u8.astype(np.uint8)).save(path, quality=92)
+
+
+def save_fits(stack: np.ndarray, path: Path, meta: dict) -> None:
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=stack.astype(np.int32),
+                             compression_type="RICE_1")
+    for k, v in meta.items():
+        comp.header[k] = v
+    fits.HDUList([primary, comp]).writeto(path, overwrite=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path, help="binned frames dir")
+    ap.add_argument("--start", type=int, default=1,
+                    help="first frame number")
+    ap.add_argument("--n-frames", type=int, default=None,
+                    help="total frames to consume; default all from --start")
+    ap.add_argument("--window", type=int, default=50,
+                    help="frames per stack window")
+    ap.add_argument("--pole-x", type=float, required=True)
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--omega", type=float, default=-0.000219,
+                    help="rotation rate (rad/frame); sign matches camera")
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name.split(".")[0].isdigit()
+           and int(f.name.split(".")[0]) >= args.start]
+    if args.n_frames is not None:
+        fns = fns[:args.n_frames]
+    if len(fns) < args.window:
+        print(f"not enough frames ({len(fns)}) for window {args.window}",
+              file=sys.stderr)
+        return 1
+    n_windows = len(fns) // args.window
+    fns = fns[:n_windows * args.window]
+    print(f"{len(fns)} frames → {n_windows} windows of {args.window}")
+
+    pole = (args.pole_x, args.pole_y)
+    args.out.mkdir(parents=True, exist_ok=True)
+
+    # We need all EPOCH_MS so we can compute angles relative to WINDOW 0's
+    # first frame, for inter-window chaining.
+    print("loading EPOCH_MS...")
+    epochs: list[int | None] = []
+    for fn in fns:
+        with fits.open(fn, memmap=True) as h:
+            for hdu in h:
+                if hdu.data is not None and hdu.data.ndim == 2:
+                    ep = hdu.header.get("EPOCH_MS")
+                    epochs.append(int(ep) if ep is not None else None)
+                    break
+    if any(e is None for e in epochs):
+        print("  warn: some frames lack EPOCH_MS — falling back to "
+              "frame-index time model", file=sys.stderr)
+        e0_global = 0
+        def angle_at(i):  # type: ignore[no-redef]
+            return float(np.degrees(i * args.omega))
+    else:
+        e0_global = epochs[0]
+        def angle_at(i):
+            return float(np.degrees(((epochs[i] - e0_global) / 3000.0)
+                                    * args.omega))
+
+    manifest_rows = []
+    for win in range(n_windows):
+        i0 = win * args.window
+        i_last = i0 + args.window - 1
+        # Window-reference angle = angle of this window's frame 0 in the
+        # global reference. Stacks are derotated TO this reference.
+        ang_ref = angle_at(i0)
+        stack = None
+        for off in range(args.window):
+            i = i0 + off
+            data, _ = load_frame(fns[i])
+            # Angle to derot frame i back to window-ref (=i0):
+            ang_i = angle_at(i) - ang_ref
+            derot = derotate(data, pole, ang_i)
+            stack = derot if stack is None else stack + derot
+        assert stack is not None
+        fname_first = fns[i0].name
+        fname_last = fns[i_last].name
+        ep_first = epochs[i0] if epochs[i0] is not None else 0
+        ep_last = epochs[i_last] if epochs[i_last] is not None else 0
+        wname = f"w{win:03d}"
+        save_fits(stack, args.out / f"{wname}.fits.fz",
+                  {"WINDOW": win,
+                   "FRAMEFST": fname_first,
+                   "FRAMELST": fname_last,
+                   "POLEX": args.pole_x, "POLEY": args.pole_y,
+                   "OMEGA": args.omega,
+                   "ANGREFD": ang_ref,
+                   "EPMSFST": ep_first, "EPMSLST": ep_last})
+        save_jpg(stack, args.out / f"{wname}.jpg")
+        manifest_rows.append({
+            "window": win,
+            "frame_first": fname_first,
+            "frame_last": fname_last,
+            "epoch_ms_first": ep_first,
+            "epoch_ms_last": ep_last,
+            "angle_ref_deg": ang_ref,
+            "angle_last_deg": angle_at(i_last),
+        })
+        if (win + 1) % 5 == 0 or win == n_windows - 1:
+            print(f"  [{win+1}/{n_windows}] {wname} "
+                  f"ang_ref={ang_ref:.4f}°  "
+                  f"max={float(stack.max()):.0f} mean={float(stack.mean()):.1f}",
+                  flush=True)
+
+    manifest = args.out / "manifest.csv"
+    with open(manifest, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "window", "frame_first", "frame_last",
+            "epoch_ms_first", "epoch_ms_last",
+            "angle_ref_deg", "angle_last_deg"])
+        w.writeheader()
+        for row in manifest_rows:
+            w.writerow(row)
+    print(f"\nwrote manifest → {manifest}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

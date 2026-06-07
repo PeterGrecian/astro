@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""fit-tile-poles — local pole per tile from chained candidate residuals.
+
+Reads chain-tracks output. For each tile with ≥1 candidate, fits a
+local effective pole by minimising the sum of squared residuals
+across all that tile's (candidate, window) pairs.
+
+For each (candidate, window) record, the prediction is:
+    pred = rotate(seed_xy, local_pole, d_angle_to_window)
+where seed_xy is the candidate's actual position in window 0 and
+d_angle is the rotation angle from window 0's reference to this
+window's reference.
+
+The unknown is the local_pole (x, y). We use Nelder-Mead.
+
+Output:
+  tile-poles.csv:
+    tile, n_candidates, n_observations,
+    local_pole_x, local_pole_y, dpole_x, dpole_y, dpole,
+    rms_resid_before, rms_resid_after, rms_improvement
+  vectors.txt:
+    human-readable description of the distortion field
+
+Compare with global "stipulated" pole supplied to chain-tracks.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import numpy as np
+from scipy.optimize import minimize
+
+
+def rotate_point(x: float, y: float, pole_x: float, pole_y: float,
+                 angle_deg: float) -> tuple[float, float]:
+    rad = np.deg2rad(angle_deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dx, dy = x - pole_x, y - pole_y
+    return pole_x + c * dx - s * dy, pole_y + s * dx + c * dy
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("chains_dir", type=Path,
+                    help="directory produced by chain-tracks")
+    ap.add_argument("--windows-dir", type=Path, required=True,
+                    help="derot-windows output dir (for manifest angles)")
+    ap.add_argument("--pole-x", type=float, required=True,
+                    help="stipulated pole used by chain-tracks")
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--min-candidates", type=int, default=1,
+                    help="skip tiles with fewer candidates")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output dir; defaults to chains_dir")
+    args = ap.parse_args()
+
+    out = args.out or args.chains_dir
+    out.mkdir(parents=True, exist_ok=True)
+
+    # Load manifest angles.
+    manifest = list(csv.DictReader(open(args.windows_dir / "manifest.csv")))
+    angles_rel = {int(r["window"]): float(r["angle_ref_deg"])
+                  for r in manifest}
+
+    # Load candidates.csv → group by tile.
+    cands = list(csv.DictReader(open(args.chains_dir / "candidates.csv")))
+    print(f"loaded {len(cands)} (candidate, window) records")
+
+    # Build per-tile observations.
+    by_tile: dict[str, list[dict]] = {}
+    seed_xy: dict[int, tuple[float, float]] = {}
+    cand_tile: dict[int, str] = {}
+    for r in cands:
+        cid = int(r["candidate_id"])
+        tile = r["tile"]
+        cand_tile[cid] = tile
+        if int(r["window"]) == 0:
+            seed_xy[cid] = (float(r["act_x"]), float(r["act_y"]))
+        by_tile.setdefault(tile, []).append(r)
+
+    stipulated = (args.pole_x, args.pole_y)
+    rows = []
+    print(f"\n{'tile':>5} {'cand':>4} {'obs':>4} "
+          f"{'pole_x':>9} {'pole_y':>9} "
+          f"{'Δx':>7} {'Δy':>7} {'Δ':>6} "
+          f"{'rms_before':>10} {'rms_after':>9}")
+    for tile, observations in sorted(by_tile.items()):
+        cands_in_tile = {int(r["candidate_id"]) for r in observations}
+        if len(cands_in_tile) < args.min_candidates:
+            continue
+
+        # Build prediction-error objective: sum of squared residuals
+        # when predicting (act_x, act_y) by rotating that candidate's
+        # seed about the trial pole through the window's angle.
+        # Variable: (pole_x, pole_y).
+        obs_data = []
+        for r in observations:
+            cid = int(r["candidate_id"])
+            w = int(r["window"])
+            seed = seed_xy[cid]
+            ang = angles_rel[w]
+            ax, ay = float(r["act_x"]), float(r["act_y"])
+            obs_data.append((seed[0], seed[1], ang, ax, ay))
+
+        def sse(p):
+            px, py = float(p[0]), float(p[1])
+            total = 0.0
+            for sx, sy, ang, ax, ay in obs_data:
+                pxp, pyp = rotate_point(sx, sy, px, py, ang)
+                total += (ax - pxp) ** 2 + (ay - pyp) ** 2
+            return total
+
+        # Baseline residual at stipulated pole.
+        sse_before = sse([stipulated[0], stipulated[1]])
+        rms_before = float(np.sqrt(sse_before / max(1, len(obs_data))))
+
+        # Optimise.
+        res = minimize(sse, x0=[stipulated[0], stipulated[1]],
+                       method="Nelder-Mead",
+                       options={"xatol": 0.05, "fatol": 0.01, "maxiter": 500})
+        pole = (float(res.x[0]), float(res.x[1]))
+        rms_after = float(np.sqrt(res.fun / max(1, len(obs_data))))
+        dx = pole[0] - stipulated[0]
+        dy = pole[1] - stipulated[1]
+        d = float(np.hypot(dx, dy))
+        print(f"{tile:>5} {len(cands_in_tile):>4d} {len(obs_data):>4d} "
+              f"{pole[0]:>9.2f} {pole[1]:>9.2f} "
+              f"{dx:>7.2f} {dy:>7.2f} {d:>6.2f} "
+              f"{rms_before:>10.3f} {rms_after:>9.3f}")
+        rows.append({
+            "tile": tile,
+            "n_candidates": len(cands_in_tile),
+            "n_observations": len(obs_data),
+            "local_pole_x": pole[0],
+            "local_pole_y": pole[1],
+            "dpole_x": dx,
+            "dpole_y": dy,
+            "dpole": d,
+            "rms_resid_before": rms_before,
+            "rms_resid_after": rms_after,
+            "rms_improvement": rms_before - rms_after,
+        })
+
+    out_csv = out / "tile-poles.csv"
+    with open(out_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "tile", "n_candidates", "n_observations",
+            "local_pole_x", "local_pole_y",
+            "dpole_x", "dpole_y", "dpole",
+            "rms_resid_before", "rms_resid_after", "rms_improvement"])
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    print(f"\nwrote {out_csv}")
+
+    # Stats.
+    if rows:
+        ds = [r["dpole"] for r in rows]
+        print(f"\nlocal pole spread: median Δ from stipulated = "
+              f"{float(np.median(ds)):.2f} px, "
+              f"max = {max(ds):.2f} px")
+        rms_imp = [r["rms_improvement"] for r in rows]
+        print(f"median RMS-residual improvement = "
+              f"{float(np.median(rms_imp)):.3f} px")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

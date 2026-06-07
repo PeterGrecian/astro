@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Plot per-tile local-pole RESIDUALS from a global mean.
+
+Same vector-overlay style as plot-distortion.py, but vectors are
+(local_pole - global_mean) for each tile. Vectors near zero mean
+the pole is right for that tile; non-zero vectors are residual
+distortion / measurement error.
+"""
+import csv
+import sys
+from pathlib import Path
+import numpy as np
+from astropy.io import fits
+from PIL import Image, ImageDraw, ImageFont
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+if len(sys.argv) < 6:
+    print("usage: plot-residuals.py <w0.fits.fz> <tile-poles.csv> "
+          "<mean_x> <mean_y> <out.jpg> [scale]")
+    sys.exit(1)
+
+w0_path = Path(sys.argv[1])
+poles_csv = Path(sys.argv[2])
+mean_x = float(sys.argv[3])
+mean_y = float(sys.argv[4])
+out_path = Path(sys.argv[5])
+scale = float(sys.argv[6]) if len(sys.argv) > 6 else 6.0
+
+with fits.open(w0_path) as h:
+    for hdu in h:
+        if hdu.data is not None and hdu.data.ndim == 2:
+            data = hdu.data.astype(np.float32)
+            break
+H, W = data.shape
+
+lo = np.percentile(data, 5)
+hi = np.percentile(data, 99.7)
+img = np.clip((data - lo) / (hi - lo + 1e-9), 0, 1)
+img8 = (img * 255).astype(np.uint8)
+pil = Image.fromarray(img8, mode="L").convert("RGB")
+
+arr = np.array(pil).astype(np.float32) * 0.45 + 25
+pil = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+
+SCALE = 2
+pil = pil.resize((W * SCALE, H * SCALE), Image.NEAREST)
+draw = ImageDraw.Draw(pil, "RGBA")
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 16)
+    font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 20)
+except OSError:
+    font = font_big = ImageFont.load_default()
+
+cw = W * SCALE / GRID_COLS
+rh = H * SCALE / GRID_ROWS
+
+for c in range(1, GRID_COLS):
+    x = int(c * cw)
+    draw.line([(x, 0), (x, H * SCALE)], fill=(70, 70, 70, 200), width=1)
+for r in range(1, GRID_ROWS):
+    y = int(r * rh)
+    draw.line([(0, y), (W * SCALE, y)], fill=(70, 70, 70, 200), width=1)
+
+rows = list(csv.DictReader(open(poles_csv)))
+print(f"loaded {len(rows)} tiles")
+print(f"global mean pole: ({mean_x:.2f}, {mean_y:.2f})")
+print(f"vector scale: {scale}× (arrows show local_pole - global_mean)")
+
+for r in rows:
+    tile = r["tile"]
+    col = ord(tile[0].upper()) - ord("A")
+    row = int(tile[1:]) - 1
+    cx = int((col + 0.5) * cw)
+    cy = int((row + 0.5) * rh)
+    px = float(r["local_pole_x"])
+    py = float(r["local_pole_y"])
+    rms = float(r["rms_resid_after"])
+    rdx = px - mean_x  # residual from mean
+    rdy = py - mean_y
+    rd = float(np.hypot(rdx, rdy))
+    ex = cx + int(rdx * scale * SCALE)
+    ey = cy + int(rdy * scale * SCALE)
+    if rms < 1.0:
+        col_rgb = (50, 255, 100, 255)
+    elif rms < 3.0:
+        col_rgb = (255, 200, 80, 255)
+    else:
+        col_rgb = (255, 90, 90, 255)
+    draw.line([(cx, cy), (ex, ey)], fill=col_rgb, width=3)
+    head_len = 10
+    ang = np.arctan2(ey - cy, ex - cx)
+    for sign in (-1, 1):
+        a = ang + sign * np.deg2rad(30)
+        hx = ex - head_len * np.cos(a)
+        hy = ey - head_len * np.sin(a)
+        draw.line([(ex, ey), (hx, hy)], fill=col_rgb, width=3)
+    draw.ellipse([cx-3, cy-3, cx+3, cy+3], fill=col_rgb)
+    label = f"{tile}"
+    lx, ly = int(col * cw + 5), int(row * rh + 5)
+    bbox = draw.textbbox((lx, ly), label, font=font)
+    draw.rectangle(bbox, fill=(0, 0, 0))
+    draw.text((lx, ly), label, fill=col_rgb, font=font)
+    detail = f"r{rd:.0f} σ{rms:.1f}"
+    dy_off = bbox[3] - ly + 2
+    bbox2 = draw.textbbox((lx, ly + dy_off), detail, font=font)
+    draw.rectangle(bbox2, fill=(0, 0, 0))
+    draw.text((lx, ly + dy_off), detail, fill=col_rgb, font=font)
+
+title = (f"residuals from global mean pole ({mean_x:.1f}, {mean_y:.1f}); "
+         f"vector × {scale}; green<1px amber<3px red≥3px")
+bbox = draw.textbbox((10, H * SCALE - 30), title, font=font_big)
+draw.rectangle(bbox, fill=(0, 0, 0, 220))
+draw.text((10, H * SCALE - 30), title, fill=(255, 255, 255), font=font_big)
+
+pil.save(out_path, quality=92)
+print(f"wrote {out_path}")

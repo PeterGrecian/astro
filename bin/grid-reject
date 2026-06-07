@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Overlay grid with rejected cells dimmed."""
+import argparse
+from pathlib import Path
+import numpy as np
+from astropy.io import fits
+from PIL import Image, ImageDraw, ImageFont
+
+ap = argparse.ArgumentParser()
+ap.add_argument("input")
+ap.add_argument("output")
+ap.add_argument("--cols", type=int, default=8)
+ap.add_argument("--rows", type=int, default=6)
+ap.add_argument("--reject", default="", help="comma-list e.g. A1,A2,H1,...")
+args = ap.parse_args()
+
+reject = {r.strip().upper() for r in args.reject.split(",") if r.strip()}
+
+with fits.open(args.input) as h:
+    for hdu in h:
+        if hdu.data is not None and hdu.data.ndim == 2:
+            data = hdu.data
+            break
+lo = np.percentile(data, 2.0)
+hi = np.percentile(data, 99.5)
+img = np.clip((data - lo) / (hi - lo + 1e-9), 0, 1)
+img8 = (img * 255).astype(np.uint8)
+
+pil = Image.fromarray(img8, mode="L").convert("RGB")
+W, H = pil.size
+SCALE = 2
+pil = pil.resize((W * SCALE, H * SCALE), Image.NEAREST)
+draw = ImageDraw.Draw(pil, "RGBA")
+try:
+    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 22)
+except OSError:
+    font = ImageFont.load_default()
+
+cw = W * SCALE / args.cols
+rh = H * SCALE / args.rows
+
+# Red wash over rejected cells
+for r in range(args.rows):
+    for c in range(args.cols):
+        label = f"{chr(ord('A')+c)}{r+1}"
+        x0, y0 = int(c * cw), int(r * rh)
+        x1, y1 = int((c + 1) * cw), int((r + 1) * rh)
+        if label in reject:
+            draw.rectangle([x0, y0, x1, y1], fill=(255, 0, 0, 110))
+
+# Grid lines
+for c in range(1, args.cols):
+    x = int(c * cw)
+    draw.line([(x, 0), (x, H * SCALE)], fill=(255, 255, 0), width=1)
+for r in range(1, args.rows):
+    y = int(r * rh)
+    draw.line([(0, y), (W * SCALE, y)], fill=(255, 255, 0), width=1)
+
+# Labels
+for r in range(args.rows):
+    for c in range(args.cols):
+        label = f"{chr(ord('A')+c)}{r+1}"
+        x = int(c * cw + 6)
+        y = int(r * rh + 6)
+        bbox = draw.textbbox((x, y), label, font=font)
+        draw.rectangle(bbox, fill=(0, 0, 0))
+        color = (255, 80, 80) if label in reject else (255, 255, 0)
+        draw.text((x, y), label, fill=color, font=font)
+
+pil.save(args.output, quality=92)
+print(f"wrote {args.output}, rejected {len(reject)} cells: {sorted(reject)}")

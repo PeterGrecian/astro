@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""detect-stars — per-tile star detection with centroids + flux.
+
+ISOTROPIC detector: assumes a roughly circular PSF and uses an
+elliptical 2D Gaussian fit plus a CIRCULAR aperture for photometry.
+Suitable for derot-stacks where the pole was approximately correct
+(so star PSFs are round); will under-perform when the per-tile pole
+is enough off-axis that stars are streaked along their tangents.
+
+For streaked / off-pole derots see detect-stars-tangential (TODO),
+which fits an elliptical PSF aligned with the local tangent direction
+about a given pole — that one also doubles as a hot-pixel-arc rejector.
+
+Operates on a single derot-stack (FITS, output of fit-tile-pole-tangent
+or similar). For one specified tile region, finds all local maxima above
+a sky+sigma threshold, then for each candidate measures:
+
+  - centroid (sub-pixel, intensity-weighted within a small box)
+  - flux (aperture, sky-subtracted)
+  - PSF FWHM and eccentricity from a 2D Gaussian fit
+  - tangent-direction sharpness (cf. fit-tile-pole-tangent)
+  - position and flux uncertainties
+
+Writes one detections.csv row per accepted candidate. Provenance fields
+(night, hour, tile, pole, n_frames, dates) are stamped on every row.
+
+The intent is that calling this across many (night × hour × tile)
+combinations builds up our raw detection catalog — the building block
+of a future cross-night star catalog and Gaia comparison.
+
+Usage:
+    detect-stars STACK.fits.fz \\
+        --tile A5 \\
+        --pole-x 889.95 --pole-y 175.23 \\
+        --night 2026-05-30 --hour 01b \\
+        --n-frames 600 --start-frame 0013.fits.fz \\
+        --out detections.csv
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from scipy.optimize import curve_fit
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+# Detection parameters (overridable via CLI).
+DEFAULT_SKY_BOX = 15           # px, half-side for local sky measurement
+DEFAULT_FIT_BOX = 5            # px, half-side for Gaussian fit
+DEFAULT_APER_RADIUS = 3.5      # px, photometric aperture
+DEFAULT_INNER_ANN = 6.0        # px, sky annulus inner
+DEFAULT_OUTER_ANN = 12.0       # px, sky annulus outer
+
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def load_stack(path: Path):
+    with fits.open(path) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data.astype(np.float32), dict(hdu.header)
+    raise SystemExit(f"no 2D data in {path}")
+
+
+def local_sky_stats(stack, x, y, half_box=DEFAULT_SKY_BOX):
+    """Median + MAD-derived sigma in a box around (x, y) excluding centre."""
+    H, W = stack.shape
+    x0 = max(0, x - half_box)
+    y0 = max(0, y - half_box)
+    x1 = min(W, x + half_box + 1)
+    y1 = min(H, y + half_box + 1)
+    sub = stack[y0:y1, x0:x1].astype(np.float64).copy()
+    # Mask central 7x7 around the source.
+    cx_in, cy_in = x - x0, y - y0
+    c0y, c1y = max(0, cy_in - 3), min(sub.shape[0], cy_in + 4)
+    c0x, c1x = max(0, cx_in - 3), min(sub.shape[1], cx_in + 4)
+    sub[c0y:c1y, c0x:c1x] = np.nan
+    flat = sub[~np.isnan(sub)]
+    if flat.size < 10:
+        return float(stack.mean()), float(stack.std())
+    med = float(np.median(flat))
+    mad = float(np.median(np.abs(flat - med)))
+    sigma = 1.4826 * mad  # robust σ
+    return med, max(sigma, 1.0)
+
+
+def find_local_maxima(stack, x0, y0, x1, y1, sigma_threshold,
+                      smooth=3, min_sep=10):
+    """Return [(x, y, peak_value)] in box, sorted by peak."""
+    sub = stack[y0:y1, x0:x1]
+    smoothed = cv2.boxFilter(sub, ddepth=-1, ksize=(smooth, smooth))
+    bg_med = float(np.median(smoothed))
+    bg_mad = float(np.median(np.abs(smoothed - bg_med)))
+    bg_sigma = max(1.4826 * bg_mad, 1.0)
+    thresh = bg_med + sigma_threshold * bg_sigma
+    dil = cv2.dilate(smoothed, np.ones((5, 5), np.uint8))
+    mask = (smoothed == dil) & (smoothed > thresh)
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return [], bg_med, bg_sigma
+    peaks = smoothed[ys, xs]
+    order = np.argsort(-peaks)
+    accepted = []
+    for i in order:
+        x = int(xs[i]) + x0
+        y = int(ys[i]) + y0
+        if any(abs(x - ax) < min_sep and abs(y - ay) < min_sep
+               for ax, ay, _ in accepted):
+            continue
+        accepted.append((x, y, float(peaks[i])))
+    return accepted, bg_med, bg_sigma
+
+
+def gaussian2d(coords, A, x0, y0, sx, sy, theta, offset):
+    x, y = coords
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+    a = (cos_t ** 2) / (2 * sx ** 2) + (sin_t ** 2) / (2 * sy ** 2)
+    b = -np.sin(2 * theta) / (4 * sx ** 2) + np.sin(2 * theta) / (4 * sy ** 2)
+    c = (sin_t ** 2) / (2 * sx ** 2) + (cos_t ** 2) / (2 * sy ** 2)
+    return offset + A * np.exp(-(a * (x - x0) ** 2 + 2 * b * (x - x0) * (y - y0)
+                                  + c * (y - y0) ** 2))
+
+
+def fit_gaussian(stack, x, y, half_box=DEFAULT_FIT_BOX, sky=0.0):
+    """Fit a 2D Gaussian, return dict with centroid, sigmas, theta, A.
+    Returns None if the fit fails."""
+    H, W = stack.shape
+    x0 = max(0, x - half_box)
+    y0 = max(0, y - half_box)
+    x1 = min(W, x + half_box + 1)
+    y1 = min(H, y + half_box + 1)
+    sub = stack[y0:y1, x0:x1].astype(np.float64) - sky
+    if sub.size < 9:
+        return None
+    yy, xx = np.indices(sub.shape)
+    coords = (xx.ravel(), yy.ravel())
+    p0 = [float(sub.max()), x - x0, y - y0, 2.0, 2.0, 0.0, 0.0]
+    try:
+        popt, pcov = curve_fit(gaussian2d, coords, sub.ravel(),
+                               p0=p0, maxfev=200)
+    except Exception:
+        return None
+    A, fx, fy, sx, sy, theta, off = popt
+    if sx <= 0 or sy <= 0 or A <= 0:
+        return None
+    fwhm_x = abs(sx) * 2.3548
+    fwhm_y = abs(sy) * 2.3548
+    short = min(fwhm_x, fwhm_y)
+    long_ = max(fwhm_x, fwhm_y)
+    ecc = float(np.sqrt(1 - (short / long_) ** 2)) if long_ > 0 else 0.0
+    fwhm_mean = float(np.sqrt(fwhm_x * fwhm_y))
+    perr = np.sqrt(np.diag(pcov)) if pcov is not None else \
+        np.full(7, np.nan)
+    return {
+        "amp": float(A),
+        "centroid_x": float(fx + x0),
+        "centroid_y": float(fy + y0),
+        "sigma_x": float(abs(sx)),
+        "sigma_y": float(abs(sy)),
+        "theta": float(theta),
+        "offset": float(off),
+        "fwhm_x": fwhm_x,
+        "fwhm_y": fwhm_y,
+        "fwhm_mean": fwhm_mean,
+        "eccentricity": ecc,
+        "amp_err": float(perr[0]),
+        "centroid_x_err": float(perr[1]),
+        "centroid_y_err": float(perr[2]),
+    }
+
+
+def aperture_flux(stack, x, y, r_aper=DEFAULT_APER_RADIUS,
+                  r_in=DEFAULT_INNER_ANN, r_out=DEFAULT_OUTER_ANN):
+    """Aperture photometry: flux in r_aper, sky from annulus
+    [r_in, r_out]."""
+    H, W = stack.shape
+    box = int(np.ceil(r_out)) + 1
+    x0 = max(0, int(x) - box)
+    y0 = max(0, int(y) - box)
+    x1 = min(W, int(x) + box + 1)
+    y1 = min(H, int(y) + box + 1)
+    sub = stack[y0:y1, x0:x1].astype(np.float64)
+    yy, xx = np.indices(sub.shape)
+    dx = xx + x0 - x
+    dy = yy + y0 - y
+    rr = np.sqrt(dx * dx + dy * dy)
+    aper_mask = rr <= r_aper
+    sky_mask = (rr >= r_in) & (rr <= r_out)
+    if sky_mask.sum() < 8 or aper_mask.sum() < 1:
+        return float("nan"), float("nan"), float("nan"), float("nan")
+    sky_pix = sub[sky_mask]
+    sky_med = float(np.median(sky_pix))
+    sky_sigma = float(1.4826 * np.median(np.abs(sky_pix - sky_med)))
+    n_aper = int(aper_mask.sum())
+    flux = float(sub[aper_mask].sum() - sky_med * n_aper)
+    # Error: shot noise (sqrt of total counts) + sky variance contribution
+    total_aper = float(sub[aper_mask].sum())
+    flux_err = float(np.sqrt(max(total_aper, 0.0) +
+                              n_aper * sky_sigma ** 2 +
+                              (n_aper * sky_sigma) ** 2 / max(1, sky_pix.size)))
+    return flux, flux_err, sky_med, sky_sigma
+
+
+def tangent_sharpness(stack, x, y, pole, line_half_len=10):
+    H, W = stack.shape
+    dx = x - pole[0]
+    dy = y - pole[1]
+    r = np.hypot(dx, dy)
+    if r < 1.0:
+        return 0.0
+    tx, ty = -dy / r, dx / r
+    ts = np.arange(-line_half_len, line_half_len + 1, dtype=np.float32)
+    xs = x + tx * ts
+    ys = y + ty * ts
+    keep = (xs >= 0) & (xs < W - 1) & (ys >= 0) & (ys < H - 1)
+    if keep.sum() < 5:
+        return 0.0
+    xs = xs[keep]
+    ys = ys[keep]
+    x0i = np.floor(xs).astype(np.int32)
+    y0i = np.floor(ys).astype(np.int32)
+    fx = (xs - x0i).astype(np.float32)
+    fy = (ys - y0i).astype(np.float32)
+    v00 = stack[y0i, x0i]
+    v10 = stack[y0i, x0i + 1]
+    v01 = stack[y0i + 1, x0i]
+    v11 = stack[y0i + 1, x0i + 1]
+    samples = (v00 * (1 - fx) * (1 - fy)
+               + v10 * fx * (1 - fy)
+               + v01 * (1 - fx) * fy
+               + v11 * fx * fy)
+    peak = float(samples.max())
+    mean = float(samples.mean())
+    return peak / mean if mean > 0 else 0.0
+
+
+def _reg_colour(snr: float) -> str:
+    if snr >= 30:
+        return "green"
+    if snr >= 10:
+        return "yellow"
+    return "red"
+
+
+def _reg_radius(flux: float, min_r: float = 3.0, max_r: float = 12.0) -> float:
+    import math
+    if flux <= 0:
+        return min_r
+    s = (math.log10(max(flux, 1.0)) - 3) / 4
+    s = max(0.0, min(1.0, s))
+    return min_r + s * (max_r - min_r)
+
+
+def _write_reg(rows, path, pole):
+    """Write a DS9 region file for the detections."""
+    lines = [
+        "# Region file format: DS9 version 4.1",
+        "# generated by detect-stars",
+        ("global color=green dashlist=8 3 width=1 "
+         "font=\"helvetica 10 normal roman\" select=1 highlite=1 "
+         "dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1"),
+        "image",
+    ]
+    for r in rows:
+        # DS9 uses 1-indexed coords; add 1.
+        cx = r["centroid_x"] + 1
+        cy = r["centroid_y"] + 1
+        rad = _reg_radius(r["flux"])
+        col = _reg_colour(r["snr"])
+        text = f"snr={r['snr']:.0f}"
+        lines.append(
+            f'circle({cx:.2f},{cy:.2f},{rad:.2f}) '
+            f'# color={col} text="{text}"')
+    path.write_text("\n".join(lines) + "\n")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("stack", type=Path,
+                    help="derot-stack FITS file")
+    ap.add_argument("--tile", required=True)
+    ap.add_argument("--pole-x", type=float, required=True)
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--night", required=True,
+                    help="e.g. 2026-05-30")
+    ap.add_argument("--hour", required=True,
+                    help="e.g. 01b")
+    ap.add_argument("--n-frames", type=int, required=True)
+    ap.add_argument("--start-frame", default="",
+                    help="filename of the first frame in the stack")
+    ap.add_argument("--sigma-threshold", type=float, default=4.0,
+                    help="local-max threshold in sky σ")
+    ap.add_argument("--max-detections", type=int, default=500)
+    ap.add_argument("--min-fwhm", type=float, default=1.2,
+                    help="reject narrower than this (hot pixel)")
+    ap.add_argument("--max-fwhm", type=float, default=8.0,
+                    help="reject wider than this (clouds, blends)")
+    ap.add_argument("--out", type=Path, required=True,
+                    help="output CSV")
+    args = ap.parse_args()
+
+    stack, header = load_stack(args.stack)
+    H, W = stack.shape
+    print(f"loaded {args.stack.name} {W}x{H}")
+
+    x0, y0, x1, y1 = tile_bounds(args.tile, W, H)
+    print(f"tile {args.tile}: ({x0},{y0})..({x1},{y1})")
+
+    cands, bg_med, bg_sigma = find_local_maxima(
+        stack, x0, y0, x1, y1, args.sigma_threshold)
+    print(f"local maxima above {args.sigma_threshold}σ: {len(cands)} "
+          f"(sky med={bg_med:.0f} σ={bg_sigma:.1f})")
+    cands = cands[:args.max_detections]
+
+    pole = (args.pole_x, args.pole_y)
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    rows = []
+    for i, (x, y, peak) in enumerate(cands):
+        sky_local, sky_sigma_local = local_sky_stats(stack, x, y)
+        gfit = fit_gaussian(stack, x, y, sky=sky_local)
+        if gfit is None:
+            continue
+        if not (args.min_fwhm <= gfit["fwhm_mean"] <= args.max_fwhm):
+            continue
+        flux, flux_err, sky_med_aper, sky_sig_aper = aperture_flux(
+            stack, gfit["centroid_x"], gfit["centroid_y"])
+        if not np.isfinite(flux):
+            continue
+        ts = tangent_sharpness(stack, gfit["centroid_x"], gfit["centroid_y"],
+                               pole)
+        snr = flux / flux_err if flux_err > 0 else 0.0
+        # Position uncertainty per axis ≈ FWHM / (2.355 * SNR)
+        pos_err = (gfit["fwhm_mean"] / 2.355) / max(snr, 0.1)
+        rows.append({
+            "detection_id": i,
+            "night": args.night,
+            "hour": args.hour,
+            "tile": args.tile,
+            "pole_x": args.pole_x,
+            "pole_y": args.pole_y,
+            "n_frames": args.n_frames,
+            "start_frame": args.start_frame,
+            "stack_file": args.stack.name,
+            "written_utc": now_iso,
+            "peak_x": x,
+            "peak_y": y,
+            "peak_counts": float(peak),
+            "centroid_x": gfit["centroid_x"],
+            "centroid_y": gfit["centroid_y"],
+            "centroid_x_err": pos_err,
+            "centroid_y_err": pos_err,
+            "fwhm_x": gfit["fwhm_x"],
+            "fwhm_y": gfit["fwhm_y"],
+            "fwhm_mean": gfit["fwhm_mean"],
+            "eccentricity": gfit["eccentricity"],
+            "amp": gfit["amp"],
+            "amp_err": gfit["amp_err"],
+            "flux": flux,
+            "flux_err": flux_err,
+            "snr": snr,
+            "sky_local": sky_local,
+            "sky_sigma_local": sky_sigma_local,
+            "sky_aper": sky_med_aper,
+            "tangent_sharpness": ts,
+        })
+
+    print(f"accepted {len(rows)} detections after PSF/aperture filters")
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    if rows:
+        with open(args.out, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+    else:
+        # Write at least a header file so downstream knows we tried.
+        with open(args.out, "w") as f:
+            f.write("")
+    print(f"wrote {args.out}")
+
+    # Sidecar DS9 region file next to the input FITS, so splay
+    # auto-loads it. Also one next to the CSV for completeness.
+    if rows:
+        for reg_target in (args.stack.with_suffix("").with_suffix(".reg"),
+                           args.out.with_suffix(".reg")):
+            try:
+                _write_reg(rows, reg_target, pole)
+                print(f"wrote {reg_target}")
+            except OSError as e:
+                print(f"skipped {reg_target}: {e}", file=sys.stderr)
+
+    # Summary stats.
+    if rows:
+        flux_p = [r["flux"] for r in rows]
+        snr_p = [r["snr"] for r in rows]
+        fwhm_p = [r["fwhm_mean"] for r in rows]
+        ecc_p = [r["eccentricity"] for r in rows]
+        print()
+        print(f"=== summary ===")
+        print(f"  flux:  min={min(flux_p):.0f} max={max(flux_p):.0f} "
+              f"median={float(np.median(flux_p)):.0f}")
+        print(f"  snr:   min={min(snr_p):.1f} max={max(snr_p):.1f} "
+              f"median={float(np.median(snr_p)):.1f}")
+        print(f"  fwhm:  min={min(fwhm_p):.2f} max={max(fwhm_p):.2f} "
+              f"median={float(np.median(fwhm_p)):.2f}")
+        print(f"  ecc:   min={min(ecc_p):.2f} max={max(ecc_p):.2f} "
+              f"median={float(np.median(ecc_p)):.2f}")
+
+
+if __name__ == "__main__":
+    main()

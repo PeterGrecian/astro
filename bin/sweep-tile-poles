@@ -1,0 +1,52 @@
+#!/bin/bash
+# sweep-tile-poles — run fit-tile-pole-tangent over a list of tiles.
+#
+# Usage:
+#   sweep-tile-poles <frames-dir> <out-dir> <seed_x> <seed_y> <tile1> [<tile2> ...]
+#
+# Example:
+#   sweep-tile-poles ~/starcam-backup/2026-05-30/01b ~/tmp/tangent-all \
+#       929.55 171.69 A5 A6 B2 B3 B4 B5 C1 C3 C5 D2 D3 D4 E1 E2 E4 E6 F5 F6 G4 G6
+#
+# Skips tiles whose pole.txt already exists under <out-dir>/<tile>/.
+# Each tile takes ~3 minutes on a laptop-class x86 CPU.
+
+set -e
+
+if [ $# -lt 5 ]; then
+  echo "usage: sweep-tile-poles <frames-dir> <out-dir> <seed_x> <seed_y> <tile> [<tile>...]" >&2
+  exit 1
+fi
+
+FRAMES_DIR="$1"; shift
+OUT="$1"; shift
+SEED_X="$1"; shift
+SEED_Y="$1"; shift
+TILES="$@"
+
+mkdir -p "$OUT"
+echo "sweeping $(echo $TILES | wc -w) tiles from $FRAMES_DIR → $OUT"
+echo "seed pole: ($SEED_X, $SEED_Y)"
+date
+for tile in $TILES; do
+  echo
+  echo "=== $tile $(date +%H:%M:%S) ==="
+  if [ -f "$OUT/$tile/pole.txt" ]; then
+    echo "  already done, skipping"
+    continue
+  fi
+  ~/astro/bin/fit-tile-pole-tangent "$FRAMES_DIR" \
+    --tile $tile \
+    --seed-pole-x $SEED_X --seed-pole-y $SEED_Y \
+    --start 13 --n-frames 600 --top 5 \
+    --grid-range 80 --grid-n 5 \
+    --search-radius 20 --line-half-len 10 \
+    --out "$OUT" 2>&1 | tail -5
+done
+echo
+echo "=== DONE $(date) ==="
+if [ -f "$OUT/tile-poles.csv" ]; then
+  echo
+  echo "tile-poles summary:"
+  column -t -s, "$OUT/tile-poles.csv"
+fi

@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Benchmark per-frame derotation of a full-resolution image.
+
+Pretends we have a binned 2x2 frame (representative of what the
+capture pipeline produces). Tries three implementations:
+
+1. cv2.warpAffine — affine warp (rotation about a point)
+2. scipy.ndimage.affine_transform — same idea, scipy
+3. cv2.remap with precomputed maps — slowest setup, fastest per-frame
+   when the rotation angle is the only variable
+
+We're not benchmarking accuracy — just throughput. Each impl rotates
+by a small angle representative of one 10 s exposure of star motion
+at the equator (~150 arcsec ~ 2 px at 80"/px, so the rotation angle
+that produces this displacement at the edge of frame).
+"""
+import sys
+import time
+import argparse
+import numpy as np
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--w", type=int, default=2304)  # eclipticam V3 bin2 width
+ap.add_argument("--h", type=int, default=1296)  # eclipticam V3 bin2 height
+ap.add_argument("--reps", type=int, default=10)
+ap.add_argument("--angle-deg", type=float, default=0.04,
+                help="rotation angle (deg); ~0.04 deg = 10 s of arc near equator")
+args = ap.parse_args()
+
+import cv2
+from scipy import ndimage
+
+# Synthetic frame: random uint16
+rng = np.random.default_rng(0)
+src = rng.integers(0, 4096, size=(args.h, args.w), dtype=np.uint16)
+print(f"frame: {args.w}x{args.h} ({src.nbytes/1e6:.1f} MB uint16)")
+print(f"angle: {args.angle_deg} deg")
+
+# Pole assumed off-frame — say, 3000 px below frame center
+cx, cy = args.w / 2, args.h / 2 + 3000  # pivot point (off-frame)
+
+# --- 1. cv2.warpAffine ---
+M = cv2.getRotationMatrix2D((cx, cy), args.angle_deg, 1.0)
+times = []
+for _ in range(args.reps):
+    t0 = time.perf_counter()
+    dst = cv2.warpAffine(src, M, (args.w, args.h),
+                         flags=cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_CONSTANT)
+    times.append(time.perf_counter() - t0)
+print(f"cv2.warpAffine:           {np.mean(times)*1000:5.1f} ms (min {min(times)*1000:.1f})")
+
+# --- 2. scipy.ndimage.affine_transform ---
+# Rotation matrix in scipy convention (around image origin, must offset)
+theta = np.deg2rad(args.angle_deg)
+c, s = np.cos(theta), np.sin(theta)
+R = np.array([[c, -s], [s, c]])
+offset = np.array([cy, cx]) - R @ np.array([cy, cx])
+times = []
+for _ in range(args.reps):
+    t0 = time.perf_counter()
+    dst = ndimage.affine_transform(src, R, offset=offset, order=1,
+                                   mode="constant", cval=0)
+    times.append(time.perf_counter() - t0)
+print(f"scipy.ndimage.affine_xform:{np.mean(times)*1000:5.1f} ms (min {min(times)*1000:.1f})")
+
+# --- 3. cv2.remap with precomputed maps (best per-frame, costs setup) ---
+yy, xx = np.mgrid[0:args.h, 0:args.w].astype(np.float32)
+dx = xx - cx
+dy = yy - cy
+xr = cx + dx * np.cos(theta) - dy * np.sin(theta)
+yr = cy + dx * np.sin(theta) + dy * np.cos(theta)
+map_x = xr.astype(np.float32)
+map_y = yr.astype(np.float32)
+times = []
+for _ in range(args.reps):
+    t0 = time.perf_counter()
+    dst = cv2.remap(src, map_x, map_y, cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT)
+    times.append(time.perf_counter() - t0)
+print(f"cv2.remap (precomputed):  {np.mean(times)*1000:5.1f} ms (min {min(times)*1000:.1f})")
+
+# --- 4. accumulate-into-float32 stack (typical use in derotation) ---
+acc = np.zeros((args.h, args.w), dtype=np.float32)
+times = []
+for _ in range(args.reps):
+    t0 = time.perf_counter()
+    dst = cv2.warpAffine(src, M, (args.w, args.h), flags=cv2.INTER_LINEAR)
+    acc += dst.astype(np.float32)
+    times.append(time.perf_counter() - t0)
+print(f"warpAffine + acc(float32):{np.mean(times)*1000:5.1f} ms (min {min(times)*1000:.1f})")
+
+print(f"\n[at 5s cadence, can sustain {1000/np.mean(times):.0f} fps; budget per frame 5000 ms]")

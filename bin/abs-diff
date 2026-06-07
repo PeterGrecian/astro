@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""abs(A) - abs(B) on two FITS, save as auto-stretched JPG."""
+import sys
+from pathlib import Path
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+a_path = Path(sys.argv[1])
+b_path = Path(sys.argv[2])
+out_path = Path(sys.argv[3])
+
+def load(p):
+    with fits.open(p) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return hdu.data.astype(np.float32)
+    raise SystemExit(f"no 2D in {p}")
+
+a = load(a_path)
+b = load(b_path)
+print(f"A {a_path.name}: mean={a.mean():.1f} median={np.median(a):.1f} max={a.max():.0f}")
+print(f"B {b_path.name}: mean={b.mean():.1f} median={np.median(b):.1f} max={b.max():.0f}")
+
+d = np.abs(a - b)
+print(f"abs-diff: mean={d.mean():.1f} median={np.median(d):.1f} max={d.max():.0f}, "
+      f"p99={np.percentile(d, 99):.1f}, p99.9={np.percentile(d, 99.9):.0f}")
+
+# Stretch to make banding visible — use tight percentile.
+lo = float(np.percentile(d, 1))
+hi = float(np.percentile(d, 99))
+img = np.clip((d - lo) / (hi - lo + 1e-9), 0, 1)
+u8 = (img * 255).astype(np.uint8)
+Image.fromarray(u8).save(out_path, quality=92)
+print(f"wrote {out_path} (stretch {lo:.1f}..{hi:.1f})")
+
+# Also write the raw signed difference (mid-grey = 0).
+sd = a - b
+lo2 = float(np.percentile(sd, 1))
+hi2 = float(np.percentile(sd, 99))
+m = max(abs(lo2), abs(hi2))
+img2 = np.clip((sd + m) / (2 * m + 1e-9), 0, 1)
+u8_2 = (img2 * 255).astype(np.uint8)
+out2 = out_path.with_name(out_path.stem + "-signed.jpg")
+Image.fromarray(u8_2).save(out2, quality=92)
+print(f"wrote {out2} (signed; mid-grey = 0; ±{m:.1f})")

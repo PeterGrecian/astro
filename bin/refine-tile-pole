@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""refine-tile-pole — refine a tile's local pole using top-N derot-stack
+candidates as anchors.
+
+Pipeline:
+  1. Derot all input frames at the seed pole. Sum into a stack.
+  2. Find top-N sharp peaks in the tile region of the stack
+     (peak/local_mean as the sharpness metric; rejects hot pixels and
+     arcs because those don't sharpen).
+  3. For each candidate, convert its derot-stack position back to
+     per-frame predicted positions (inverse rotation about the seed
+     pole through each frame's angle).
+  4. For each frame and each candidate, search a small window around
+     the predicted position for the actual peak. Log (predicted, actual)
+     residuals.
+  5. Fit local pole by minimising sum-of-squared-residuals across all
+     (candidate × frame) pairs. Nelder-Mead from the seed pole.
+
+Output:
+  <out>/<tile>/track.csv        per (candidate, frame) record
+  <out>/<tile>/pole.txt         seed + final pole, score trace
+  <out>/<tile>/stack.fits.fz    derot-stack at the final pole
+  <out>/<tile>/stack.jpg        same, JPG
+  <out>/<tile>/candidates.csv   the top-N candidates picked
+
+The local pole is appended to <out>/tile-poles.csv (created if not
+present) so multi-tile runs accumulate a distortion-field record.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+from scipy.optimize import minimize
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def load_frame(path):
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
+
+
+def derotate(img, pole, angle_deg):
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def rotate_point(x, y, pole, angle_deg):
+    rad = np.deg2rad(angle_deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dx, dy = x - pole[0], y - pole[1]
+    return pole[0] + c * dx - s * dy, pole[1] + s * dx + c * dy
+
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def find_sharp_peaks_in_tile(stack, tile_label, n, smooth=3,
+                             min_sep=20, min_sharpness=1.8):
+    """Return top-n (x, y, peak, local_mean, sharpness) by peak/local_mean.
+    Only candidates with sharpness >= min_sharpness are returned."""
+    H, W = stack.shape
+    x0, y0, x1, y1 = tile_bounds(tile_label, W, H)
+    sub = stack[y0:y1, x0:x1]
+    smoothed = cv2.boxFilter(sub, ddepth=-1, ksize=(smooth, smooth))
+    # Local maxima.
+    kernel = 5
+    dil = cv2.dilate(smoothed, np.ones((kernel, kernel), np.uint8))
+    mask = (smoothed == dil) & (smoothed > smoothed.mean())
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return []
+    peaks = smoothed[ys, xs]
+    # Compute sharpness: peak / local mean (small ring around peak)
+    cands = []
+    for i in range(len(xs)):
+        x, y = int(xs[i]), int(ys[i])
+        # local mean in 21x21 around (x,y), excluding 5x5 centre
+        rx0, ry0 = max(0, x - 10), max(0, y - 10)
+        rx1, ry1 = min(sub.shape[1], x + 11), min(sub.shape[0], y + 11)
+        ring = sub[ry0:ry1, rx0:rx1].astype(np.float64).copy()
+        cx_in_ring, cy_in_ring = x - rx0, y - ry0
+        c_y0, c_y1 = max(0, cy_in_ring - 2), min(ring.shape[0], cy_in_ring + 3)
+        c_x0, c_x1 = max(0, cx_in_ring - 2), min(ring.shape[1], cx_in_ring + 3)
+        ring[c_y0:c_y1, c_x0:c_x1] = np.nan
+        local_mean = float(np.nanmean(ring))
+        peak = float(sub[y, x])
+        if local_mean <= 0:
+            continue
+        sharp = peak / local_mean
+        if sharp < min_sharpness:
+            continue
+        cands.append((x + x0, y + y0, peak, local_mean, sharp))
+    cands.sort(key=lambda r: -r[4])
+    # Enforce min separation.
+    accepted = []
+    for c in cands:
+        if any(abs(c[0] - a[0]) < min_sep and abs(c[1] - a[1]) < min_sep
+               for a in accepted):
+            continue
+        accepted.append(c)
+        if len(accepted) >= n:
+            break
+    return accepted
+
+
+def search_peak(img, cx, cy, radius):
+    H, W = img.shape
+    x0 = max(0, int(round(cx)) - radius)
+    y0 = max(0, int(round(cy)) - radius)
+    x1 = min(W, int(round(cx)) + radius + 1)
+    y1 = min(H, int(round(cy)) + radius + 1)
+    sub = img[y0:y1, x0:x1]
+    if sub.size == 0:
+        return -1, -1, 0.0, 0.0
+    iy, ix = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    return x0 + ix, y0 + iy, float(sub[iy, ix]), float(sub.mean())
+
+
+def save_jpg(arr, path):
+    if arr is None or arr.size == 0:
+        return
+    lo, hi = np.percentile(arr, [2, 99.7])
+    if hi <= lo:
+        hi = lo + 1.0
+    u8 = (np.clip((arr - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
+    Image.fromarray(u8).save(path, quality=92)
+
+
+def save_fits(arr, path, meta):
+    if arr is None or arr.size == 0:
+        return
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=arr.astype(np.int32),
+                             compression_type="RICE_1")
+    for k, v in meta.items():
+        comp.header[k] = v
+    fits.HDUList([primary, comp]).writeto(path, overwrite=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("dir", type=Path)
+    ap.add_argument("--tile", required=True)
+    ap.add_argument("--seed-pole-x", type=float, required=True)
+    ap.add_argument("--seed-pole-y", type=float, required=True)
+    ap.add_argument("--start", type=int, default=1)
+    ap.add_argument("--n-frames", type=int, default=600)
+    ap.add_argument("--top", type=int, default=3,
+                    help="N sharp candidates from the derot-stack")
+    ap.add_argument("--min-sharpness", type=float, default=1.8,
+                    help="reject candidates below this peak/ring-mean ratio")
+    ap.add_argument("--search-radius", type=int, default=6)
+    ap.add_argument("--omega", type=float, default=-0.000219)
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name.split(".")[0].isdigit()
+           and int(f.name.split(".")[0]) >= args.start]
+    fns = fns[:args.n_frames]
+    print(f"frames: {fns[0].name}..{fns[-1].name} ({len(fns)})")
+
+    # Load epochs + angles.
+    print("loading...")
+    raw_data = []
+    epochs = []
+    for fn in fns:
+        d, ep = load_frame(fn)
+        raw_data.append(d.astype(np.float32))
+        epochs.append(ep)
+    if any(e is None for e in epochs):
+        angles_deg = [float(np.degrees(i * args.omega)) for i in range(len(fns))]
+    else:
+        e0 = epochs[0]
+        angles_deg = [float(np.degrees(((e - e0) / 3000.0) * args.omega))
+                      for e in epochs]
+    print(f"angle range: {angles_deg[0]:.4f}° .. {angles_deg[-1]:.4f}°")
+
+    seed_pole = (args.seed_pole_x, args.seed_pole_y)
+
+    # Step 1: derot-stack at seed pole.
+    print(f"derot-stacking {len(fns)} frames at seed pole {seed_pole}...")
+    stack = None
+    for i, d in enumerate(raw_data):
+        derot = derotate(d, seed_pole, angles_deg[i])
+        stack = derot if stack is None else stack + derot
+    assert stack is not None
+
+    # Step 2: find top-N sharp candidates in the tile.
+    cands = find_sharp_peaks_in_tile(stack, args.tile, args.top,
+                                     min_sharpness=args.min_sharpness)
+    print(f"\nfound {len(cands)} candidates in {args.tile}:")
+    for i, (x, y, peak, lm, sh) in enumerate(cands):
+        print(f"  #{i+1}: ({x:4d},{y:4d}) peak={peak:>9.0f} "
+              f"local_mean={lm:>7.1f} sharp={sh:.2f}")
+    if not cands:
+        print(f"no candidates in tile {args.tile}", file=sys.stderr)
+        return 1
+
+    # Step 3-5 iterative loop:
+    #  - Track per-frame at current pole with a search radius.
+    #  - Fit pole from track residuals (variance per candidate).
+    #  - Shrink the search radius, re-track, re-fit.
+    # The first pass uses a large search radius because the seed pole
+    # may be wrong by tens of pixels. Successive passes tighten the
+    # radius as the pole converges.
+    radii = [50, 20, 8, args.search_radius]
+    cur_pole = seed_pole
+    tracks = []
+    rms_iters = []
+    for it_idx, radius in enumerate(radii):
+        # Track.
+        tracks = []
+        for ci, (sx, sy, _, _, _) in enumerate(cands):
+            for fi, (img, ang) in enumerate(zip(raw_data, angles_deg)):
+                # Predict per-frame position by inverse-rotating the
+                # derot-stack position about the CURRENT pole.
+                px, py = rotate_point(sx, sy, cur_pole, -ang)
+                ax, ay, peak, lm = search_peak(img, px, py, radius)
+                if ax < 0:
+                    continue
+                tracks.append({
+                    "candidate_id": ci,
+                    "frame_idx": fi,
+                    "frame_name": fns[fi].name,
+                    "pred_x": float(px), "pred_y": float(py),
+                    "act_x": ax, "act_y": ay,
+                    "peak": peak, "local_mean": lm,
+                    "stack_x": sx, "stack_y": sy,
+                    "angle_deg": ang,
+                })
+        # SSE objective: per-candidate spread of derotated actual
+        # positions under the trial pole. Minimised when each
+        # candidate's tracked positions collapse to one point.
+        by_cand = {}
+        for r in tracks:
+            by_cand.setdefault(r["candidate_id"], []).append(
+                (r["act_x"], r["act_y"], r["angle_deg"]))
+
+        def sse(p):
+            px_p, py_p = float(p[0]), float(p[1])
+            total = 0.0
+            for _ci, obs in by_cand.items():
+                xs = np.empty(len(obs))
+                ys = np.empty(len(obs))
+                for j, (ax, ay, ang) in enumerate(obs):
+                    rad = np.deg2rad(ang)
+                    c, s = np.cos(rad), np.sin(rad)
+                    dx, dy = ax - px_p, ay - py_p
+                    xs[j] = px_p + c * dx - s * dy
+                    ys[j] = py_p + s * dx + c * dy
+                mx, my = xs.mean(), ys.mean()
+                total += np.sum((xs - mx) ** 2 + (ys - my) ** 2)
+            return float(total)
+
+        rms_before = float(np.sqrt(sse([cur_pole[0], cur_pole[1]]) /
+                                    max(1, len(tracks))))
+        res = minimize(sse, x0=[cur_pole[0], cur_pole[1]],
+                       method="Nelder-Mead",
+                       options={"xatol": 0.05, "fatol": 0.01,
+                                "maxiter": 500})
+        new_pole = (float(res.x[0]), float(res.x[1]))
+        rms_after = float(np.sqrt(res.fun / max(1, len(tracks))))
+        move = float(np.hypot(new_pole[0] - cur_pole[0],
+                              new_pole[1] - cur_pole[1]))
+        print(f"  iter{it_idx+1}: radius={radius:>3d}  tracks={len(tracks):>5d}  "
+              f"pole=({new_pole[0]:7.2f},{new_pole[1]:7.2f})  "
+              f"rms {rms_before:6.2f}→{rms_after:6.2f}  moved {move:.2f}px")
+        rms_iters.append((it_idx + 1, radius, rms_before, rms_after,
+                          new_pole, move))
+        cur_pole = new_pole
+
+    final_pole = cur_pole
+    rms_seed_total = rms_iters[0][2]
+    rms_final = rms_iters[-1][3]
+    print(f"\nfinal pole: ({final_pole[0]:.2f}, {final_pole[1]:.2f}) "
+          f"[Δ from seed = {np.hypot(final_pole[0] - seed_pole[0], final_pole[1] - seed_pole[1]):.2f} px]")
+    print(f"rms final: {rms_final:.3f} px")
+    rms_seed = rms_seed_total
+
+    # Step 6: re-derot at the final pole for output.
+    print("\nre-derot at final pole for output stack...")
+    final_stack = None
+    for i, d in enumerate(raw_data):
+        derot = derotate(d, final_pole, angles_deg[i])
+        final_stack = derot if final_stack is None else final_stack + derot
+
+    tile_dir = args.out / args.tile
+    tile_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(tile_dir / "candidates.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "id", "stack_x", "stack_y", "peak", "local_mean", "sharpness"])
+        w.writeheader()
+        for i, (x, y, p, lm, sh) in enumerate(cands):
+            w.writerow({"id": i, "stack_x": x, "stack_y": y,
+                        "peak": p, "local_mean": lm, "sharpness": sh})
+
+    with open(tile_dir / "track.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "candidate_id", "frame_idx", "frame_name",
+            "pred_x", "pred_y", "act_x", "act_y",
+            "peak", "local_mean", "stack_x", "stack_y", "angle_deg"])
+        w.writeheader()
+        for r in tracks:
+            w.writerow(r)
+
+    (tile_dir / "pole.txt").write_text(
+        f"tile: {args.tile}\n"
+        f"seed_pole: {seed_pole}\n"
+        f"final_pole: {final_pole}\n"
+        f"n_tracks: {len(tracks)}\n"
+        f"rms_seed: {rms_seed:.4f}\n"
+        f"rms_final: {rms_final:.4f}\n"
+        f"improvement: {rms_seed - rms_final:.4f}\n"
+    )
+
+    save_fits(final_stack, tile_dir / "stack.fits.fz",
+              {"TILE": args.tile,
+               "POLEX": final_pole[0], "POLEY": final_pole[1],
+               "NFRAMES": len(fns)})
+    H, W = final_stack.shape
+    x0, y0, x1, y1 = tile_bounds(args.tile, W, H)
+    save_jpg(final_stack[y0:y1, x0:x1], tile_dir / "stack-tile.jpg")
+    save_jpg(final_stack, tile_dir / "stack-full.jpg")
+
+    # Append summary to <out>/tile-poles.csv.
+    summary_path = args.out / "tile-poles.csv"
+    write_header = not summary_path.exists()
+    with open(summary_path, "a", newline="") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(["tile", "seed_x", "seed_y",
+                        "final_x", "final_y", "dpole",
+                        "n_tracks", "rms_seed", "rms_final"])
+        w.writerow([args.tile, seed_pole[0], seed_pole[1],
+                    final_pole[0], final_pole[1],
+                    float(np.hypot(final_pole[0] - seed_pole[0],
+                                   final_pole[1] - seed_pole[1])),
+                    len(tracks), rms_seed, rms_final])
+    print(f"\nappended to {summary_path}")
+
+
+if __name__ == "__main__":
+    main()

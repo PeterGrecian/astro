@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""chain-tracks — chain candidates across derot-windows stacks.
+
+Reads a derot-windows output directory (manifest + per-window FITS),
+detects bright peaks in window 0 (restricted to kept tiles), then for
+each candidate predicts its position in every subsequent window by
+rotating about the stipulated pole through the inter-window angle.
+Searches a small window around each prediction; records the actual
+peak if found.
+
+Output:
+  candidates.csv  — one row per (candidate_id, window) record:
+    candidate_id, tile, window, pred_x, pred_y, act_x, act_y,
+    peak, local_mean, resid_x, resid_y, resid
+  tracks.csv      — one row per candidate:
+    candidate_id, tile, seed_x, seed_y, seed_peak,
+    n_windows, mean_peak, mean_snr, last_window, last_resid
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def tile_for(x: float, y: float, W: int, H: int) -> str:
+    col = min(int(x * GRID_COLS / W), GRID_COLS - 1)
+    row = min(int(y * GRID_ROWS / H), GRID_ROWS - 1)
+    return f"{chr(ord('A')+col)}{row+1}"
+
+
+def tile_bounds(label: str, W: int, H: int) -> tuple[int, int, int, int]:
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def load_window(path: Path) -> tuple[np.ndarray, dict]:
+    """Return (stack, header_dict)."""
+    with fits.open(path) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                meta = dict(hdu.header)
+                return hdu.data.astype(np.float32), meta
+    raise SystemExit(f"no 2D in {path}")
+
+
+def detect_candidates(stack: np.ndarray, kept_tiles: set[str],
+                      smooth: int, peak_min: float,
+                      peak_above_mean_ratio: float,
+                      min_separation: int,
+                      ) -> list[tuple[int, int, float]]:
+    """Find local maxima per kept tile, return (x, y, peak)."""
+    H, W = stack.shape
+    smoothed = cv2.boxFilter(stack, ddepth=-1, ksize=(smooth, smooth))
+    found = []
+    for tile in sorted(kept_tiles):
+        x0, y0, x1, y1 = tile_bounds(tile, W, H)
+        sub = smoothed[y0:y1, x0:x1]
+        sub_mean = float(sub.mean())
+        # Local maxima via dilation comparison.
+        kernel = max(3, smooth)
+        dil = cv2.dilate(sub, np.ones((kernel, kernel), np.uint8))
+        mask = (sub == dil) & (sub > peak_min) & \
+               (sub > peak_above_mean_ratio * sub_mean)
+        ys, xs = np.where(mask)
+        # Sort by peak value descending.
+        peaks = sub[ys, xs]
+        order = np.argsort(-peaks)
+        # Min-separation enforcement.
+        accepted = []
+        for idx in order:
+            x = int(xs[idx]) + x0
+            y = int(ys[idx]) + y0
+            if any(abs(x - ax) < min_separation and abs(y - ay) < min_separation
+                   for ax, ay, _ in accepted):
+                continue
+            accepted.append((x, y, float(peaks[idx])))
+        found.extend(accepted)
+    return found
+
+
+def rotate_point(x: float, y: float,
+                 pole: tuple[float, float], angle_deg: float
+                 ) -> tuple[float, float]:
+    rad = np.deg2rad(angle_deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dx, dy = x - pole[0], y - pole[1]
+    return pole[0] + c * dx - s * dy, pole[1] + s * dx + c * dy
+
+
+def search_peak(img: np.ndarray, cx: float, cy: float,
+                radius: int) -> tuple[int, int, float, float]:
+    H, W = img.shape
+    x0 = max(0, int(round(cx)) - radius)
+    y0 = max(0, int(round(cy)) - radius)
+    x1 = min(W, int(round(cx)) + radius + 1)
+    y1 = min(H, int(round(cy)) + radius + 1)
+    sub = img[y0:y1, x0:x1]
+    if sub.size == 0:
+        return -1, -1, 0.0, 0.0
+    iy, ix = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    return x0 + ix, y0 + iy, float(sub[iy, ix]), float(sub.mean())
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("windows_dir", type=Path,
+                    help="directory produced by derot-windows")
+    ap.add_argument("--pole-x", type=float, required=True)
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--kept-tiles", default=None,
+                    help="comma-list of tiles to consider; default = all 48")
+    ap.add_argument("--reject-tiles", default="",
+                    help="comma-list of tiles to skip (alternative to --kept-tiles)")
+    ap.add_argument("--smooth", type=int, default=3,
+                    help="box-filter size for local-max detection")
+    ap.add_argument("--peak-min", type=float, default=20000,
+                    help="absolute peak floor (in derot-stack counts)")
+    ap.add_argument("--peak-above-mean", type=float, default=3.0,
+                    help="peak must exceed this × tile mean")
+    ap.add_argument("--min-sep", type=int, default=20,
+                    help="min pixel separation between candidates in a tile")
+    ap.add_argument("--search-radius", type=int, default=8,
+                    help="search radius for chaining (px)")
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    # Resolve kept tiles.
+    all_tiles = {f"{chr(ord('A')+c)}{r+1}"
+                 for c in range(GRID_COLS) for r in range(GRID_ROWS)}
+    if args.kept_tiles:
+        kept = {t.strip().upper() for t in args.kept_tiles.split(",")
+                if t.strip()}
+    else:
+        rejected = {t.strip().upper() for t in args.reject_tiles.split(",")
+                    if t.strip()}
+        kept = all_tiles - rejected
+    print(f"kept tiles: {len(kept)} of 48")
+
+    # Read manifest.
+    manifest_path = args.windows_dir / "manifest.csv"
+    manifest = list(csv.DictReader(open(manifest_path)))
+    n_windows = len(manifest)
+    print(f"windows: {n_windows}")
+
+    pole = (args.pole_x, args.pole_y)
+    args.out.mkdir(parents=True, exist_ok=True)
+
+    # Load window 0, detect candidates.
+    w0_path = args.windows_dir / f"{manifest[0]['window']:>03}".replace(
+        " ", "0").rjust(3, "0")
+    # Simpler — just construct as "w000.fits.fz"
+    def wpath(i: int) -> Path:
+        return args.windows_dir / f"w{i:03d}.fits.fz"
+
+    w0_stack, _w0_meta = load_window(wpath(0))
+    H, W = w0_stack.shape
+    print(f"window 0 shape: {W}x{H}")
+
+    candidates = detect_candidates(
+        w0_stack, kept,
+        smooth=args.smooth, peak_min=args.peak_min,
+        peak_above_mean_ratio=args.peak_above_mean,
+        min_separation=args.min_sep)
+    print(f"window 0 candidates: {len(candidates)}")
+    if not candidates:
+        print("no candidates — adjust --peak-min / --peak-above-mean")
+        return 1
+
+    # Pre-load all windows + per-window angle (relative to window 0).
+    print("loading all windows...")
+    stacks: list[np.ndarray] = [w0_stack]
+    angles_rel: list[float] = [0.0]
+    for i in range(1, n_windows):
+        st, meta = load_window(wpath(i))
+        stacks.append(st)
+        # angle of this window's ref relative to window 0's ref:
+        ang_ref = float(meta["ANGREFD"])
+        ang0_ref = float(load_window(wpath(0))[1]["ANGREFD"]) if i == 1 else angles_rel[0]
+        # Actually w0's ANGREFD is the angle of frame i0=0 wrt frame 0, which
+        # in our convention is 0. The window-N reference angle is the angle
+        # to rotate frame at i=N*W back to frame 0. So an object at position
+        # (x, y) in window N's stack appears at the same position in window
+        # N+1's stack rotated by (angle_N+1 - angle_N) about the pole.
+        angles_rel.append(ang_ref)
+
+    # Chain candidates.
+    out_rows = []
+    track_rows = []
+    for cid, (sx, sy, speak) in enumerate(candidates):
+        tile = tile_for(sx, sy, W, H)
+        # Record window 0 itself.
+        out_rows.append({
+            "candidate_id": cid, "tile": tile, "window": 0,
+            "pred_x": sx, "pred_y": sy,
+            "act_x": sx, "act_y": sy,
+            "peak": speak, "local_mean": 0.0,
+            "resid_x": 0.0, "resid_y": 0.0, "resid": 0.0,
+        })
+        n_chained = 1
+        peaks = [speak]
+        snrs = [0.0]
+        last_resid = 0.0
+        for w in range(1, n_windows):
+            d_angle = angles_rel[w] - angles_rel[0]
+            px, py = rotate_point(sx, sy, pole, d_angle)
+            ax, ay, peak, local_mean = search_peak(
+                stacks[w], px, py, args.search_radius)
+            if ax < 0 or peak < args.peak_min * 0.3:
+                # Track ends.
+                break
+            rx, ry = ax - px, ay - py
+            r = float(np.hypot(rx, ry))
+            snr = peak / local_mean if local_mean > 0 else 0.0
+            out_rows.append({
+                "candidate_id": cid, "tile": tile, "window": w,
+                "pred_x": float(px), "pred_y": float(py),
+                "act_x": ax, "act_y": ay,
+                "peak": peak, "local_mean": local_mean,
+                "resid_x": rx, "resid_y": ry, "resid": r,
+            })
+            n_chained += 1
+            peaks.append(peak)
+            snrs.append(snr)
+            last_resid = r
+        track_rows.append({
+            "candidate_id": cid, "tile": tile,
+            "seed_x": sx, "seed_y": sy, "seed_peak": speak,
+            "n_windows": n_chained,
+            "mean_peak": float(np.mean(peaks)),
+            "mean_snr": float(np.mean(snrs)) if snrs else 0.0,
+            "last_resid": last_resid,
+        })
+
+    # Write outputs.
+    out_csv = args.out / "candidates.csv"
+    with open(out_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "candidate_id", "tile", "window",
+            "pred_x", "pred_y", "act_x", "act_y",
+            "peak", "local_mean", "resid_x", "resid_y", "resid"])
+        w.writeheader()
+        for row in out_rows:
+            w.writerow(row)
+
+    tr_csv = args.out / "tracks.csv"
+    with open(tr_csv, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=[
+            "candidate_id", "tile", "seed_x", "seed_y", "seed_peak",
+            "n_windows", "mean_peak", "mean_snr", "last_resid"])
+        w.writeheader()
+        for row in track_rows:
+            w.writerow(row)
+
+    # Summary.
+    n_full = sum(1 for t in track_rows if t["n_windows"] == n_windows)
+    n_long = sum(1 for t in track_rows if t["n_windows"] >= n_windows * 0.8)
+    tile_counts: dict[str, int] = {}
+    for t in track_rows:
+        tile_counts[t["tile"]] = tile_counts.get(t["tile"], 0) + 1
+    print(f"\n{len(candidates)} candidates → {n_full} chained ALL "
+          f"{n_windows} windows, {n_long} chained ≥80%")
+    print("per-tile candidate counts:")
+    for tile, c in sorted(tile_counts.items()):
+        print(f"  {tile}: {c}")
+    print(f"\nwrote {out_csv}")
+    print(f"wrote {tr_csv}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

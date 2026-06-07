@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Time-coloured derot-stack: early frames → red, late → blue.
+
+Builds three weighted derot-stacks (R, G, B) where R weight peaks at
+frame 0, B weight peaks at the last frame, and G fills the middle.
+Saves the resulting colour image plus a tile crop.
+
+Real stars at the correct pole render as round greyish points
+(all weights overlap). Hot pixels and pole-error-residuals render
+as red-to-blue arcs showing direction of time.
+"""
+import argparse
+import sys
+from pathlib import Path
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def load_frame(path):
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
+
+
+def derotate(img, pole, angle_deg):
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dir", type=Path)
+    ap.add_argument("--start", type=int, default=1)
+    ap.add_argument("--n-frames", type=int, default=600)
+    ap.add_argument("--pole-x", type=float, required=True)
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--tile", required=True)
+    ap.add_argument("--omega", type=float, default=-0.000219)
+    ap.add_argument("--out-tile", type=Path, required=True)
+    ap.add_argument("--out-full", type=Path, default=None)
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name.split(".")[0].isdigit()
+           and int(f.name.split(".")[0]) >= args.start]
+    fns = fns[:args.n_frames]
+    n = len(fns)
+    print(f"frames: {fns[0].name} .. {fns[-1].name} ({n} total)")
+
+    epochs = []
+    for fn in fns:
+        _, ep = load_frame(fn)
+        epochs.append(ep)
+    if any(e is None for e in epochs):
+        angles_deg = [float(np.degrees(i * args.omega)) for i in range(n)]
+    else:
+        e0 = epochs[0]
+        angles_deg = [float(np.degrees(((e - e0) / 3000.0) * args.omega))
+                      for e in epochs]
+    print(f"angle range: {angles_deg[0]:.4f}° .. {angles_deg[-1]:.4f}°")
+
+    pole = (args.pole_x, args.pole_y)
+    R = G = B = None
+    # Linear ramps: R = 1 at i=0 → 0 at i=n-1; B = 0 at 0 → 1 at n-1.
+    # G peaks at the middle: triangular.
+    for i, fn in enumerate(fns):
+        data, _ = load_frame(fn)
+        derot = derotate(data, pole, angles_deg[i])
+        t = i / max(1, n - 1)  # 0..1
+        wr = 1.0 - t
+        wb = t
+        wg = 1.0 - 2.0 * abs(t - 0.5)  # 0 at ends, 1 in middle
+        R = derot * wr if R is None else R + derot * wr
+        G = derot * wg if G is None else G + derot * wg
+        B = derot * wb if B is None else B + derot * wb
+        if (i + 1) % 100 == 0 or i == n - 1:
+            print(f"  [{i+1}/{n}]", flush=True)
+
+    H, W = R.shape
+
+    # Stretch each channel together so the absolute brightness comparison
+    # is preserved (so a bright stationary source shows as roughly grey,
+    # not a wash of one colour).
+    all3 = np.stack([R, G, B], axis=-1)
+    lo = float(np.percentile(all3, 2))
+    hi = float(np.percentile(all3, 99.7))
+    img = np.clip((all3 - lo) / (hi - lo + 1e-9), 0, 1)
+    u8 = (img * 255).astype(np.uint8)
+    pil_full = Image.fromarray(u8, mode="RGB")
+    print(f"stretch {lo:.0f}..{hi:.0f}")
+
+    if args.out_full is not None:
+        pil_full.save(args.out_full, quality=92)
+        print(f"wrote full: {args.out_full}")
+
+    x0, y0, x1, y1 = tile_bounds(args.tile, W, H)
+    tile = u8[y0:y1, x0:x1]
+    # Upscale 3x.
+    tile_pil = Image.fromarray(tile, mode="RGB").resize(
+        ((x1 - x0) * 3, (y1 - y0) * 3), Image.NEAREST)
+    tile_pil.save(args.out_tile, quality=92)
+    print(f"wrote tile: {args.out_tile}")
+
+
+if __name__ == "__main__":
+    main()

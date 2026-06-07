@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""fit-tile-pole-tangent — per-tile pole fit via tangent-direction sharpness.
+
+For each trial pole, derot N frames at that pole, sum into a stack,
+then for the top-K peaks within the tile compute *tangent-direction*
+sharpness: peak / mean-along-a-line-through-the-peak-in-the-tangent-
+direction. The tangent at pixel (x, y) is perpendicular to the radial
+vector (x − pole_x, y − pole_y).
+
+Why tangent rather than isotropic sharpness:
+
+  - Real star + correct pole → sharp in both directions.
+  - Real star + wrong pole  → smeared ALONG the tangent (its arc),
+    still sharp perpendicular. Isotropic score misses this.
+  - Hot pixel (no derot)    → arc across full sky-rotation in tangent
+    direction. Tangent sharpness is low.
+
+So tangent-sharpness scores rise SHARPLY when the pole is right, and
+distinguish real stars from hot pixels even when the stack has both.
+
+Pipeline:
+
+  1. Derot N frames at the seed pole → seed-stack.
+  2. Pick top-K peaks in tile region (by raw peak value).
+  3. Define objective: at trial pole, re-derot N frames, re-stack,
+     re-locate each candidate near its seed-pole position,
+     compute tangent-sharpness at the candidate's new position,
+     sum across candidates. Maximise.
+  4. Nelder-Mead from the seed pole, with a coarse grid scan first
+     to escape local minima.
+
+Output:
+  <out>/<tile>/stack-final.fits.fz   stack at the final pole
+  <out>/<tile>/stack-final.jpg
+  <out>/<tile>/stack-tile.jpg        cropped to the tile
+  <out>/<tile>/pole.txt
+  <out>/<tile>/candidates.csv
+  <out>/<tile>/score-trace.csv       all trial poles + scores
+
+A tile-poles.csv summary is appended to <out>.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+from scipy.optimize import minimize
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def load_frame(path):
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
+
+
+def derotate(img, pole, angle_deg):
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def find_top_peaks(stack, tile_label, k, min_sep=20):
+    """Return top-k (x, y, peak_value) within tile, with min separation.
+    No sharpness filter — we'll judge sharpness later under the trial pole."""
+    H, W = stack.shape
+    x0, y0, x1, y1 = tile_bounds(tile_label, W, H)
+    sub = stack[y0:y1, x0:x1]
+    smoothed = cv2.boxFilter(sub, ddepth=-1, ksize=(3, 3))
+    dil = cv2.dilate(smoothed, np.ones((5, 5), np.uint8))
+    mask = (smoothed == dil) & (smoothed > smoothed.mean())
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
+        return []
+    peaks = smoothed[ys, xs]
+    order = np.argsort(-peaks)
+    accepted = []
+    for i in order:
+        x = int(xs[i]) + x0
+        y = int(ys[i]) + y0
+        v = float(peaks[i])
+        if any(abs(x - ax) < min_sep and abs(y - ay) < min_sep
+               for ax, ay, _ in accepted):
+            continue
+        accepted.append((x, y, v))
+        if len(accepted) >= k:
+            break
+    return accepted
+
+
+def search_peak(img, cx, cy, radius):
+    H, W = img.shape
+    x0 = max(0, int(round(cx)) - radius)
+    y0 = max(0, int(round(cy)) - radius)
+    x1 = min(W, int(round(cx)) + radius + 1)
+    y1 = min(H, int(round(cy)) + radius + 1)
+    sub = img[y0:y1, x0:x1]
+    if sub.size == 0:
+        return -1, -1, 0.0
+    iy, ix = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    return x0 + ix, y0 + iy, float(sub[iy, ix])
+
+
+def tangent_sharpness(stack, x, y, pole, line_half_len=10):
+    """Sharpness along the tangent direction at pixel (x, y) under pole.
+
+    Samples a line of length 2*line_half_len+1 through (x, y) in the
+    tangent direction (perpendicular to the radial vector pole→(x,y)).
+    Returns peak / mean(line). Tall narrow peak ⇒ high score; smeared
+    arc ⇒ low score. Robust to small pole errors perpendicular to
+    the tangent.
+    """
+    H, W = stack.shape
+    dx = x - pole[0]
+    dy = y - pole[1]
+    r = np.hypot(dx, dy)
+    if r < 1.0:
+        return 0.0
+    # Tangent unit vector — rotate radial by 90°.
+    tx, ty = -dy / r, dx / r
+    # Sample along ±line_half_len pixels via bilinear interpolation.
+    ts = np.arange(-line_half_len, line_half_len + 1, dtype=np.float32)
+    xs = x + tx * ts
+    ys = y + ty * ts
+    # Clip to image bounds.
+    keep = (xs >= 0) & (xs < W - 1) & (ys >= 0) & (ys < H - 1)
+    if keep.sum() < 5:
+        return 0.0
+    xs = xs[keep]
+    ys = ys[keep]
+    # Bilinear sample.
+    x0i = np.floor(xs).astype(np.int32)
+    y0i = np.floor(ys).astype(np.int32)
+    fx = (xs - x0i).astype(np.float32)
+    fy = (ys - y0i).astype(np.float32)
+    v00 = stack[y0i, x0i]
+    v10 = stack[y0i, x0i + 1]
+    v01 = stack[y0i + 1, x0i]
+    v11 = stack[y0i + 1, x0i + 1]
+    samples = (v00 * (1 - fx) * (1 - fy)
+               + v10 * fx * (1 - fy)
+               + v01 * (1 - fx) * fy
+               + v11 * fx * fy)
+    peak = float(samples.max())
+    mean = float(samples.mean())
+    if mean <= 0:
+        return 0.0
+    return peak / mean
+
+
+def build_stack(raw_data, angles_deg, pole):
+    stack = None
+    for d, ang in zip(raw_data, angles_deg):
+        derot = derotate(d, pole, ang)
+        stack = derot if stack is None else stack + derot
+    return stack
+
+
+def score_pole(pole, raw_data, angles_deg, candidate_seeds, search_radius,
+               line_half_len):
+    """Build derot-stack at trial pole, locate each candidate near its
+    seed position, sum tangent-sharpness across all candidates.
+
+    Higher is better (we negate when calling Nelder-Mead).
+    """
+    stack = build_stack(raw_data, angles_deg, pole)
+    total = 0.0
+    n_found = 0
+    for sx, sy, _ in candidate_seeds:
+        ax, ay, _peak = search_peak(stack, sx, sy, search_radius)
+        if ax < 0:
+            continue
+        s = tangent_sharpness(stack, ax, ay, pole, line_half_len)
+        total += s
+        n_found += 1
+    return total, n_found, stack
+
+
+def save_jpg(arr, path):
+    if arr is None or arr.size == 0:
+        return
+    lo, hi = np.percentile(arr, [2, 99.7])
+    if hi <= lo:
+        hi = lo + 1.0
+    u8 = (np.clip((arr - lo) / (hi - lo), 0, 1) * 255).astype(np.uint8)
+    Image.fromarray(u8).save(path, quality=92)
+
+
+def save_fits(arr, path, meta):
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=arr.astype(np.int32),
+                             compression_type="RICE_1")
+    for k, v in meta.items():
+        comp.header[k] = v
+    fits.HDUList([primary, comp]).writeto(path, overwrite=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("dir", type=Path)
+    ap.add_argument("--tile", required=True)
+    ap.add_argument("--seed-pole-x", type=float, required=True)
+    ap.add_argument("--seed-pole-y", type=float, required=True)
+    ap.add_argument("--start", type=int, default=1)
+    ap.add_argument("--n-frames", type=int, default=600)
+    ap.add_argument("--top", type=int, default=5,
+                    help="top-K peaks in tile (seed-stack)")
+    ap.add_argument("--search-radius", type=int, default=20,
+                    help="search radius for relocating candidates in trial "
+                         "stack (px)")
+    ap.add_argument("--line-half-len", type=int, default=10,
+                    help="half-length of tangent-direction sampling line "
+                         "(px)")
+    ap.add_argument("--grid-range", type=float, default=80.0,
+                    help="±range for initial grid scan (px)")
+    ap.add_argument("--grid-n", type=int, default=5,
+                    help="grid samples per axis (gridN² stacks evaluated)")
+    ap.add_argument("--omega", type=float, default=-0.000219)
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name.split(".")[0].isdigit()
+           and int(f.name.split(".")[0]) >= args.start]
+    fns = fns[:args.n_frames]
+    print(f"frames: {fns[0].name}..{fns[-1].name} ({len(fns)})")
+
+    print("loading frame data + epochs...")
+    raw_data = []
+    epochs = []
+    for fn in fns:
+        d, ep = load_frame(fn)
+        raw_data.append(d.astype(np.float32))
+        epochs.append(ep)
+    if any(e is None for e in epochs):
+        angles_deg = [float(np.degrees(i * args.omega))
+                      for i in range(len(fns))]
+    else:
+        e0 = epochs[0]
+        angles_deg = [float(np.degrees(((e - e0) / 3000.0) * args.omega))
+                      for e in epochs]
+    print(f"angle range: {angles_deg[0]:.4f}° .. {angles_deg[-1]:.4f}°")
+
+    seed_pole = (args.seed_pole_x, args.seed_pole_y)
+
+    # Find candidate seeds in the seed-pole stack.
+    print(f"\nbuilding seed-pole stack at ({seed_pole[0]:.2f}, "
+          f"{seed_pole[1]:.2f})...")
+    seed_stack = build_stack(raw_data, angles_deg, seed_pole)
+    cands = find_top_peaks(seed_stack, args.tile, args.top)
+    print(f"top-{args.top} peaks in {args.tile}:")
+    for i, (x, y, p) in enumerate(cands):
+        # show seed-pole tangent sharpness so user has a baseline
+        ts = tangent_sharpness(seed_stack, x, y, seed_pole, args.line_half_len)
+        print(f"  #{i+1}: ({x:4d},{y:4d}) peak={p:>10.0f} "
+              f"tangent-sharp(seed)={ts:.2f}")
+    if not cands:
+        print(f"no candidates in {args.tile}", file=sys.stderr)
+        return 1
+
+    score_trace = []
+
+    def evaluate(p):
+        total, nfound, _stack = score_pole(
+            tuple(p), raw_data, angles_deg, cands,
+            args.search_radius, args.line_half_len)
+        score_trace.append((float(p[0]), float(p[1]), total, nfound))
+        return total, nfound
+
+    # 1) Grid scan.
+    print(f"\ngrid scan {args.grid_n}×{args.grid_n} "
+          f"over ±{args.grid_range} px:")
+    xs = np.linspace(seed_pole[0] - args.grid_range,
+                     seed_pole[0] + args.grid_range, args.grid_n)
+    ys = np.linspace(seed_pole[1] - args.grid_range,
+                     seed_pole[1] + args.grid_range, args.grid_n)
+    best = None
+    print("    x \\ y  " + "  ".join(f"{y:7.1f}" for y in ys))
+    for x in xs:
+        row = []
+        for y in ys:
+            s, n = evaluate([x, y])
+            row.append(s)
+            if best is None or s > best[0]:
+                best = (s, float(x), float(y), n)
+        print(f"  {x:7.1f}  " + "  ".join(f"{s:7.2f}" for s in row))
+    print(f"\ngrid best: pole=({best[1]:.2f},{best[2]:.2f}) "
+          f"score={best[0]:.3f} (n_found={best[3]})")
+
+    # 2) Nelder-Mead refine.
+    print("\nNelder-Mead refinement from grid best...")
+    def neg(p):
+        s, _n = evaluate([float(p[0]), float(p[1])])
+        return -s
+
+    res = minimize(neg, x0=[best[1], best[2]], method="Nelder-Mead",
+                   options={"xatol": 0.1, "fatol": 0.005, "maxiter": 200})
+    final_pole = (float(res.x[0]), float(res.x[1]))
+    final_score = -float(res.fun)
+    move_grid = float(np.hypot(final_pole[0] - best[1],
+                               final_pole[1] - best[2]))
+    move_seed = float(np.hypot(final_pole[0] - seed_pole[0],
+                               final_pole[1] - seed_pole[1]))
+    print(f"final pole: ({final_pole[0]:.2f}, {final_pole[1]:.2f}) "
+          f"score={final_score:.3f} "
+          f"[Δ_grid={move_grid:.2f} px, Δ_seed={move_seed:.2f} px]")
+
+    # Build the final stack for output.
+    final_stack = build_stack(raw_data, angles_deg, final_pole)
+
+    tile_dir = args.out / args.tile
+    tile_dir.mkdir(parents=True, exist_ok=True)
+
+    save_fits(final_stack, tile_dir / "stack-final.fits.fz",
+              {"TILE": args.tile,
+               "POLEX": final_pole[0], "POLEY": final_pole[1],
+               "NFRAMES": len(fns),
+               "OMEGA": args.omega,
+               "SCORE": final_score})
+    save_jpg(final_stack, tile_dir / "stack-final.jpg")
+    H, W = final_stack.shape
+    x0, y0, x1, y1 = tile_bounds(args.tile, W, H)
+    tile_img = final_stack[y0:y1, x0:x1]
+    save_jpg(tile_img, tile_dir / "stack-tile.jpg")
+
+    # Per-candidate final tangent sharpness.
+    print("\nfinal-pole tangent-sharpness per candidate:")
+    final_cands = []
+    for i, (sx, sy, sp) in enumerate(cands):
+        ax, ay, peak = search_peak(final_stack, sx, sy, args.search_radius)
+        if ax < 0:
+            ts = 0.0
+        else:
+            ts = tangent_sharpness(final_stack, ax, ay, final_pole,
+                                   args.line_half_len)
+        print(f"  #{i+1}: seed_xy=({sx:4d},{sy:4d}) "
+              f"final_xy=({ax:4d},{ay:4d}) peak={peak:>10.0f} "
+              f"tangent-sharp={ts:.2f}")
+        final_cands.append((i, sx, sy, ax, ay, peak, ts))
+
+    with open(tile_dir / "candidates.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "seed_x", "seed_y", "final_x", "final_y",
+                    "peak", "tangent_sharpness"])
+        for row in final_cands:
+            w.writerow(row)
+    with open(tile_dir / "score-trace.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["pole_x", "pole_y", "score", "n_found"])
+        for row in score_trace:
+            w.writerow(row)
+    (tile_dir / "pole.txt").write_text(
+        f"tile: {args.tile}\n"
+        f"seed_pole: {seed_pole}\n"
+        f"grid_best: ({best[1]:.3f}, {best[2]:.3f})  score={best[0]:.3f}\n"
+        f"final_pole: ({final_pole[0]:.3f}, {final_pole[1]:.3f})  "
+        f"score={final_score:.3f}\n"
+        f"d_from_seed: {move_seed:.3f}\n"
+        f"d_from_grid: {move_grid:.3f}\n"
+        f"n_frames: {len(fns)}\n"
+        f"n_evaluations: {len(score_trace)}\n"
+    )
+
+    summary_path = args.out / "tile-poles.csv"
+    write_header = not summary_path.exists()
+    with open(summary_path, "a", newline="") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(["tile", "seed_x", "seed_y", "final_x", "final_y",
+                        "d_from_seed", "score", "n_cands", "n_frames",
+                        "n_evals"])
+        w.writerow([args.tile, seed_pole[0], seed_pole[1],
+                    final_pole[0], final_pole[1], move_seed,
+                    final_score, len(cands), len(fns), len(score_trace)])
+    print(f"\nappended to {summary_path}")
+
+
+if __name__ == "__main__":
+    main()

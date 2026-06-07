@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Derot N consecutive frames about a given pole, stack, crop to a tile.
+
+Useful for inspecting one tile under one local pole, to see whether
+faint sources sharpen alongside the bright candidate.
+"""
+import argparse
+import sys
+from pathlib import Path
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def load_frame(path):
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
+
+
+def derotate(img, pole, angle_deg):
+    h, w = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    return cv2.warpAffine(img.astype(np.float32), M, (w, h),
+                          flags=cv2.INTER_LINEAR,
+                          borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def tile_bounds(label, W, H):
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dir", type=Path)
+    ap.add_argument("--start", type=int, default=1)
+    ap.add_argument("--n-frames", type=int, default=600)
+    ap.add_argument("--pole-x", type=float, required=True)
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--tile", required=True, help="e.g. A5")
+    ap.add_argument("--omega", type=float, default=-0.000219)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--full-out", type=Path, default=None,
+                    help="optional: also write the full derot-stack")
+    args = ap.parse_args()
+
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name.split(".")[0].isdigit()
+           and int(f.name.split(".")[0]) >= args.start]
+    fns = fns[:args.n_frames]
+    print(f"frames: {fns[0].name} .. {fns[-1].name} ({len(fns)} total)")
+
+    # Build per-frame angles via EPOCH_MS.
+    epochs = []
+    for fn in fns:
+        _, ep = load_frame(fn)
+        epochs.append(ep)
+    if any(e is None for e in epochs):
+        angles_deg = [float(np.degrees(i * args.omega)) for i in range(len(fns))]
+    else:
+        e0 = epochs[0]
+        angles_deg = [float(np.degrees(((e - e0) / 3000.0) * args.omega))
+                      for e in epochs]
+    print(f"angle range: {angles_deg[0]:.4f}° .. {angles_deg[-1]:.4f}°")
+
+    pole = (args.pole_x, args.pole_y)
+    stack = None
+    for i, fn in enumerate(fns):
+        data, _ = load_frame(fn)
+        derot = derotate(data, pole, angles_deg[i])
+        stack = derot if stack is None else stack + derot
+        if (i + 1) % 100 == 0 or i == len(fns) - 1:
+            print(f"  [{i+1}/{len(fns)}]", flush=True)
+    print(f"stack: mean={stack.mean():.0f} max={stack.max():.0f} "
+          f"min={stack.min():.0f}")
+
+    H, W = stack.shape
+    x0, y0, x1, y1 = tile_bounds(args.tile, W, H)
+    tile = stack[y0:y1, x0:x1]
+    print(f"tile {args.tile}: bounds=({x0},{y0})..({x1},{y1}) "
+          f"shape={tile.shape}")
+    print(f"  tile mean={tile.mean():.0f} max={tile.max():.0f} "
+          f"p99.9={np.percentile(tile, 99.9):.0f}")
+
+    # Auto-stretch tighter to bring out faint stars.
+    lo = float(np.percentile(tile, 2))
+    hi = float(np.percentile(tile, 99.7))
+    img = np.clip((tile - lo) / (hi - lo + 1e-9), 0, 1)
+    u8 = (img * 255).astype(np.uint8)
+    # Upscale 3x for easy inspection.
+    pil = Image.fromarray(u8, mode="L").resize(
+        (u8.shape[1] * 3, u8.shape[0] * 3), Image.NEAREST)
+    pil.save(args.out, quality=92)
+    print(f"wrote tile JPG: {args.out} (stretch {lo:.0f}..{hi:.0f})")
+
+    if args.full_out is not None:
+        lo2 = float(np.percentile(stack, 2))
+        hi2 = float(np.percentile(stack, 99.7))
+        img2 = np.clip((stack - lo2) / (hi2 - lo2 + 1e-9), 0, 1)
+        u8_2 = (img2 * 255).astype(np.uint8)
+        Image.fromarray(u8_2).save(args.full_out, quality=92)
+        print(f"wrote full JPG: {args.full_out} (stretch {lo2:.0f}..{hi2:.0f})")
+
+
+if __name__ == "__main__":
+    main()

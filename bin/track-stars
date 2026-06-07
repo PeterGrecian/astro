@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""track-stars — per-tile bootstrap tracker for star candidates.
+
+For each requested tile, pick the brightest local maximum in the
+first frame's tile region as the seed candidate. Then alternate:
+
+  1. Track the candidate forward frame-by-frame using the current
+     local-pole estimate: predict next position by rotating about
+     the pole through the per-frame angle, search a small window
+     around the prediction, log (predicted, actual).
+  2. After K frames tracked, refit the local pole by maximising
+     the derot-stack peak/mean about a trial pole, restricted to
+     the patch around the candidate's track.
+  3. Re-derot under the new pole, extend the track further.
+
+Iterates until the track stops extending or the pole stops moving.
+
+Output per tile (under <out-dir>/<tile>/):
+  track.csv         — per-frame (predicted, actual, peak, snr)
+  pole.txt          — final local pole and per-iter trace
+  stack.fits.fz     — final derot-stack of the patch
+  stack.jpg         — auto-stretched JPG of the same
+
+Examples:
+  track-stars ~/starcam-backup/2026-05-30/01b \\
+      --tiles A5,C1,C3,D2,E1 --start 13 --frames 50 \\
+      --pole-x 942 --pole-y 148 --out ~/tmp/track-2026-06-05
+
+The tile labels match the 8x6 grid: columns A-H, rows 1-6.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+from scipy.optimize import minimize
+
+# Grid layout for tile labels — matches the visual rejection workflow.
+GRID_COLS = 8
+GRID_ROWS = 6
+
+
+def load_frame(path: Path) -> tuple[np.ndarray, int | None]:
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data, int(ep) if ep is not None else None
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def angles_from_epochs(epochs_ms: list[int | None],
+                       omega_per_frame: float,
+                       nominal_dt_ms: int = 3000) -> list[float]:
+    if any(e is None for e in epochs_ms):
+        return [float(np.degrees(i * omega_per_frame))
+                for i in range(len(epochs_ms))]
+    e0 = epochs_ms[0]
+    return [float(np.degrees(((e - e0) / nominal_dt_ms) * omega_per_frame))
+            for e in epochs_ms]
+
+
+def tile_bounds(label: str, W: int, H: int) -> tuple[int, int, int, int]:
+    """Return (x0, y0, x1, y1) for a grid label like 'A5'."""
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw, rh = W / GRID_COLS, H / GRID_ROWS
+    return (int(col * cw), int(row * rh),
+            int((col + 1) * cw), int((row + 1) * rh))
+
+
+def find_seed_in_tile(img: np.ndarray, label: str,
+                      smooth: int = 3) -> tuple[int, int, float]:
+    """Pick brightest local maximum in the tile (after a small box
+    smoothing to reject single hot pixels)."""
+    H, W = img.shape
+    x0, y0, x1, y1 = tile_bounds(label, W, H)
+    sub = img[y0:y1, x0:x1].astype(np.float32)
+    if smooth > 1:
+        sub_s = cv2.boxFilter(sub, ddepth=-1, ksize=(smooth, smooth))
+    else:
+        sub_s = sub
+    iy, ix = np.unravel_index(int(np.argmax(sub_s)), sub_s.shape)
+    return x0 + ix, y0 + iy, float(sub[iy, ix])
+
+
+def rotate_point(x: float, y: float,
+                 pole: tuple[float, float], angle_deg: float
+                 ) -> tuple[float, float]:
+    """Image-coord CCW rotation of (x,y) about pole."""
+    rad = np.deg2rad(angle_deg)
+    c, s = np.cos(rad), np.sin(rad)
+    dx, dy = x - pole[0], y - pole[1]
+    return pole[0] + c * dx - s * dy, pole[1] + s * dx + c * dy
+
+
+def search_peak(img: np.ndarray, cx: float, cy: float,
+                radius: int) -> tuple[int, int, float, float]:
+    """Find the brightest pixel within `radius` of (cx, cy).
+    Returns (peak_x, peak_y, peak_value, local_mean)."""
+    H, W = img.shape
+    x0 = max(0, int(round(cx)) - radius)
+    y0 = max(0, int(round(cy)) - radius)
+    x1 = min(W, int(round(cx)) + radius + 1)
+    y1 = min(H, int(round(cy)) + radius + 1)
+    sub = img[y0:y1, x0:x1]
+    if sub.size == 0:
+        return -1, -1, 0.0, 0.0
+    iy, ix = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    return x0 + ix, y0 + iy, float(sub[iy, ix]), float(sub.mean())
+
+
+def derotate_patch(img: np.ndarray, pole: tuple[float, float],
+                   angle_deg: float, cx: int, cy: int,
+                   patch: int) -> np.ndarray:
+    """Derot the whole image about `pole` by `angle_deg`, return the
+    patch centred at (cx, cy)."""
+    H, W = img.shape
+    M = cv2.getRotationMatrix2D(pole, angle_deg, 1.0)
+    derot = cv2.warpAffine(img.astype(np.float32), M, (W, H),
+                           flags=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    half = patch // 2
+    x0 = max(0, cx - half)
+    y0 = max(0, cy - half)
+    x1 = min(W, cx - half + patch)
+    y1 = min(H, cy - half + patch)
+    return derot[y0:y1, x0:x1]
+
+
+def stack_score(pole: tuple[float, float], imgs: list[np.ndarray],
+                angles_deg: list[float], cx: int, cy: int,
+                patch: int) -> float:
+    """Derot-stack the patches and return peak/mean as sharpness score."""
+    acc = None
+    for img, ang in zip(imgs, angles_deg):
+        p = derotate_patch(img, pole, ang, cx, cy, patch)
+        acc = p if acc is None else acc + p
+    if acc is None or acc.size == 0:
+        return 0.0
+    m = float(acc.mean())
+    if m <= 0:
+        return 0.0
+    return float(acc.max()) / m
+
+
+def track_tile(label: str, imgs: list[np.ndarray],
+               angles_deg: list[float], frame_nums: list[int],
+               init_pole: tuple[float, float],
+               patch: int, search_radius: int,
+               refit_every: int) -> dict:
+    """Bootstrap-track one tile's brightest candidate.
+
+    Returns dict with:
+      seed_xy, final_pole, track (list of dicts), score_trace,
+      pole_trace, stack (np.ndarray)
+    """
+    # Seed: brightest in tile on first frame.
+    sx, sy, _seed_v = find_seed_in_tile(imgs[0], label)
+    pole = init_pole
+
+    track = []  # per-frame records
+    pole_trace = [pole]
+    score_trace = []
+
+    # We'll alternate: track K frames forward using current pole,
+    # then refit pole locally, then continue. Within each tracking
+    # block the predicted position evolves by rotating the *seed
+    # position* (frame 0) by angles_deg[i] under the current pole —
+    # so a better pole gives a better prediction for every frame.
+
+    n = len(imgs)
+    end = 0
+    while end < n:
+        end = min(n, end + refit_every) if end > 0 else min(n, refit_every)
+
+        # Track from scratch up to `end` with the current pole.
+        track.clear()
+        for i in range(end):
+            px, py = rotate_point(sx, sy, pole, angles_deg[i])
+            ax, ay, peak, mean = search_peak(imgs[i], px, py, search_radius)
+            if ax < 0:
+                # Off-frame: stop early.
+                break
+            snr = peak / mean if mean > 0 else 0.0
+            track.append({
+                "frame": frame_nums[i],
+                "i": i,
+                "pred_x": float(px), "pred_y": float(py),
+                "act_x": ax, "act_y": ay,
+                "peak": peak, "local_mean": mean, "snr": snr,
+                "resid_x": ax - px, "resid_y": ay - py,
+                "resid": float(np.hypot(ax - px, ay - py)),
+            })
+
+        if not track:
+            break
+
+        # Refit pole by maximising stack sharpness over the tracked
+        # frames, restricted to a patch around the seed pixel.
+        sub_imgs = imgs[:len(track)]
+        sub_angles = angles_deg[:len(track)]
+
+        def neg_score(p):
+            return -stack_score((float(p[0]), float(p[1])),
+                                sub_imgs, sub_angles, sx, sy, patch)
+
+        # Nelder-Mead is local — start from current pole.
+        res = minimize(neg_score, x0=[pole[0], pole[1]],
+                       method="Nelder-Mead",
+                       options={"xatol": 0.2, "fatol": 0.05,
+                                "maxiter": 100})
+        new_pole = (float(res.x[0]), float(res.x[1]))
+        new_score = -float(res.fun)
+        old_score = stack_score(pole, sub_imgs, sub_angles, sx, sy, patch)
+
+        pole_trace.append(new_pole)
+        score_trace.append({
+            "frames_used": len(track),
+            "old_pole": pole, "new_pole": new_pole,
+            "old_score": old_score, "new_score": new_score,
+            "move": float(np.hypot(new_pole[0] - pole[0],
+                                   new_pole[1] - pole[1])),
+        })
+
+        # Accept new pole if it improves; otherwise stop refining.
+        if new_score > old_score + 0.01:
+            pole = new_pole
+        else:
+            break
+
+    # Final stack for output.
+    final_stack = None
+    for img, ang in zip(imgs[:len(track)], angles_deg[:len(track)]):
+        p = derotate_patch(img, pole, ang, sx, sy, patch)
+        final_stack = p if final_stack is None else final_stack + p
+
+    return {
+        "tile": label,
+        "seed_xy": (sx, sy),
+        "init_pole": init_pole,
+        "final_pole": pole,
+        "track": track,
+        "pole_trace": pole_trace,
+        "score_trace": score_trace,
+        "stack": final_stack,
+        "n_frames_tracked": len(track),
+    }
+
+
+def save_stack_jpg(stack: np.ndarray, path: Path) -> None:
+    if stack is None or stack.size == 0:
+        return
+    lo, hi = np.percentile(stack, [5, 99.5])
+    if hi <= lo:
+        hi = lo + 1.0
+    u8 = np.clip((stack - lo) / (hi - lo), 0, 1) * 255
+    Image.fromarray(u8.astype(np.uint8)).save(path, quality=92)
+
+
+def save_stack_fits(stack: np.ndarray, path: Path,
+                    meta: dict) -> None:
+    if stack is None or stack.size == 0:
+        return
+    primary = fits.PrimaryHDU()
+    comp = fits.CompImageHDU(data=stack.astype(np.int32),
+                             compression_type="RICE_1")
+    for k, v in meta.items():
+        comp.header[k] = v
+    fits.HDUList([primary, comp]).writeto(path, overwrite=True)
+
+
+def write_track_csv(track: list[dict], path: Path) -> None:
+    if not track:
+        path.write_text("")
+        return
+    fieldnames = ["frame", "i", "pred_x", "pred_y", "act_x", "act_y",
+                  "peak", "local_mean", "snr",
+                  "resid_x", "resid_y", "resid"]
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for row in track:
+            w.writerow(row)
+
+
+def write_pole_log(result: dict, path: Path) -> None:
+    lines = []
+    lines.append(f"tile: {result['tile']}")
+    lines.append(f"seed_xy: {result['seed_xy']}")
+    lines.append(f"init_pole: {result['init_pole']}")
+    lines.append(f"final_pole: {result['final_pole']}")
+    lines.append(f"n_frames_tracked: {result['n_frames_tracked']}")
+    lines.append("")
+    lines.append("iter,frames_used,old_pole_x,old_pole_y,new_pole_x,new_pole_y,old_score,new_score,move_px")
+    for i, s in enumerate(result["score_trace"]):
+        lines.append(
+            f"{i+1},{s['frames_used']},{s['old_pole'][0]:.3f},"
+            f"{s['old_pole'][1]:.3f},{s['new_pole'][0]:.3f},"
+            f"{s['new_pole'][1]:.3f},{s['old_score']:.3f},"
+            f"{s['new_score']:.3f},{s['move']:.3f}"
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    ap.add_argument("dir", type=Path, help="binned frames dir (NNNN.fits.fz)")
+    ap.add_argument("--tiles", required=True,
+                    help="comma-list of tile labels e.g. A5,C1,C3,D2,E1")
+    ap.add_argument("--start", type=int, default=1,
+                    help="first frame number (e.g. 13 → start at 0013.fits.fz)")
+    ap.add_argument("--frames", type=int, default=50,
+                    help="how many consecutive frames to use")
+    ap.add_argument("--pole-x", type=float, required=True)
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--patch", type=int, default=40,
+                    help="patch size for derot-stack scoring (binned px)")
+    ap.add_argument("--search-radius", type=int, default=8,
+                    help="±px around prediction in which to find the peak")
+    ap.add_argument("--refit-every", type=int, default=10,
+                    help="refit local pole after every N frames tracked")
+    ap.add_argument("--omega", type=float, default=-0.000219,
+                    help="rotation rate (rad/frame); sign matches camera")
+    ap.add_argument("--out", type=Path, required=True,
+                    help="output dir; per-tile subdirs are created")
+    args = ap.parse_args()
+
+    tiles = [t.strip().upper() for t in args.tiles.split(",") if t.strip()]
+    print(f"tiles: {tiles}")
+
+    # Filter and order the frames.
+    fns = sorted(args.dir.glob("*.fits.fz"))
+    fns = [f for f in fns
+           if f.name.split(".")[0].isdigit()
+           and int(f.name.split(".")[0]) >= args.start]
+    fns = fns[:args.frames]
+    if not fns:
+        print(f"no frames found in {args.dir} from {args.start}",
+              file=sys.stderr)
+        return 1
+    print(f"loaded {len(fns)} frames: {fns[0].name} .. {fns[-1].name}")
+
+    # Frame numbers (for CSV output) — the leading number on the filename.
+    frame_nums = [int(f.name.split(".")[0]) for f in fns]
+
+    # Load + epoch + angle prep, once.
+    print("reading frame data + EPOCH_MS...")
+    loaded = [load_frame(fn) for fn in fns]
+    imgs = [d.astype(np.float32) for d, _ in loaded]
+    epochs = [e for _, e in loaded]
+    angles_deg = angles_from_epochs(epochs, args.omega)
+    if any(e is None for e in epochs):
+        print("  warn: some frames lack EPOCH_MS — fell back to frame-index")
+    print(f"angle range: {angles_deg[0]:.4f}° .. {angles_deg[-1]:.4f}°")
+
+    init_pole = (args.pole_x, args.pole_y)
+    args.out.mkdir(parents=True, exist_ok=True)
+
+    # Summary table for end-of-run.
+    summary = []
+    summary.append("tile,seed_x,seed_y,init_px,init_py,final_px,final_py,"
+                   "dpole,n_tracked,final_resid_rms")
+
+    for tile in tiles:
+        print(f"\n=== {tile} ===")
+        result = track_tile(tile, imgs, angles_deg, frame_nums, init_pole,
+                            patch=args.patch,
+                            search_radius=args.search_radius,
+                            refit_every=args.refit_every)
+        sx, sy = result["seed_xy"]
+        fpx, fpy = result["final_pole"]
+        dpole = float(np.hypot(fpx - init_pole[0], fpy - init_pole[1]))
+        resids = [t["resid"] for t in result["track"]]
+        resid_rms = float(np.sqrt(np.mean(np.square(resids)))) if resids else 0.0
+        print(f"  seed (x,y) = ({sx},{sy})")
+        print(f"  final pole = ({fpx:.2f}, {fpy:.2f}) "
+              f"[Δ from init = {dpole:.2f} px]")
+        print(f"  tracked {result['n_frames_tracked']} frames, "
+              f"final residual RMS = {resid_rms:.2f} px")
+        for i, s in enumerate(result["score_trace"]):
+            print(f"    iter{i+1}: frames={s['frames_used']:3d} "
+                  f"pole=({s['new_pole'][0]:7.2f},{s['new_pole'][1]:7.2f}) "
+                  f"score={s['new_score']:.2f} (was {s['old_score']:.2f}, "
+                  f"moved {s['move']:.2f}px)")
+
+        tile_dir = args.out / tile
+        tile_dir.mkdir(parents=True, exist_ok=True)
+        write_track_csv(result["track"], tile_dir / "track.csv")
+        write_pole_log(result, tile_dir / "pole.txt")
+        save_stack_fits(
+            result["stack"], tile_dir / "stack.fits.fz",
+            {"TILE": tile,
+             "SEEDX": sx, "SEEDY": sy,
+             "POLEX": fpx, "POLEY": fpy,
+             "NFRAMES": result["n_frames_tracked"]})
+        save_stack_jpg(result["stack"], tile_dir / "stack.jpg")
+
+        summary.append(f"{tile},{sx},{sy},{init_pole[0]},{init_pole[1]},"
+                       f"{fpx:.3f},{fpy:.3f},{dpole:.3f},"
+                       f"{result['n_frames_tracked']},{resid_rms:.3f}")
+
+    (args.out / "summary.csv").write_text("\n".join(summary) + "\n")
+    print(f"\nsummary → {args.out / 'summary.csv'}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

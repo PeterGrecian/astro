@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""fit-distortion-from-poles — recover true pole + radial distortion
+from a set of per-tile fitted "effective poles".
+
+Model
+-----
+Lens has radial distortion centred at optical centre C, parametrised
+by k1, k2:
+
+    r_distorted = r_true * (1 + k1*r² + k2*r⁴)        (r normalised by R)
+
+A real star at true position p rotates in the sky about the true pole
+P. Through the lens, the apparent rotation looks like rotation about
+a *different* centre — the "effective pole" for the local image
+region. The effective pole at tile centre p is approximately
+
+    P_eff(p) ≈ p + (1 / J_r(p)) * (P_true - p)
+
+where J_r is the radial Jacobian of the distortion at p.
+
+For radial distortion D(r) = r * (1 + k1*r² + k2*r⁴) we have
+
+    J_r(r) = d/dr [r*(1 + k1*r² + k2*r⁴)] = 1 + 3*k1*r² + 5*k2*r⁴
+
+so
+
+    P_eff(p) - p ≈ (1 / (1 + 3*k1*ρ² + 5*k2*ρ⁴)) * (P_true - p)
+
+where ρ = |p - C| / R is the normalised radius of the tile from the
+optical centre.
+
+Unknowns: (Px, Py, Cx, Cy, k1, k2) — 6 parameters.
+Observations: each tile contributes 2 numbers (x and y of P_eff).
+Need at least 4 tiles for a (well-conditioned) solve; the more the
+better.
+
+Output
+------
+* Console: fitted parameters, per-tile residual.
+* Optionally: a CSV with predicted vs measured per-tile P_eff.
+
+This is a least-squares fit by Levenberg–Marquardt via scipy.
+
+Examples
+--------
+    fit-distortion-from-poles tile-poles.csv
+
+    fit-distortion-from-poles tile-poles.csv \\
+        --fix-centre 648,486 \\
+        --predictions-out predictions.csv
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import numpy as np
+from scipy.optimize import least_squares
+
+
+GRID_COLS = 8
+GRID_ROWS = 6
+
+# Normalising image radius. Use half-diagonal of the binned image
+# (1296x972) so ρ ∈ ~[0, 1] for points inside the image.
+IMG_W = 1296
+IMG_H = 972
+R_NORM = float(np.hypot(IMG_W / 2, IMG_H / 2))  # ≈ 810
+
+
+def tile_centre(label: str) -> tuple[float, float]:
+    col = ord(label[0].upper()) - ord("A")
+    row = int(label[1:]) - 1
+    cw = IMG_W / GRID_COLS
+    rh = IMG_H / GRID_ROWS
+    return (col + 0.5) * cw, (row + 0.5) * rh
+
+
+def predict_p_eff(p_tile: np.ndarray, P_true: np.ndarray,
+                  C: np.ndarray, k1: float, k2: float) -> np.ndarray:
+    """Predicted P_eff for each tile centre p_tile.
+
+    p_tile: (N, 2)
+    returns: (N, 2)
+    """
+    rel = p_tile - C  # tile pos relative to optical centre
+    rho2 = (rel[:, 0] ** 2 + rel[:, 1] ** 2) / (R_NORM ** 2)
+    J = 1.0 + 3.0 * k1 * rho2 + 5.0 * k2 * rho2 * rho2
+    # P_eff = p_tile + (1/J) * (P_true - p_tile)
+    delta = (P_true - p_tile) / J[:, None]
+    return p_tile + delta
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("poles_csv", type=Path,
+                    help="tile-poles.csv from fit-tile-pole-tangent")
+    ap.add_argument("--exclude-tiles", default="",
+                    help="comma-list of tiles to exclude from the fit")
+    ap.add_argument("--include-only", default=None,
+                    help="comma-list of tiles to USE (overrides exclude)")
+    ap.add_argument("--score-min", type=float, default=0.0,
+                    help="reject tiles below this fitted score")
+    ap.add_argument("--seed-px", type=float, default=929.5,
+                    help="initial guess for true pole x")
+    ap.add_argument("--seed-py", type=float, default=171.7,
+                    help="initial guess for true pole y")
+    ap.add_argument("--seed-cx", type=float, default=648.0,
+                    help="initial guess for optical centre x "
+                         "(default: image centre)")
+    ap.add_argument("--seed-cy", type=float, default=486.0,
+                    help="initial guess for optical centre y")
+    ap.add_argument("--fix-centre", default=None,
+                    help="comma X,Y to lock the optical centre")
+    ap.add_argument("--predictions-out", type=Path, default=None,
+                    help="write per-tile predicted vs measured CSV")
+    args = ap.parse_args()
+
+    rows = list(csv.DictReader(open(args.poles_csv)))
+    if not rows:
+        print("no rows in tile-poles.csv", file=sys.stderr)
+        return 1
+
+    exclude = {t.strip().upper() for t in args.exclude_tiles.split(",")
+               if t.strip()}
+    if args.include_only:
+        keep = {t.strip().upper() for t in args.include_only.split(",")
+                if t.strip()}
+        rows = [r for r in rows if r["tile"] in keep]
+    else:
+        rows = [r for r in rows if r["tile"] not in exclude]
+    rows = [r for r in rows if float(r["score"]) >= args.score_min]
+    if len(rows) < 4:
+        print(f"only {len(rows)} tiles after filter — need ≥4 for the fit",
+              file=sys.stderr)
+        return 1
+
+    tiles = [r["tile"] for r in rows]
+    p_tile = np.array([tile_centre(t) for t in tiles], dtype=float)
+    P_eff_measured = np.array(
+        [[float(r["final_x"]), float(r["final_y"])] for r in rows], dtype=float)
+    scores = np.array([float(r["score"]) for r in rows])
+    # Weights: tangent-sharpness score; clip outliers.
+    weights = np.clip(scores, 1.0, None)
+    print(f"fitting {len(tiles)} tiles: {tiles}")
+
+    if args.fix_centre:
+        cx_fix, cy_fix = (float(v) for v in args.fix_centre.split(","))
+        print(f"optical centre LOCKED at ({cx_fix:.1f}, {cy_fix:.1f})")
+        def residuals(params):
+            Px, Py, k1, k2 = params
+            P_true = np.array([Px, Py])
+            C = np.array([cx_fix, cy_fix])
+            pred = predict_p_eff(p_tile, P_true, C, k1, k2)
+            r = (pred - P_eff_measured) * weights[:, None]
+            return r.ravel()
+        x0 = [args.seed_px, args.seed_py, 0.0, 0.0]
+        bounds = ([-1e4, -1e4, -1.0, -1.0], [1e4, 1e4, 1.0, 1.0])
+    else:
+        def residuals(params):
+            Px, Py, Cx, Cy, k1, k2 = params
+            P_true = np.array([Px, Py])
+            C = np.array([Cx, Cy])
+            pred = predict_p_eff(p_tile, P_true, C, k1, k2)
+            r = (pred - P_eff_measured) * weights[:, None]
+            return r.ravel()
+        x0 = [args.seed_px, args.seed_py,
+              args.seed_cx, args.seed_cy, 0.0, 0.0]
+        bounds = ([-1e4, -1e4, 0.0, 0.0, -1.0, -1.0],
+                  [1e4, 1e4, IMG_W, IMG_H, 1.0, 1.0])
+
+    res = least_squares(residuals, x0=x0, bounds=bounds,
+                        method="trf", x_scale="jac")
+    if args.fix_centre:
+        Px, Py, k1, k2 = res.x
+        Cx, Cy = cx_fix, cy_fix
+    else:
+        Px, Py, Cx, Cy, k1, k2 = res.x
+
+    print()
+    print("=== fitted parameters ===")
+    print(f"true pole       P = ({Px:.3f}, {Py:.3f})")
+    print(f"optical centre  C = ({Cx:.3f}, {Cy:.3f})")
+    print(f"distortion       k1 = {k1:+.6e}")
+    print(f"distortion       k2 = {k2:+.6e}")
+    print(f"r_norm used       = {R_NORM:.2f}  (so r=R_NORM ⇒ ρ=1)")
+    print(f"cost              = {0.5 * np.sum(res.fun**2):.2f}")
+
+    # Per-tile residuals (un-weighted, for readability).
+    P_true = np.array([Px, Py])
+    C = np.array([Cx, Cy])
+    predicted = predict_p_eff(p_tile, P_true, C, k1, k2)
+    diffs = predicted - P_eff_measured
+    mag = np.hypot(diffs[:, 0], diffs[:, 1])
+    rms = float(np.sqrt(np.mean(mag ** 2)))
+    print()
+    print(f"=== per-tile residuals (predicted − measured) ===")
+    print(f"{'tile':>5} {'tile_x':>7} {'tile_y':>7} "
+          f"{'meas_x':>8} {'meas_y':>8} "
+          f"{'pred_x':>8} {'pred_y':>8} "
+          f"{'res_x':>7} {'res_y':>7} {'|res|':>6} "
+          f"{'score':>6}")
+    for i, t in enumerate(tiles):
+        print(f"{t:>5} {p_tile[i, 0]:>7.1f} {p_tile[i, 1]:>7.1f} "
+              f"{P_eff_measured[i, 0]:>8.2f} {P_eff_measured[i, 1]:>8.2f} "
+              f"{predicted[i, 0]:>8.2f} {predicted[i, 1]:>8.2f} "
+              f"{diffs[i, 0]:>+7.2f} {diffs[i, 1]:>+7.2f} {mag[i]:>6.2f} "
+              f"{scores[i]:>6.2f}")
+    print()
+    print(f"RMS |residual| = {rms:.3f} px")
+
+    if args.predictions_out:
+        with open(args.predictions_out, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["tile", "tile_x", "tile_y",
+                        "meas_x", "meas_y",
+                        "pred_x", "pred_y",
+                        "res_x", "res_y", "res_mag",
+                        "score"])
+            for i, t in enumerate(tiles):
+                w.writerow([t, p_tile[i, 0], p_tile[i, 1],
+                            P_eff_measured[i, 0], P_eff_measured[i, 1],
+                            predicted[i, 0], predicted[i, 1],
+                            diffs[i, 0], diffs[i, 1], mag[i],
+                            scores[i]])
+        print(f"wrote {args.predictions_out}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

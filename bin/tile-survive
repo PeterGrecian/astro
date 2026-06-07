@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Across N frames, drop bottom K by p99.9-excess each frame.
+Report which tiles survive in every frame, and how often each tile is dropped."""
+import sys
+from pathlib import Path
+from collections import Counter
+import numpy as np
+from astropy.io import fits
+
+DIR = Path(sys.argv[1])
+N = int(sys.argv[2])
+K = int(sys.argv[3])
+REJECT_HARD = set(sys.argv[4].split(","))
+START = int(sys.argv[5]) if len(sys.argv) > 5 else 13
+
+frames = sorted(DIR.glob("*.fits.fz"))
+frames = [f for f in frames if int(f.stem) >= START][:N]
+print(f"loaded {len(frames)} frames from {DIR.name} starting {frames[0].stem}")
+
+ROWS, COLS = 6, 8
+all_tiles = {f"{chr(ord('A')+c)}{r+1}" for r in range(ROWS) for c in range(COLS)}
+eligible = all_tiles - REJECT_HARD
+print(f"eligible tiles after hard reject: {len(eligible)} / 48")
+
+drop_counts = Counter()
+surviving_per_frame = []
+for fp in frames:
+    with fits.open(fp) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                data = hdu.data
+                break
+    H, W = data.shape
+    scores = []
+    for r in range(ROWS):
+        for c in range(COLS):
+            label = f"{chr(ord('A')+c)}{r+1}"
+            if label not in eligible:
+                continue
+            x0, y0 = int(c*W/COLS), int(r*H/ROWS)
+            x1, y1 = int((c+1)*W/COLS), int((r+1)*H/ROWS)
+            t = data[y0:y1, x0:x1]
+            scores.append((label, float(np.percentile(t, 99.9) - t.mean())))
+    scores.sort(key=lambda x: x[1])
+    dropped_this_frame = {lab for lab, _ in scores[:K]}
+    surviving_this_frame = eligible - dropped_this_frame
+    surviving_per_frame.append(surviving_this_frame)
+    for d in dropped_this_frame:
+        drop_counts[d] += 1
+
+survives_all = set.intersection(*surviving_per_frame)
+print(f"\nsurvive ALL {len(frames)} frames: {len(survives_all)}")
+print(f"  {sorted(survives_all)}")
+print(f"\ndrop frequency (most often dropped first):")
+for tile, count in drop_counts.most_common():
+    pct = 100 * count / len(frames)
+    print(f"  {tile}: dropped in {count}/{len(frames)} frames ({pct:.0f}%)")

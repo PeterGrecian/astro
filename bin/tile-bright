@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""List per-tile brightness for non-rejected cells, in decreasing order."""
+import argparse
+from pathlib import Path
+import numpy as np
+from astropy.io import fits
+
+ap = argparse.ArgumentParser()
+ap.add_argument("input")
+ap.add_argument("--cols", type=int, default=8)
+ap.add_argument("--rows", type=int, default=6)
+ap.add_argument("--reject", default="")
+ap.add_argument("--metric", choices=["mean", "p95", "max"], default="mean")
+args = ap.parse_args()
+
+reject = {r.strip().upper() for r in args.reject.split(",") if r.strip()}
+
+with fits.open(args.input) as h:
+    for hdu in h:
+        if hdu.data is not None and hdu.data.ndim == 2:
+            data = hdu.data
+            break
+
+H, W = data.shape
+cw, rh = W / args.cols, H / args.rows
+
+results = []
+for r in range(args.rows):
+    for c in range(args.cols):
+        label = f"{chr(ord('A')+c)}{r+1}"
+        if label in reject:
+            continue
+        x0, y0 = int(c * cw), int(r * rh)
+        x1, y1 = int((c + 1) * cw), int((r + 1) * rh)
+        tile = data[y0:y1, x0:x1]
+        results.append((label, float(tile.mean()),
+                       float(np.percentile(tile, 95)),
+                       int(tile.max())))
+
+key = {"mean": 1, "p95": 2, "max": 3}[args.metric]
+results.sort(key=lambda r: r[key], reverse=True)
+
+print(f"{'cell':>5} {'mean':>7} {'p95':>7} {'max':>6}")
+for label, m, p95, mx in results:
+    print(f"{label:>5} {m:7.1f} {p95:7.1f} {mx:6d}")
