@@ -71,6 +71,11 @@ def main():
                     choices=["snr", "flux", "fwhm", "none", "id"])
     ap.add_argument("--label-font-size", type=int, default=14)
     ap.add_argument("--circle-width", type=int, default=2)
+    ap.add_argument("--number", action="store_true",
+                    help="draw a blue rank (1=brightest by flux) by each "
+                         "detection in addition to the SNR label")
+    ap.add_argument("--number-colour", default="100,180,255",
+                    help="R,G,B for the rank numbers (default light blue)")
     args = ap.parse_args()
 
     pil = Image.open(args.in_jpg).convert("RGB")
@@ -90,10 +95,26 @@ def main():
         off_x, off_y = x0, y0
 
     rows = list(csv.DictReader(open(args.detections)))
+    # Rank by flux descending (1 = brightest), so labels match the
+    # tabulated views we usually inspect.
+    flux_order = sorted(range(len(rows)),
+                        key=lambda i: -float(rows[i].get("flux", 0)))
+    rank_of = {i: r + 1 for r, i in enumerate(flux_order)}
+
+    num_colour = tuple(int(v) for v in args.number_colour.split(","))
+    num_colour = num_colour + (255,)
+    num_font = font
+    if args.number:
+        try:
+            num_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+                args.label_font_size + 4)
+        except OSError:
+            num_font = font
     drawn = 0
     skipped = 0
     img_w, img_h = pil.size
-    for r in rows:
+    for idx, r in enumerate(rows):
         cx_full = float(r["centroid_x"])
         cy_full = float(r["centroid_y"])
         flux = float(r.get("flux", 0))
@@ -128,6 +149,18 @@ def main():
             bbox = draw.textbbox((tx, ty), text, font=font)
             draw.rectangle(bbox, fill=(0, 0, 0, 200))
             draw.text((tx, ty), text, fill=col, font=font)
+
+        if args.number:
+            num_text = f"#{rank_of[idx]}"
+            # Place number to the LEFT of the circle so it doesn't fight
+            # the SNR label on the right.
+            nbox_w = num_font.getlength(num_text)
+            nx = int(cx_img - rad_img - nbox_w - 4)
+            ny = int(cy_img - rad_img - 2)
+            bbox = draw.textbbox((nx, ny), num_text, font=num_font)
+            draw.rectangle(bbox, fill=(0, 0, 0, 220))
+            draw.text((nx, ny), num_text, fill=num_colour, font=num_font)
+
         drawn += 1
 
     pil.save(args.out, quality=92)
