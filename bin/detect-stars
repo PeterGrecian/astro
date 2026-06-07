@@ -100,15 +100,28 @@ def local_sky_stats(stack, x, y, half_box=DEFAULT_SKY_BOX):
 
 
 def find_local_maxima(stack, x0, y0, x1, y1, sigma_threshold,
-                      smooth=3, min_sep=10):
-    """Return [(x, y, peak_value)] in box, sorted by peak."""
+                      smooth=3, min_sep=10, dilate_kernel=5):
+    """Return [(x, y, peak_value)] in box, sorted by peak.
+
+    smooth        — box-filter kernel; 1 disables smoothing (so close-
+                     packed peaks aren't blurred together).
+    dilate_kernel — local-max detection footprint (px). Smaller →
+                     more, more-crowded peaks. 3 is the minimum that
+                     still rejects single-pixel noise pairs.
+    min_sep       — post-detection minimum separation. Smaller →
+                     more peaks survive in crowded fields.
+    """
     sub = stack[y0:y1, x0:x1]
-    smoothed = cv2.boxFilter(sub, ddepth=-1, ksize=(smooth, smooth))
+    if smooth > 1:
+        smoothed = cv2.boxFilter(sub, ddepth=-1, ksize=(smooth, smooth))
+    else:
+        smoothed = sub.copy()
     bg_med = float(np.median(smoothed))
     bg_mad = float(np.median(np.abs(smoothed - bg_med)))
     bg_sigma = max(1.4826 * bg_mad, 1.0)
     thresh = bg_med + sigma_threshold * bg_sigma
-    dil = cv2.dilate(smoothed, np.ones((5, 5), np.uint8))
+    dil = cv2.dilate(smoothed, np.ones((dilate_kernel, dilate_kernel),
+                                       np.uint8))
     mask = (smoothed == dil) & (smoothed > thresh)
     ys, xs = np.where(mask)
     if len(xs) == 0:
@@ -306,11 +319,22 @@ def main():
                     help="filename of the first frame in the stack")
     ap.add_argument("--sigma-threshold", type=float, default=4.0,
                     help="local-max threshold in sky σ")
+    ap.add_argument("--smooth", type=int, default=3,
+                    help="box-filter kernel for peak finding (1 = none)")
+    ap.add_argument("--dilate-kernel", type=int, default=5,
+                    help="local-max detection footprint (px); smaller "
+                         "→ more crowded peaks survive")
+    ap.add_argument("--min-sep", type=int, default=10,
+                    help="post-detection min separation (px)")
     ap.add_argument("--max-detections", type=int, default=500)
     ap.add_argument("--min-fwhm", type=float, default=1.2,
                     help="reject narrower than this (hot pixel)")
     ap.add_argument("--max-fwhm", type=float, default=8.0,
                     help="reject wider than this (clouds, blends)")
+    ap.add_argument("--max-ecc", type=float, default=1.01,
+                    help="reject elongated detections above this "
+                         "eccentricity (1.01 = no filter; ~0.95 rejects "
+                         "hot-pixel streaks)")
     ap.add_argument("--out", type=Path, required=True,
                     help="output CSV")
     args = ap.parse_args()
@@ -323,7 +347,9 @@ def main():
     print(f"tile {args.tile}: ({x0},{y0})..({x1},{y1})")
 
     cands, bg_med, bg_sigma = find_local_maxima(
-        stack, x0, y0, x1, y1, args.sigma_threshold)
+        stack, x0, y0, x1, y1, args.sigma_threshold,
+        smooth=args.smooth, min_sep=args.min_sep,
+        dilate_kernel=args.dilate_kernel)
     print(f"local maxima above {args.sigma_threshold}σ: {len(cands)} "
           f"(sky med={bg_med:.0f} σ={bg_sigma:.1f})")
     cands = cands[:args.max_detections]
@@ -338,6 +364,8 @@ def main():
         if gfit is None:
             continue
         if not (args.min_fwhm <= gfit["fwhm_mean"] <= args.max_fwhm):
+            continue
+        if gfit["eccentricity"] > args.max_ecc:
             continue
         flux, flux_err, sky_med_aper, sky_sig_aper = aperture_flux(
             stack, gfit["centroid_x"], gfit["centroid_y"])
