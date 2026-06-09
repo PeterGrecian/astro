@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""astrocam long-running capture loop.
+"""astrocam long-running capture loop, picamera2 streaming.
 
-DAY mode (1-min tick):
-  - cover closed
-  - auto-exposure JPEG probe -> scene_luminance -> hysteresis to NIGHT
-  - on DAY->NIGHT: open cover
+Like starcam: a single Picamera2 video pipeline runs continuously with
+double-buffered raw frames. Each iteration pulls the most recent completed
+frame via capture_request() while the next is already exposing.
 
-NIGHT mode (10-s tick):
-  - cover open
-  - 10s @ gain 1 raw -> .fits.fz (SBGGR10, Rice). DNG discarded.
-  - scene_luminance from the FITS feeds the NIGHT->DAY hysteresis
-  - on NIGHT->DAY: close cover
-  - DAOStarFinder over sky tiles every STARFIND_INTERVAL_S (~5 min)
+Day mode: short auto-ish exposure (gain 1.0, 100ms) for cheap mean check.
+Night mode: 10s exposure (sensor max for IMX219 is ~11.76s), gain 1.0,
+  raw Bayer -> CompImageHDU (.fits.fz) every frame.
 
-Layout: ~/astrocam-frames/YYYY-MM-DD/HHMM.{jpg,fits.fz}
+Mode is driven by frame.mean() of the Bayer image, with hysteresis +
+lockout, exactly like starcam. Cover open/close happens on the flip.
+
+DAOStarFinder runs every STARFIND_INTERVAL_S over the unoccluded tiles,
+with edge-guard and persistence filters to suppress hot pixels and
+tile-boundary artefacts.
+
+Layout: ~/astrocam-frames/YYYY-MM-DD/HHMMSS.fits.fz
 State:  /var/lib/astrocam/state.json
 """
 import json
@@ -25,11 +28,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
-import rawpy
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
-from PIL import Image
 from photutils.detection import DAOStarFinder
+from picamera2 import Picamera2
 
 HOME = Path.home()
 HERE = Path(__file__).resolve().parent
@@ -38,24 +40,39 @@ STATE_DIR = Path("/var/lib/astrocam")
 STATE_FILE = STATE_DIR / "state.json"
 OCCLUSION_FILE = HERE / "occlusion.json"
 
-DAY_TICK_S = 60
-NIGHT_TICK_S = 10
-NIGHT_SHUTTER_US = 10_000_000
+# IMX219 max exposure is ~11.76 s. 10 s gives headroom.
+NIGHT_EXPOSURE_US = 10_000_000
 NIGHT_GAIN = 1.0
+# Day mode: short exposure so the cover-closed scene doesn't saturate
+# the loop. Cheap mean check only — we don't save day frames.
+DAY_EXPOSURE_US = 100_000
+DAY_GAIN = 1.0
+
+RESOLUTION = (3280, 2464)
+RAW_FORMAT = "SBGGR10"  # IMX219 native, confirmed from rpicam-still
+
+# Mode thresholds on Bayer frame.mean(). 10-bit data 0..1023.
+# These were eclipticam-style luminance numbers; we want raw means.
+# 10s @ gain 1 dark sky should be ~30-60. Twilight 200-500. Saturated 900+.
+# Tuned from first observation 2026-06-09: dark cover-closed mean was ~3,
+# evening twilight at the open cover was ~30-100.
+COVER_DARK_MEAN = 80.0    # frame.mean <= this for N → open cover
+COVER_BRIGHT_MEAN = 250.0  # frame.mean >= this for N → close cover
+COVER_HYST_FRAMES = 5
+COVER_LOCKOUT_S = 300
+
+# Per-tile star detection
 STARFIND_INTERVAL_S = 300
-
-# Hysteresis on scene_luminance = mean_pixel / (shutter_us * gain).
-# Reusing eclipticam's thresholds; recalibrate from first-night data.
-LUMINANCE_NIGHT_ENTER = 0.0005
-LUMINANCE_NIGHT_EXIT = 0.005
-MODE_HOLD_TICKS = 3
-
-# DAOStarFinder per tile
 STARFIND_FWHM = 2.5
 STARFIND_THRESHOLD_SIGMA = 5.0
-
-_EXIF_EXPOSURE = 33434
-_EXIF_ISO = 34855
+# Edge-guard: reject detections within this many pixels of any tile
+# boundary in the half-res grey image. Tile-boundary artefacts dominated
+# the first night's results.
+STARFIND_EDGE_GUARD_PX = 5
+# Persistence filter: a candidate present at the same (x, y) +/- this many
+# pixels in two consecutive starfind runs is a hot pixel, not a star. Real
+# stars rotate around the local pole and move noticeably in 5 min.
+PERSISTENCE_TOL_PX = 1.5
 
 
 def utcnow():
@@ -77,91 +94,59 @@ def save_state(state):
 
 
 def cover(position):
-    """Drive the SG90 cover. Reuses the same gpiozero path as cover.py."""
     subprocess.run([sys.executable, str(HERE / "cover.py"), position], check=True)
 
 
-def scene_luminance_from_jpeg(path):
-    try:
-        ifd = Image.open(path).getexif().get_ifd(0x8769)
-        shutter_us = float(ifd[_EXIF_EXPOSURE]) * 1e6
-        iso = float(ifd[_EXIF_ISO])
-    except Exception:
-        return None
-    mean = float(np.array(Image.open(path).convert("L")).mean())
-    if shutter_us * iso <= 0:
-        return None
-    return mean / (shutter_us * iso / 100.0)
+def make_camera():
+    cam = Picamera2()
+    cfg = cam.create_video_configuration(
+        raw={"size": RESOLUTION, "format": RAW_FORMAT},
+        main={"size": (640, 480), "format": "RGB888"},
+        buffer_count=4,
+    )
+    cam.configure(cfg)
+    return cam
 
 
-def scene_luminance_from_bayer(bayer, shutter_us, gain):
-    if shutter_us * gain <= 0:
-        return None
-    return float(np.mean(bayer)) / (shutter_us * gain)
+def apply_controls(cam, mode):
+    if mode == "night":
+        exp, gain = NIGHT_EXPOSURE_US, NIGHT_GAIN
+    else:
+        exp, gain = DAY_EXPOSURE_US, DAY_GAIN
+    cam.set_controls({
+        "AeEnable": False,
+        "AwbEnable": False,
+        "AnalogueGain": gain,
+        "FrameDurationLimits": (exp, exp),
+        "ExposureTime": exp,
+    })
 
 
-def shoot_day_probe(out_path):
-    cmd = ["rpicam-still", "--immediate", "-n", "-o", str(out_path), "-t", "500"]
-    subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-
-
-def shoot_night_fits(out_path):
-    """10s raw -> .fits.fz. Returns the Bayer ndarray, or None on failure."""
-    sidecar_jpg = out_path.with_suffix(".tmp.jpg")
-    dng_path = sidecar_jpg.with_suffix(".dng")
-    cmd = [
-        "rpicam-still",
-        "-o", str(sidecar_jpg),
-        "-n", "-t", "500",
-        "--shutter", str(NIGHT_SHUTTER_US),
-        "--gain", str(NIGHT_GAIN),
-        "--raw",
-    ]
-    timeout_s = NIGHT_SHUTTER_US // 1_000_000 + 15
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-    if r.returncode != 0 or not dng_path.exists():
-        print(f"night capture FAILED -> {dng_path}", file=sys.stderr)
-        print(r.stderr[-400:], file=sys.stderr)
-        sidecar_jpg.unlink(missing_ok=True)
-        return None
-
-    with rawpy.imread(str(dng_path)) as raw:
-        bayer = raw.raw_image_visible.copy()
-        pattern = "".join(chr(raw.color_desc[i]) for i in raw.raw_pattern.flatten())
+def write_fits(bayer, out_path, exposure_us, gain):
     hdu = fits.CompImageHDU(data=bayer, compression_type="RICE_1")
-    hdu.header["EXPTIME"] = NIGHT_SHUTTER_US / 1e6
-    hdu.header["GAIN"] = NIGHT_GAIN
-    hdu.header["BAYERPAT"] = pattern
+    hdu.header["EXPTIME"] = exposure_us / 1e6
+    hdu.header["GAIN"] = gain
+    hdu.header["BAYERPAT"] = "BGGR"  # SBGGR10 sensor pattern
     hdu.header["DATE-OBS"] = utcnow().isoformat()
     hdu.header["CAMERA"] = "imx219"
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(out_path, overwrite=True)
-    dng_path.unlink(missing_ok=True)
-    sidecar_jpg.unlink(missing_ok=True)
-    return bayer
 
 
 def load_sky_tiles():
-    """Return list of (col, row) tile indices that are unoccluded sky.
-    Trees excluded; eves kept in (they self-mask via zero detections)."""
     occ = json.loads(OCCLUSION_FILE.read_text())
-    cols = occ["grid"]["cols"]
-    rows = occ["grid"]["rows"]
-    col_labels = occ["grid"]["col_labels"]
-    row_labels = occ["grid"]["row_labels"]
+    cols, rows = occ["grid"]["cols"], occ["grid"]["rows"]
+    col_labels, row_labels = occ["grid"]["col_labels"], occ["grid"]["row_labels"]
     trees = set(occ["trees"])
-    sky = []
-    for c in range(cols):
-        for r in range(rows):
-            label = f"{col_labels[c]}{row_labels[r]}"
-            if label not in trees:
-                sky.append((c, r, label))
+    sky = [(c, r, f"{col_labels[c]}{row_labels[r]}")
+           for c in range(cols) for r in range(rows)
+           if f"{col_labels[c]}{row_labels[r]}" not in trees]
     return sky, cols, rows
 
 
-def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
-    """Run DAOStarFinder per sky tile on a luminance proxy of the Bayer image.
-    Returns list of dicts with tile + centroid info. Empty list is fine."""
-    # Cheap luminance: average 2x2 Bayer block -> half-resolution grey.
+def starfind_tiles(bayer, sky_tiles, n_cols, n_rows, prev_cands):
+    """Per-tile DAOStarFinder on a 2x2-binned grey proxy of the Bayer image.
+    Applies edge-guard and persistence filters. Returns list of dicts.
+    Coordinates are in the half-res grey image; multiply by 2 for Bayer."""
     H, W = bayer.shape
     grey = (
         bayer[0::2, 0::2].astype(np.float32)
@@ -172,7 +157,7 @@ def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
     gH, gW = grey.shape
     tile_w = gW / n_cols
     tile_h = gH / n_rows
-    out = []
+    raw_out = []
     for c, r, label in sky_tiles:
         x0 = int(round(c * tile_w))
         x1 = int(round((c + 1) * tile_w))
@@ -190,28 +175,41 @@ def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
         sources = finder(sub - median)
         if sources is None:
             continue
-        # Coordinates here are in the 2x2-binned grey image (half the Bayer
-        # frame size). Multiply by 2 to recover full-res Bayer pixel coords.
+        sh, sw = sub.shape
         for s in sources:
-            out.append({
+            xs = float(s["x_centroid"])
+            ys = float(s["y_centroid"])
+            # Edge guard: drop anything within STARFIND_EDGE_GUARD_PX of
+            # the tile boundary. Tile-edge artefacts produced 100% of the
+            # detections in the first night's data.
+            if (xs < STARFIND_EDGE_GUARD_PX
+                    or ys < STARFIND_EDGE_GUARD_PX
+                    or xs > sw - STARFIND_EDGE_GUARD_PX
+                    or ys > sh - STARFIND_EDGE_GUARD_PX):
+                continue
+            raw_out.append({
                 "tile": label,
-                "x": float(s["x_centroid"]) + x0,
-                "y": float(s["y_centroid"]) + y0,
+                "x": xs + x0,
+                "y": ys + y0,
                 "flux": float(s["flux"]),
             })
-    return out
 
-
-def decide_mode(prev_mode, prev_hold, last_lum):
-    if last_lum is None:
-        return prev_mode, prev_hold + 1
-    if prev_hold < MODE_HOLD_TICKS:
-        return prev_mode, prev_hold + 1
-    if prev_mode == "day" and last_lum < LUMINANCE_NIGHT_ENTER:
-        return "night", 0
-    if prev_mode == "night" and last_lum > LUMINANCE_NIGHT_EXIT:
-        return "day", 0
-    return prev_mode, prev_hold + 1
+    # Persistence filter: drop candidates that appear at (almost) the
+    # same position in the previous starfind run. Real stars move several
+    # pixels in 5 min; hot/warm pixels do not. Compares against prev_cands
+    # (list of dicts) regardless of tile.
+    if not prev_cands:
+        return raw_out
+    prev_xy = [(p["x"], p["y"]) for p in prev_cands]
+    kept = []
+    for s in raw_out:
+        sx, sy = s["x"], s["y"]
+        stuck = any(abs(sx - px) <= PERSISTENCE_TOL_PX
+                    and abs(sy - py) <= PERSISTENCE_TOL_PX
+                    for px, py in prev_xy)
+        if not stuck:
+            kept.append(s)
+    return kept
 
 
 _stop = False
@@ -230,60 +228,86 @@ def main():
 
     state = load_state()
     mode = state.get("mode", "day")
-    hold = int(state.get("hold", MODE_HOLD_TICKS))
-    last_lum = state.get("lum")
-    last_starfind = 0.0
+    consec_dark = 0
+    consec_bright = 0
+    last_cover_flip = 0.0
 
-    # Match cover to current mode at startup (idempotent).
     cover("open" if mode == "night" else "closed")
 
-    while not _stop:
-        t0 = time.monotonic()
-        now = utcnow()
-        day_dir = FRAMES / now.strftime("%Y-%m-%d")
-        day_dir.mkdir(parents=True, exist_ok=True)
-        hhmm = now.strftime("%H%M")
+    cam = make_camera()
+    apply_controls(cam, mode)
+    cam.start()
+    print(f"camera started in {mode} mode", flush=True)
 
-        if mode == "day":
-            probe = day_dir / f"{hhmm}.jpg"
-            shoot_day_probe(probe)
-            lum = scene_luminance_from_jpeg(probe) if probe.exists() else None
-        else:
-            secs = now.strftime("%H%M%S")
-            fits_path = day_dir / f"{secs}.fits.fz"
-            bayer = shoot_night_fits(fits_path)
-            lum = (
-                scene_luminance_from_bayer(bayer, NIGHT_SHUTTER_US, NIGHT_GAIN)
-                if bayer is not None else None
-            )
-            if bayer is not None and (t0 - last_starfind) >= STARFIND_INTERVAL_S:
-                cands = starfind_tiles(bayer, sky_tiles, n_cols, n_rows)
-                cand_path = fits_path.with_suffix("").with_suffix(".cands.json")
-                cand_path.write_text(json.dumps({
-                    "frame": fits_path.name,
-                    "utc": now.isoformat(),
-                    "n": len(cands),
-                    "stars": cands,
-                }))
-                print(f"starfind {hhmm} -> {len(cands)} candidates", flush=True)
-                last_starfind = t0
+    last_starfind = 0.0
+    prev_cands = []
 
-        new_mode, new_hold = decide_mode(mode, hold, lum if lum is not None else last_lum)
-        if new_mode != mode:
-            print(f"mode {mode} -> {new_mode} (lum={lum})", flush=True)
-            cover("open" if new_mode == "night" else "closed")
-        mode, hold = new_mode, new_hold
-        if lum is not None:
-            last_lum = lum
-        save_state({"mode": mode, "hold": hold, "lum": last_lum})
+    try:
+        while not _stop:
+            req = cam.capture_request()
+            try:
+                bayer = req.make_array("raw").view(np.uint16)
+            finally:
+                req.release()
+            now = utcnow()
+            now_mono = time.monotonic()
+            frame_mean = float(bayer.mean())
 
-        tick = NIGHT_TICK_S if mode == "night" else DAY_TICK_S
-        elapsed = time.monotonic() - t0
-        sleep_for = max(0.0, tick - elapsed)
-        # Short sleeps so SIGTERM lands fast.
-        end = time.monotonic() + sleep_for
-        while not _stop and time.monotonic() < end:
-            time.sleep(min(1.0, end - time.monotonic()))
+            if mode == "night":
+                day_dir = FRAMES / now.strftime("%Y-%m-%d")
+                day_dir.mkdir(parents=True, exist_ok=True)
+                hhmmss = now.strftime("%H%M%S")
+                fits_path = day_dir / f"{hhmmss}.fits.fz"
+                write_fits(bayer, fits_path, NIGHT_EXPOSURE_US, NIGHT_GAIN)
+
+                if (now_mono - last_starfind) >= STARFIND_INTERVAL_S:
+                    cands = starfind_tiles(
+                        bayer, sky_tiles, n_cols, n_rows, prev_cands
+                    )
+                    cand_path = day_dir / f"{hhmmss}.cands.json"
+                    cand_path.write_text(json.dumps({
+                        "frame": fits_path.name,
+                        "utc": now.isoformat(),
+                        "n": len(cands),
+                        "stars": cands,
+                    }))
+                    print(f"starfind {hhmmss} mean={frame_mean:.1f} "
+                          f"-> {len(cands)} candidates "
+                          f"(prev_cache={len(prev_cands)})", flush=True)
+                    prev_cands = cands
+                    last_starfind = now_mono
+
+            # Cover state machine — frame.mean drives both directions.
+            lockout = (now_mono - last_cover_flip) < COVER_LOCKOUT_S
+            if frame_mean <= COVER_DARK_MEAN:
+                consec_dark += 1
+                consec_bright = 0
+            elif frame_mean >= COVER_BRIGHT_MEAN:
+                consec_bright += 1
+                consec_dark = 0
+            else:
+                consec_dark = 0
+                consec_bright = 0
+
+            if not lockout:
+                if mode == "day" and consec_dark >= COVER_HYST_FRAMES:
+                    print(f"mode day->night (mean={frame_mean:.1f})", flush=True)
+                    cover("open")
+                    mode = "night"
+                    apply_controls(cam, mode)
+                    last_cover_flip = now_mono
+                    consec_dark = 0
+                elif mode == "night" and consec_bright >= COVER_HYST_FRAMES:
+                    print(f"mode night->day (mean={frame_mean:.1f})", flush=True)
+                    cover("closed")
+                    mode = "day"
+                    apply_controls(cam, mode)
+                    last_cover_flip = now_mono
+                    consec_bright = 0
+
+            save_state({"mode": mode, "frame_mean": frame_mean})
+    finally:
+        cam.stop()
 
 
 if __name__ == "__main__":
