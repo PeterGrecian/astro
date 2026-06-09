@@ -19,8 +19,11 @@ from PIL import Image, ExifTags
 from astropy.io import fits
 
 HOME = Path.home()
+HERE = Path(__file__).resolve().parent
 FRAMES = HOME / "eclipticam-frames" / "series"
-STATE_FILE = HOME / "eclipticam-capture" / "luminance.json"
+STATE_DIR = Path("/var/lib/eclipticam")
+STATE_FILE = STATE_DIR / "luminance.json"
+LOCATION_FILE = HERE / "location.json"
 LENS_POSITION_V3W = 0.0
 NIGHT_SHUTTERS_US = [3_000_000, 30_000_000]  # 3s + 30s per night tick
 NIGHT_GAIN = 1.0
@@ -53,6 +56,7 @@ def load_state():
 
 
 def save_state(state):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state))
 
 
