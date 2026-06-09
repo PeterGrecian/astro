@@ -40,13 +40,20 @@ STATE_DIR = Path("/var/lib/astrocam")
 STATE_FILE = STATE_DIR / "state.json"
 OCCLUSION_FILE = HERE / "occlusion.json"
 
-# IMX219 max exposure is ~11.76 s. 10 s gives headroom.
-NIGHT_EXPOSURE_US = 10_000_000
-NIGHT_GAIN = 1.0
-# Day mode: short exposure so the cover-closed scene doesn't saturate
-# the loop. Cheap mean check only — we don't save day frames.
-DAY_EXPOSURE_US = 100_000
-DAY_GAIN = 1.0
+# IMX219 in video-config mode caps ExposureTime at 1.238765 s — libcamera
+# silently clamps anything larger. The 11.76 s ceiling exists only in the
+# still configuration (which loses streaming/double-buffering). 1.2 s is
+# the practical max here, and it works fine for a zenith-pole camera:
+# sub-pixel star trails are guaranteed, and we get ~10x more frames per
+# 20-min window (~1000 instead of ~100), more than recovering the per-frame
+# SNR loss via stacking depth and giving denser motion samples for the
+# per-patch pole fit.
+#
+# Same exposure/gain in both day and night so the frame.mean() thresholds
+# below are coherent across the cover transitions (starcam does the same).
+# Day mode just discards the raw and doesn't write FITS.
+EXPOSURE_US = 1_200_000
+GAIN = 4.0
 
 RESOLUTION = (3280, 2464)
 RAW_FORMAT = "SBGGR10"  # IMX219 native, confirmed from rpicam-still
@@ -108,17 +115,13 @@ def make_camera():
     return cam
 
 
-def apply_controls(cam, mode):
-    if mode == "night":
-        exp, gain = NIGHT_EXPOSURE_US, NIGHT_GAIN
-    else:
-        exp, gain = DAY_EXPOSURE_US, DAY_GAIN
+def apply_controls(cam):
     cam.set_controls({
         "AeEnable": False,
         "AwbEnable": False,
-        "AnalogueGain": gain,
-        "FrameDurationLimits": (exp, exp),
-        "ExposureTime": exp,
+        "AnalogueGain": GAIN,
+        "FrameDurationLimits": (EXPOSURE_US, EXPOSURE_US),
+        "ExposureTime": EXPOSURE_US,
     })
 
 
@@ -235,7 +238,7 @@ def main():
     cover("open" if mode == "night" else "closed")
 
     cam = make_camera()
-    apply_controls(cam, mode)
+    apply_controls(cam)
     cam.start()
     print(f"camera started in {mode} mode", flush=True)
 
@@ -258,7 +261,7 @@ def main():
                 day_dir.mkdir(parents=True, exist_ok=True)
                 hhmmss = now.strftime("%H%M%S")
                 fits_path = day_dir / f"{hhmmss}.fits.fz"
-                write_fits(bayer, fits_path, NIGHT_EXPOSURE_US, NIGHT_GAIN)
+                write_fits(bayer, fits_path, EXPOSURE_US, GAIN)
 
                 if (now_mono - last_starfind) >= STARFIND_INTERVAL_S:
                     cands = starfind_tiles(
@@ -294,14 +297,14 @@ def main():
                     print(f"mode day->night (mean={frame_mean:.1f})", flush=True)
                     cover("open")
                     mode = "night"
-                    apply_controls(cam, mode)
+                    apply_controls(cam)
                     last_cover_flip = now_mono
                     consec_dark = 0
                 elif mode == "night" and consec_bright >= COVER_HYST_FRAMES:
                     print(f"mode night->day (mean={frame_mean:.1f})", flush=True)
                     cover("closed")
                     mode = "day"
-                    apply_controls(cam, mode)
+                    apply_controls(cam)
                     last_cover_flip = now_mono
                     consec_bright = 0
 
