@@ -1,0 +1,9 @@
+utc,camera,body,pixel_x,pixel_y,frame_w,frame_h,note
+# NOTE: all v3w anchors below taken at lens-position 2.5. From 2026-06-09 ~08:15Z onwards, v3w uses lens-position 0.0 (true infinity). New v3w anchors needed for accurate fit.
+2026-06-09T05:40:06Z,v3w,moon,1139,995,2304,1296,first confirmed disc; faint blue-grey through cloud (lp=2.5)
+2026-06-09T07:00:09Z,v3w,moon,1916,1100,2304,1296,
+2026-06-09T07:20:09Z,v3w,moon,2083,1123,2304,1296,
+2026-06-09T07:40:06Z,v3w,moon,2249,1151,2304,1296,
+2026-06-09T07:00:09Z,v1,moon,716,848,1280,960,
+2026-06-09T07:20:09Z,v1,moon,931,888,1280,960,
+2026-06-09T07:40:06Z,v1,moon,1137,921,1280,960,
