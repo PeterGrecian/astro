@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,9 +32,15 @@ import cv2
 import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
+from astropy.utils.exceptions import AstropyUserWarning
 from photutils.centroids import centroid_2dg
 from photutils.detection import DAOStarFinder
 from picamera2 import Picamera2
+
+# Gaussian fits on non-star noise candidates produce a flood of these.
+# We only refine bright candidates so the warning is irrelevant in practice.
+warnings.filterwarnings("ignore", message="The fit may not have converged.*")
+warnings.filterwarnings("ignore", category=AstropyUserWarning, message="Sources were found.*")
 
 HOME = Path.home()
 HERE = Path(__file__).resolve().parent
@@ -87,7 +94,11 @@ STARFIND_THRESHOLD_SIGMA = 5.0
 STARFIND_EDGE_GUARD_PX = 10
 # 2D Gaussian centroid refinement: extract a (2*REFINE_HALF+1)^2 window
 # around each DAOStarFinder peak and refit. Sub-0.1 px centroids.
+# Only refine candidates with DAO flux >= REFINE_FLUX_MIN — fitting non-stars
+# is slow (LM non-convergence) and useless. Real stars at our co-add depth
+# come out at flux ~100+; noise candidates are typically < 50.
 REFINE_HALF = 5
+REFINE_FLUX_MIN = 80.0
 # Persistence is handled downstream in the pole-fit stage (a hot pixel
 # contributes no rotation signal and self-downweights). Filtering it at
 # capture time risks killing real stars at the pole tile (H6), which move
@@ -199,7 +210,15 @@ def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
                     or xs > sw - STARFIND_EDGE_GUARD_PX
                     or ys > sh - STARFIND_EDGE_GUARD_PX):
                 continue
-            # 2D Gaussian centroid refinement on a (2*REFINE_HALF+1)^2 window.
+            flux = float(s["flux"])
+            if flux < REFINE_FLUX_MIN:
+                # Skip the expensive Gaussian fit for borderline candidates;
+                # DAO's centroid is good enough at this S/N.
+                out.append({
+                    "tile": label, "x": xs + x0, "y": ys + y0,
+                    "flux": flux, "refined": False,
+                })
+                continue
             ix, iy = int(round(xs)), int(round(ys))
             wx0 = max(0, ix - REFINE_HALF)
             wx1 = min(sw, ix + REFINE_HALF + 1)
@@ -216,7 +235,8 @@ def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
                 "tile": label,
                 "x": float(rx + wx0 + x0),
                 "y": float(ry + wy0 + y0),
-                "flux": float(s["flux"]),
+                "flux": flux,
+                "refined": True,
             })
     return out
 
