@@ -190,11 +190,13 @@ def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
         sources = finder(sub - median)
         if sources is None:
             continue
+        # Coordinates here are in the 2x2-binned grey image (half the Bayer
+        # frame size). Multiply by 2 to recover full-res Bayer pixel coords.
         for s in sources:
             out.append({
                 "tile": label,
-                "x": float(s["xcentroid"]) + x0,
-                "y": float(s["ycentroid"]) + y0,
+                "x": float(s["x_centroid"]) + x0,
+                "y": float(s["y_centroid"]) + y0,
                 "flux": float(s["flux"]),
             })
     return out
