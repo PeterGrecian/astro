@@ -27,9 +27,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import cv2
 import numpy as np
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
+from photutils.centroids import centroid_2dg
 from photutils.detection import DAOStarFinder
 from picamera2 import Picamera2
 
@@ -80,9 +82,12 @@ STARFIND_INTERVAL_S = 0
 STARFIND_FWHM = 2.5
 STARFIND_THRESHOLD_SIGMA = 5.0
 # Edge guard: reject detections within this many pixels of any tile
-# boundary in the half-res grey image. Tile-boundary artefacts produced
+# boundary in the full-res grey image. Tile-boundary artefacts produced
 # 100% of detections in the first night's data.
-STARFIND_EDGE_GUARD_PX = 5
+STARFIND_EDGE_GUARD_PX = 10
+# 2D Gaussian centroid refinement: extract a (2*REFINE_HALF+1)^2 window
+# around each DAOStarFinder peak and refit. Sub-0.1 px centroids.
+REFINE_HALF = 5
 # Persistence is handled downstream in the pole-fit stage (a hot pixel
 # contributes no rotation signal and self-downweights). Filtering it at
 # capture time risks killing real stars at the pole tile (H6), which move
@@ -157,20 +162,16 @@ def load_sky_tiles():
 
 
 def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
-    """Per-tile DAOStarFinder on a 2x2-binned grey proxy of the Bayer image.
-    Applies edge-guard only; persistence is handled downstream in pole fit.
-    Coordinates are in the half-res grey image; multiply by 2 for Bayer."""
-    H, W = bayer.shape
-    grey = (
-        bayer[0::2, 0::2].astype(np.float32)
-        + bayer[0::2, 1::2]
-        + bayer[1::2, 0::2]
-        + bayer[1::2, 1::2]
-    ) * 0.25
+    """Full-res Bayer -> debayered luminance -> per-tile DAOStarFinder ->
+    2D Gaussian centroid refinement. Coordinates are in the FULL-resolution
+    grey image (same pixel grid as the Bayer)."""
+    # Debayer to luminance. cv2 accepts uint16; co-add max is 8184 so safe.
+    # BG2GRAY matches SBGGR10 (top-left 2x2 = B-G / G-R).
+    grey = cv2.cvtColor(bayer.astype(np.uint16), cv2.COLOR_BAYER_BG2GRAY).astype(np.float32)
     gH, gW = grey.shape
     tile_w = gW / n_cols
     tile_h = gH / n_rows
-    raw_out = []
+    out = []
     for c, r, label in sky_tiles:
         x0 = int(round(c * tile_w))
         x1 = int(round((c + 1) * tile_w))
@@ -192,21 +193,32 @@ def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
         for s in sources:
             xs = float(s["x_centroid"])
             ys = float(s["y_centroid"])
-            # Edge guard: drop anything within STARFIND_EDGE_GUARD_PX of
-            # the tile boundary. Tile-edge artefacts produced 100% of the
-            # detections in the first night's data.
+            # Edge guard against tile boundaries.
             if (xs < STARFIND_EDGE_GUARD_PX
                     or ys < STARFIND_EDGE_GUARD_PX
                     or xs > sw - STARFIND_EDGE_GUARD_PX
                     or ys > sh - STARFIND_EDGE_GUARD_PX):
                 continue
-            raw_out.append({
+            # 2D Gaussian centroid refinement on a (2*REFINE_HALF+1)^2 window.
+            ix, iy = int(round(xs)), int(round(ys))
+            wx0 = max(0, ix - REFINE_HALF)
+            wx1 = min(sw, ix + REFINE_HALF + 1)
+            wy0 = max(0, iy - REFINE_HALF)
+            wy1 = min(sh, iy + REFINE_HALF + 1)
+            window = sub[wy0:wy1, wx0:wx1] - median
+            try:
+                rx, ry = centroid_2dg(window)
+            except Exception:
+                rx, ry = xs - wx0, ys - wy0
+            if not (np.isfinite(rx) and np.isfinite(ry)):
+                rx, ry = xs - wx0, ys - wy0
+            out.append({
                 "tile": label,
-                "x": xs + x0,
-                "y": ys + y0,
+                "x": float(rx + wx0 + x0),
+                "y": float(ry + wy0 + y0),
                 "flux": float(s["flux"]),
             })
-    return raw_out
+    return out
 
 
 _stop = False
