@@ -1,0 +1,20 @@
+[Unit]
+Description=astrocam capture loop (day probe + night 10s FITS + per-tile starfind)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+Group=peter
+SupplementaryGroups=gpio video
+WorkingDirectory=/home/peter/astro
+# Cover control uses gpiozero -> /dev/gpiomem; needs gpio group (set above).
+ExecStart=/home/peter/astro/.venv/bin/python /home/peter/astro/astrocam/capture.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
