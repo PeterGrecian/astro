@@ -88,10 +88,10 @@ COVER_LOCKOUT_S = 300
 STARFIND_INTERVAL_S = 0
 STARFIND_FWHM = 2.5
 STARFIND_THRESHOLD_SIGMA = 5.0
-# Edge guard: reject detections within this many pixels of any tile
-# boundary in the full-res grey image. Tile-boundary artefacts produced
-# 100% of detections in the first night's data.
-STARFIND_EDGE_GUARD_PX = 10
+# Edge guard: reject detections within this many half-res pixels of any
+# tile boundary. Tile-boundary artefacts produced 100% of detections in
+# the first night's data.
+STARFIND_EDGE_GUARD_PX = 5
 # 2D Gaussian centroid refinement: extract a (2*REFINE_HALF+1)^2 window
 # around each DAOStarFinder peak and refit. Sub-0.1 px centroids.
 # Only refine candidates with DAO flux >= REFINE_FLUX_MIN — fitting non-stars
@@ -173,22 +173,33 @@ def load_sky_tiles():
 
 
 def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
-    """Full-res Bayer -> debayered luminance -> per-tile DAOStarFinder ->
-    2D Gaussian centroid refinement. Coordinates are in the FULL-resolution
-    grey image (same pixel grid as the Bayer)."""
-    # Debayer to luminance. cv2 accepts uint16; co-add max is 8184 so safe.
-    # BG2GRAY matches SBGGR10 (top-left 2x2 = B-G / G-R).
-    grey = cv2.cvtColor(bayer.astype(np.uint16), cv2.COLOR_BAYER_BG2GRAY).astype(np.float32)
-    gH, gW = grey.shape
-    tile_w = gW / n_cols
-    tile_h = gH / n_rows
+    """Two-stage detection:
+      - DAOStarFinder on the half-res 2x2 Bayer-sum grey (fast detection).
+      - Gaussian centroid refinement on the FULL-res debayered grey window
+        around each bright detection (sub-0.1 px precision).
+    Returned x,y are in the full-res (Bayer) pixel grid."""
+    # Half-res grey for detection. Same as the original cheap-and-fast path.
+    grey_half = (
+        bayer[0::2, 0::2].astype(np.float32)
+        + bayer[0::2, 1::2]
+        + bayer[1::2, 0::2]
+        + bayer[1::2, 1::2]
+    ) * 0.25
+    hH, hW = grey_half.shape
+
+    # Full-res debayer is only needed for windows around bright candidates.
+    # Defer the cv2.cvtColor cost until we know there's something to refine.
+    grey_full = None
+
+    tile_w = hW / n_cols
+    tile_h = hH / n_rows
     out = []
     for c, r, label in sky_tiles:
         x0 = int(round(c * tile_w))
         x1 = int(round((c + 1) * tile_w))
         y0 = int(round(r * tile_h))
         y1 = int(round((r + 1) * tile_h))
-        sub = grey[y0:y1, x0:x1]
+        sub = grey_half[y0:y1, x0:x1]
         if sub.size == 0:
             continue
         mean, median, std = sigma_clipped_stats(sub, sigma=3.0)
@@ -202,39 +213,44 @@ def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
             continue
         sh, sw = sub.shape
         for s in sources:
-            xs = float(s["x_centroid"])
+            xs = float(s["x_centroid"])  # half-res tile coords
             ys = float(s["y_centroid"])
-            # Edge guard against tile boundaries.
             if (xs < STARFIND_EDGE_GUARD_PX
                     or ys < STARFIND_EDGE_GUARD_PX
                     or xs > sw - STARFIND_EDGE_GUARD_PX
                     or ys > sh - STARFIND_EDGE_GUARD_PX):
                 continue
             flux = float(s["flux"])
+            # Half-res frame coords -> full-res (Bayer) frame coords by *2.
+            xf = (xs + x0) * 2.0
+            yf = (ys + y0) * 2.0
             if flux < REFINE_FLUX_MIN:
-                # Skip the expensive Gaussian fit for borderline candidates;
-                # DAO's centroid is good enough at this S/N.
                 out.append({
-                    "tile": label, "x": xs + x0, "y": ys + y0,
+                    "tile": label, "x": xf, "y": yf,
                     "flux": flux, "refined": False,
                 })
                 continue
-            ix, iy = int(round(xs)), int(round(ys))
+            if grey_full is None:
+                grey_full = cv2.cvtColor(
+                    bayer.astype(np.uint16), cv2.COLOR_BAYER_BG2GRAY
+                ).astype(np.float32)
+            gfH, gfW = grey_full.shape
+            ix, iy = int(round(xf)), int(round(yf))
             wx0 = max(0, ix - REFINE_HALF)
-            wx1 = min(sw, ix + REFINE_HALF + 1)
+            wx1 = min(gfW, ix + REFINE_HALF + 1)
             wy0 = max(0, iy - REFINE_HALF)
-            wy1 = min(sh, iy + REFINE_HALF + 1)
-            window = sub[wy0:wy1, wx0:wx1] - median
+            wy1 = min(gfH, iy + REFINE_HALF + 1)
+            window = grey_full[wy0:wy1, wx0:wx1] - median
             try:
                 rx, ry = centroid_2dg(window)
             except Exception:
-                rx, ry = xs - wx0, ys - wy0
+                rx, ry = xf - wx0, yf - wy0
             if not (np.isfinite(rx) and np.isfinite(ry)):
-                rx, ry = xs - wx0, ys - wy0
+                rx, ry = xf - wx0, yf - wy0
             out.append({
                 "tile": label,
-                "x": float(rx + wx0 + x0),
-                "y": float(ry + wy0 + y0),
+                "x": float(rx + wx0),
+                "y": float(ry + wy0),
                 "flux": flux,
                 "refined": True,
             })
