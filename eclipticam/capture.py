@@ -22,8 +22,13 @@ HOME = Path.home()
 FRAMES = HOME / "eclipticam-frames" / "series"
 STATE_FILE = HOME / "eclipticam-capture" / "luminance.json"
 LENS_POSITION_V3W = 0.0
-NIGHT_SHUTTER_US = 3_000_000
+NIGHT_SHUTTERS_US = [3_000_000, 30_000_000]  # 3s + 30s per night tick
 NIGHT_GAIN = 1.0
+# 3s is the calibration / "no trails" frame used for the brightness state.
+# 30s is for faint-star detection; expect ~9 px star trails near the celestial
+# equator in the lower part of the v3w field. Trails are fine for first-night
+# data; revisit (derot stacking vs longer exposure) after we see real frames.
+BRIGHTNESS_SHUTTER_US = 3_000_000
 # Hysteresis on scene_luminance = mean_pixel / (shutter_us * gain).
 # DAY -> NIGHT when below the dark threshold for MODE_HOLD_TICKS ticks.
 # NIGHT -> DAY when above the light threshold for MODE_HOLD_TICKS ticks.
@@ -90,23 +95,22 @@ def shoot_day(camera_idx, out_path, lens_position=None, timeout_ms=1500):
         print(r.stderr[-400:], file=sys.stderr)
 
 
-def shoot_night(camera_idx, out_path_fits, lens_position=None):
-    """Force 3s @ gain 1, capture DNG, convert to .fits.fz, delete DNG + JPEG sidecar."""
-    # rpicam-still always writes the -o file; we ask for a .jpg sidecar we'll discard.
+def shoot_night_one(camera_idx, out_path_fits, shutter_us, lens_position=None):
+    """Force one long exposure, capture DNG, convert to .fits.fz, delete DNG + JPEG sidecar."""
     sidecar_jpg = out_path_fits.parent / (out_path_fits.stem + ".tmp.jpg")
     dng_path = sidecar_jpg.with_suffix(".dng")
     cmd = ["rpicam-still", "--camera", str(camera_idx),
            "--rotation", "180", "-o", str(sidecar_jpg),
            "-n", "-t", "500",
-           "--shutter", str(NIGHT_SHUTTER_US),
+           "--shutter", str(shutter_us),
            "--gain", str(NIGHT_GAIN),
            "--raw"]
     if lens_position is not None:
         cmd += ["--autofocus-mode", "manual", "--lens-position", str(lens_position)]
-    timeout_s = (NIGHT_SHUTTER_US // 1_000_000) + 15
+    timeout_s = (shutter_us // 1_000_000) + 15
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
     if r.returncode != 0 or not dng_path.exists():
-        print(f"night capture FAILED cam{camera_idx} -> {dng_path}", file=sys.stderr)
+        print(f"night capture FAILED cam{camera_idx} {shutter_us}us -> {dng_path}", file=sys.stderr)
         print(r.stderr[-400:], file=sys.stderr)
         sidecar_jpg.unlink(missing_ok=True)
         return
@@ -115,7 +119,7 @@ def shoot_night(camera_idx, out_path_fits, lens_position=None):
         bayer = raw.raw_image_visible.copy()
         pattern = "".join(chr(raw.color_desc[i]) for i in raw.raw_pattern.flatten())
     hdu = fits.CompImageHDU(data=bayer, compression_type="RICE_1")
-    hdu.header["EXPTIME"] = NIGHT_SHUTTER_US / 1e6
+    hdu.header["EXPTIME"] = shutter_us / 1e6
     hdu.header["GAIN"] = NIGHT_GAIN
     hdu.header["BAYERPAT"] = pattern
     hdu.header["DATE-OBS"] = datetime.now(timezone.utc).isoformat()
@@ -123,6 +127,18 @@ def shoot_night(camera_idx, out_path_fits, lens_position=None):
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(out_path_fits, overwrite=True)
     dng_path.unlink()
     sidecar_jpg.unlink(missing_ok=True)
+
+
+def shoot_night(camera_idx, out_dir, hhmm, lens_position=None):
+    """Capture all NIGHT_SHUTTERS_US at this tick. Returns path of brightness frame."""
+    brightness_path = None
+    for shutter_us in NIGHT_SHUTTERS_US:
+        secs = shutter_us // 1_000_000
+        out_path = out_dir / f"{hhmm}_{secs}s.fits.fz"
+        shoot_night_one(camera_idx, out_path, shutter_us, lens_position=lens_position)
+        if shutter_us == BRIGHTNESS_SHUTTER_US and out_path.exists():
+            brightness_path = out_path
+    return brightness_path
 
 
 def decide_mode(prev, last_lum):
@@ -156,9 +172,8 @@ def capture_tick():
         prev = state.get(cam_label, {})
         mode, hold = decide_mode(prev, prev.get("lum"))
         if mode == "night":
-            out_path = out_dir / f"{hhmm}.fits.fz"
-            shoot_night(cam_idx, out_path, lens_position=lp)
-            lum = scene_luminance_from_fits(out_path) if out_path.exists() else None
+            brightness_path = shoot_night(cam_idx, out_dir, hhmm, lens_position=lp)
+            lum = scene_luminance_from_fits(brightness_path) if brightness_path else None
         else:
             out_path = out_dir / f"{hhmm}.jpg"
             shoot_day(cam_idx, out_path, lens_position=lp)
