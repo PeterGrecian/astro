@@ -55,6 +55,11 @@ OCCLUSION_FILE = HERE / "occlusion.json"
 EXPOSURE_US = 1_200_000
 GAIN = 4.0
 
+# Co-add N consecutive raw frames in RAM, emit one summed FITS per group.
+# 8 frames * 1.2s = 9.6s integration per output, ~6 outputs/min vs ~50.
+# Sum stays in uint16 (max 8 * 1023 = 8184 << 65535) so no widening.
+COADD_N = 8
+
 RESOLUTION = (3280, 2464)
 RAW_FORMAT = "SBGGR10"  # IMX219 native, confirmed from rpicam-still
 
@@ -125,12 +130,15 @@ def apply_controls(cam):
     })
 
 
-def write_fits(bayer, out_path, exposure_us, gain):
-    hdu = fits.CompImageHDU(data=bayer, compression_type="RICE_1")
-    hdu.header["EXPTIME"] = exposure_us / 1e6
+def write_fits(coadd, out_path, exposure_us, gain, n_coadd, t_start, t_end):
+    hdu = fits.CompImageHDU(data=coadd, compression_type="RICE_1")
+    hdu.header["EXPTIME"] = exposure_us / 1e6 * n_coadd  # total integration
     hdu.header["GAIN"] = gain
-    hdu.header["BAYERPAT"] = "BGGR"  # SBGGR10 sensor pattern
-    hdu.header["DATE-OBS"] = utcnow().isoformat()
+    hdu.header["NCOADD"] = n_coadd
+    hdu.header["FRAMEEXP"] = exposure_us / 1e6  # single-frame exposure
+    hdu.header["BAYERPAT"] = "BGGR"
+    hdu.header["DATE-OBS"] = t_start.isoformat()
+    hdu.header["DATE-END"] = t_end.isoformat()
     hdu.header["CAMERA"] = "imx219"
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(out_path, overwrite=True)
 
@@ -244,6 +252,9 @@ def main():
 
     last_starfind = 0.0
     prev_cands = []
+    coadd_buf = None
+    coadd_count = 0
+    coadd_t_start = None
 
     try:
         while not _stop:
@@ -257,28 +268,47 @@ def main():
             frame_mean = float(bayer.mean())
 
             if mode == "night":
-                day_dir = FRAMES / now.strftime("%Y-%m-%d")
-                day_dir.mkdir(parents=True, exist_ok=True)
-                hhmmss = now.strftime("%H%M%S")
-                fits_path = day_dir / f"{hhmmss}.fits.fz"
-                write_fits(bayer, fits_path, EXPOSURE_US, GAIN)
+                # Accumulate into uint16 buffer (max 8 * 1023 = 8184).
+                if coadd_buf is None:
+                    coadd_buf = bayer.copy()
+                    coadd_count = 1
+                    coadd_t_start = now
+                else:
+                    coadd_buf += bayer
+                    coadd_count += 1
 
-                if (now_mono - last_starfind) >= STARFIND_INTERVAL_S:
-                    cands = starfind_tiles(
-                        bayer, sky_tiles, n_cols, n_rows, prev_cands
+                if coadd_count >= COADD_N:
+                    out_dir = (FRAMES / now.strftime("%Y-%m-%d")
+                               / now.strftime("%H"))
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    mmss = now.strftime("%M%S")
+                    fits_path = out_dir / f"{mmss}.fits.fz"
+                    write_fits(
+                        coadd_buf, fits_path, EXPOSURE_US, GAIN,
+                        coadd_count, coadd_t_start, now,
                     )
-                    cand_path = day_dir / f"{hhmmss}.cands.json"
-                    cand_path.write_text(json.dumps({
-                        "frame": fits_path.name,
-                        "utc": now.isoformat(),
-                        "n": len(cands),
-                        "stars": cands,
-                    }))
-                    print(f"starfind {hhmmss} mean={frame_mean:.1f} "
-                          f"-> {len(cands)} candidates "
-                          f"(prev_cache={len(prev_cands)})", flush=True)
-                    prev_cands = cands
-                    last_starfind = now_mono
+
+                    if (now_mono - last_starfind) >= STARFIND_INTERVAL_S:
+                        cands = starfind_tiles(
+                            coadd_buf, sky_tiles, n_cols, n_rows, prev_cands
+                        )
+                        cand_path = out_dir / f"{mmss}.cands.json"
+                        cand_path.write_text(json.dumps({
+                            "frame": fits_path.name,
+                            "utc": now.isoformat(),
+                            "n_coadd": coadd_count,
+                            "n": len(cands),
+                            "stars": cands,
+                        }))
+                        print(f"starfind {now:%H%M%S} mean={frame_mean:.1f} "
+                              f"-> {len(cands)} candidates "
+                              f"(prev_cache={len(prev_cands)})", flush=True)
+                        prev_cands = cands
+                        last_starfind = now_mono
+
+                    coadd_buf = None
+                    coadd_count = 0
+                    coadd_t_start = None
 
             # Cover state machine — frame.mean drives both directions.
             lockout = (now_mono - last_cover_flip) < COVER_LOCKOUT_S
