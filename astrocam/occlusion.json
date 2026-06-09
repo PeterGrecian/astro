@@ -1,0 +1,19 @@
+{
+  "grid": {"cols": 8, "rows": 6, "col_labels": "ABCDEFGH", "row_labels": "123456"},
+  "frame_size_px": [3280, 2464],
+  "source_frame": "2026-06-09/1627.jpg",
+  "captured_utc": "2026-06-09T16:27Z",
+  "trees": [
+    "A1", "A2", "A3",
+    "B1", "B2",
+    "E1", "E2",
+    "F2", "F3", "F4",
+    "G1", "G2", "G3", "G4",
+    "H1", "H2", "H3", "H4"
+  ],
+  "eves": [
+    "H6",
+    "A6", "B6", "C6", "D6", "E6", "F6", "G6"
+  ],
+  "notes": "Trees move (wind/leaves) and corrupt per-patch motion fits — exclude from pole solve and stack. Eves are static (no waving) so they're fine to leave in: they contribute no star detections, so the fit naturally downweights them. Eves occupy roughly the bottom half of row 6 across columns A–G plus all of H6."
+}
