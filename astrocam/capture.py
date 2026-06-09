@@ -73,18 +73,20 @@ COVER_BRIGHT_MEAN = 250.0  # frame.mean >= this for N → close cover
 COVER_HYST_FRAMES = 5
 COVER_LOCKOUT_S = 300
 
-# Per-tile star detection
-STARFIND_INTERVAL_S = 300
+# Per-tile star detection. Run on every co-add so each ~10s emit produces
+# a candidate epoch — 120 epochs per 20-min derot window, plenty for the
+# per-patch pole fit.
+STARFIND_INTERVAL_S = 0
 STARFIND_FWHM = 2.5
 STARFIND_THRESHOLD_SIGMA = 5.0
-# Edge-guard: reject detections within this many pixels of any tile
-# boundary in the half-res grey image. Tile-boundary artefacts dominated
-# the first night's results.
+# Edge guard: reject detections within this many pixels of any tile
+# boundary in the half-res grey image. Tile-boundary artefacts produced
+# 100% of detections in the first night's data.
 STARFIND_EDGE_GUARD_PX = 5
-# Persistence filter: a candidate present at the same (x, y) +/- this many
-# pixels in two consecutive starfind runs is a hot pixel, not a star. Real
-# stars rotate around the local pole and move noticeably in 5 min.
-PERSISTENCE_TOL_PX = 1.5
+# Persistence is handled downstream in the pole-fit stage (a hot pixel
+# contributes no rotation signal and self-downweights). Filtering it at
+# capture time risks killing real stars at the pole tile (H6), which move
+# sub-pixel between adjacent epochs.
 
 
 def utcnow():
@@ -154,9 +156,9 @@ def load_sky_tiles():
     return sky, cols, rows
 
 
-def starfind_tiles(bayer, sky_tiles, n_cols, n_rows, prev_cands):
+def starfind_tiles(bayer, sky_tiles, n_cols, n_rows):
     """Per-tile DAOStarFinder on a 2x2-binned grey proxy of the Bayer image.
-    Applies edge-guard and persistence filters. Returns list of dicts.
+    Applies edge-guard only; persistence is handled downstream in pole fit.
     Coordinates are in the half-res grey image; multiply by 2 for Bayer."""
     H, W = bayer.shape
     grey = (
@@ -204,23 +206,7 @@ def starfind_tiles(bayer, sky_tiles, n_cols, n_rows, prev_cands):
                 "y": ys + y0,
                 "flux": float(s["flux"]),
             })
-
-    # Persistence filter: drop candidates that appear at (almost) the
-    # same position in the previous starfind run. Real stars move several
-    # pixels in 5 min; hot/warm pixels do not. Compares against prev_cands
-    # (list of dicts) regardless of tile.
-    if not prev_cands:
-        return raw_out
-    prev_xy = [(p["x"], p["y"]) for p in prev_cands]
-    kept = []
-    for s in raw_out:
-        sx, sy = s["x"], s["y"]
-        stuck = any(abs(sx - px) <= PERSISTENCE_TOL_PX
-                    and abs(sy - py) <= PERSISTENCE_TOL_PX
-                    for px, py in prev_xy)
-        if not stuck:
-            kept.append(s)
-    return kept
+    return raw_out
 
 
 _stop = False
@@ -251,7 +237,6 @@ def main():
     print(f"camera started in {mode} mode", flush=True)
 
     last_starfind = 0.0
-    prev_cands = []
     coadd_buf = None
     coadd_count = 0
     coadd_t_start = None
@@ -290,7 +275,7 @@ def main():
 
                     if (now_mono - last_starfind) >= STARFIND_INTERVAL_S:
                         cands = starfind_tiles(
-                            coadd_buf, sky_tiles, n_cols, n_rows, prev_cands
+                            coadd_buf, sky_tiles, n_cols, n_rows
                         )
                         cand_path = out_dir / f"{mmss}.cands.json"
                         cand_path.write_text(json.dumps({
@@ -301,9 +286,7 @@ def main():
                             "stars": cands,
                         }))
                         print(f"starfind {now:%H%M%S} mean={frame_mean:.1f} "
-                              f"-> {len(cands)} candidates "
-                              f"(prev_cache={len(prev_cands)})", flush=True)
-                        prev_cands = cands
+                              f"-> {len(cands)} candidates", flush=True)
                         last_starfind = now_mono
 
                     coadd_buf = None
