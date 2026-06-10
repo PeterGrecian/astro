@@ -284,55 +284,58 @@ def _rotation_matrix(pole_x, pole_y, angle_rad):
     return M
 
 
-def derot_stack(window, global_pole, occ):
+def _load_bayer(fits_path, badmask):
+    """Load Bayer co-add, apply bad-pixel mask if provided (NaN where bad)."""
+    with fits.open(fits_path) as hdul:
+        data = hdul[1].data.astype(np.float32)
+    if badmask is not None:
+        data = data.copy()
+        # NaN propagates through cv2.warpAffine with INTER_LINEAR (correctly:
+        # NaN windows -> NaN output). The weight pass uses a 1.0/0.0 mask so
+        # bad pixels stop contributing to the weighted mean.
+        data[badmask] = np.nan
+    return data
+
+
+def derot_stack(window, global_pole, occ, badmask=None):
     """Derotate and stack the FITS frames in `window` around a single
-    global pole. Returns (image, n_frames_stacked, n_tiles_used).
+    global pole. Streaming: loads one frame at a time, accumulates into
+    per-tile accumulators. Memory footprint ~ n_tiles * tile_size + one
+    frame, NOT n_frames * frame_size.
 
-    global_pole: (px, py) in full-res Bayer coords. Same pole used for
-    every tile — there's only ONE celestial pole projected into the
-    image, and lens distortion is sub-pixel over a single tile's extent
-    so a tile-local pole shift would not actually buy precision unless
-    we modelled the distortion globally.
+    global_pole: (px, py) in full-res Bayer coords.
+    badmask: optional bool array of shape (H, W). True = bad pixel.
+      Bad pixels are set to NaN before warping so they don't contribute
+      to the weighted mean.
 
-    Per-tile flow:
-      - Pad tile bounds by TILE_MARGIN_PX (so stars rotating across the
-        boundary aren't clipped).
-      - For each frame at time tᵢ, rotation angle Δθᵢ = ω (t_ref - tᵢ)
-        around the global pole.
-      - cv2.warpAffine the padded sub-image, crop back to the tile,
-        accumulate into image+weight maps.
-      - Tree tiles skipped (contribute zero).
-
-    Rotation sign is chosen by trying +ω and -ω on the brightest tile
-    and keeping whichever produces a tighter stack (higher variance).
+    Returns (image, n_frames_stacked, n_tiles_used).
     """
     if not window:
         return None
     t_ref = (window[0][2].timestamp() + window[-1][2].timestamp()) / 2.0
-
-    frames = []
-    for _, fits_path, t, _ in window:
-        if not fits_path.exists():
-            continue
-        with fits.open(fits_path) as hdul:
-            data = hdul[1].data.astype(np.float32)
-        frames.append((t.timestamp(), data))
-    if not frames:
-        return None
-    H, W = frames[0][1].shape
     px, py = global_pole
 
-    sign = _determine_rotation_sign_global(frames, px, py, occ, t_ref, W, H)
+    # Probe one frame for shape.
+    first_path = None
+    for _, fp, _, _ in window:
+        if fp.exists():
+            first_path = fp
+            break
+    if first_path is None:
+        return None
+    with fits.open(first_path) as hdul:
+        H, W = hdul[1].shape
 
-    img_accum = np.zeros((H, W), dtype=np.float32)
-    wt_accum = np.zeros((H, W), dtype=np.float32)
-    n_tiles_used = 0
     n_cols = occ["cols"]
     n_rows = occ["rows"]
     trees = occ["trees"]
     col_labels = occ["col_labels"]
     row_labels = occ["row_labels"]
 
+    # Pre-compute tile geometry and allocate per-tile accumulators.
+    tile_geom = []  # list of (label, x0, x1, y0, y1, px0, px1, py0, py1, pw, ph, cpx, cpy)
+    tile_img = {}
+    tile_wt = {}
     for c in range(n_cols):
         for r in range(n_rows):
             label = f"{col_labels[c]}{row_labels[r]}"
@@ -341,64 +344,94 @@ def derot_stack(window, global_pole, occ):
             x0, x1, y0, y1 = _tile_bounds(c, r, n_cols, n_rows, W, H)
             px0, px1, py0, py1 = _padded_bounds(
                 x0, x1, y0, y1, TILE_MARGIN_PX, W, H)
-            pw = px1 - px0
-            ph = py1 - py0
-
-            tile_img = np.zeros((ph, pw), dtype=np.float32)
-            tile_wt = np.zeros((ph, pw), dtype=np.float32)
-            ones = np.ones((ph, pw), dtype=np.float32)
-
-            # Translate the pole into cropped-frame coords.
+            pw, ph = px1 - px0, py1 - py0
             cpx, cpy = px - px0, py - py0
-            for (ts, data) in frames:
-                dtheta = sign * SIDEREAL_OMEGA * (t_ref - ts)
-                M = _rotation_matrix(cpx, cpy, dtheta)
-                src = data[py0:py1, px0:px1]
-                warped = cv2.warpAffine(
-                    src, M, (pw, ph),
-                    flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0.0,
-                )
-                w_mask = cv2.warpAffine(
-                    ones, M, (pw, ph),
-                    flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0.0,
-                )
-                tile_img += warped
-                tile_wt += w_mask
+            tile_geom.append((label, x0, x1, y0, y1,
+                              px0, px1, py0, py1, pw, ph, cpx, cpy))
+            tile_img[label] = np.zeros((ph, pw), dtype=np.float32)
+            tile_wt[label] = np.zeros((ph, pw), dtype=np.float32)
 
-            # Crop the padded tile back to the unpadded tile region and
-            # accumulate into the global image. The crop offsets are the
-            # difference between unpadded and padded origins.
-            cx0 = x0 - px0
-            cy0 = y0 - py0
-            tw = x1 - x0
-            th = y1 - y0
-            img_accum[y0:y1, x0:x1] += tile_img[cy0:cy0+th, cx0:cx0+tw]
-            wt_accum[y0:y1, x0:x1] += tile_wt[cy0:cy0+th, cx0:cx0+tw]
-            n_tiles_used += 1
+    # Determine rotation sign from a small sample of frames (don't need 1000s
+    # for sign disambiguation; 5 well-spaced frames are plenty).
+    sign = _determine_rotation_sign_streaming(
+        window, px, py, occ, t_ref, W, H, badmask)
 
-    # Normalise by weight to recover mean (not sum) per pixel. Zero where
-    # no tile contributed.
+    n_loaded = 0
+    for _, fits_path, t, _ in window:
+        if not fits_path.exists():
+            continue
+        data = _load_bayer(fits_path, badmask)
+        ts = t.timestamp()
+        dtheta = sign * SIDEREAL_OMEGA * (t_ref - ts)
+        for (label, x0, x1, y0, y1,
+             p_x0, p_x1, p_y0, p_y1, pw, ph, cpx, cpy) in tile_geom:
+            M = _rotation_matrix(cpx, cpy, dtheta)
+            src = data[p_y0:p_y1, p_x0:p_x1]
+            # For weight, use a finite-pixel mask: 1 where finite, 0 elsewhere.
+            valid = np.isfinite(src).astype(np.float32)
+            # Replace NaN with 0 for the image warp (cv2.warpAffine misbehaves
+            # with NaN — propagation depends on neighbouring pixels via
+            # bilinear interp). Multiply by the valid-mask after warping so
+            # blank pixels stay properly weighted-zero.
+            src_clean = np.nan_to_num(src, nan=0.0)
+            warped = cv2.warpAffine(
+                src_clean, M, (pw, ph),
+                flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+            w_mask = cv2.warpAffine(
+                valid, M, (pw, ph),
+                flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+            tile_img[label] += warped
+            tile_wt[label] += w_mask
+        n_loaded += 1
+        if n_loaded % 100 == 0:
+            print(f"  derot: {n_loaded} frames", flush=True)
+        del data
+
+    # Assemble per-tile accumulators into the full-resolution image.
+    img_accum = np.zeros((H, W), dtype=np.float32)
+    wt_accum = np.zeros((H, W), dtype=np.float32)
+    for (label, x0, x1, y0, y1,
+         p_x0, p_x1, p_y0, p_y1, pw, ph, cpx, cpy) in tile_geom:
+        cx0 = x0 - p_x0
+        cy0 = y0 - p_y0
+        tw = x1 - x0
+        th = y1 - y0
+        img_accum[y0:y1, x0:x1] += tile_img[label][cy0:cy0+th, cx0:cx0+tw]
+        wt_accum[y0:y1, x0:x1] += tile_wt[label][cy0:cy0+th, cx0:cx0+tw]
+
     out = np.zeros_like(img_accum)
     nz = wt_accum > 0
     out[nz] = img_accum[nz] / wt_accum[nz]
-    return out, len(frames), n_tiles_used
+    return out, n_loaded, len(tile_geom)
 
 
-def _determine_rotation_sign_global(frames, px, py, occ, t_ref, W, H):
-    """Pick rotation sign by stacking the brightest-variance sky tile
-    under both +ω and -ω and keeping whichever maximises variance
-    (sharp stars beat smeared ones)."""
-    # Pick the tile with the most variance in the middle-of-window frame.
+def _determine_rotation_sign_streaming(window, px, py, occ, t_ref, W, H,
+                                       badmask, n_sample=5):
+    """Pick rotation sign from a small sample of frames spanning the
+    window. Stack the highest-variance tile under both signs; the
+    correct sign yields higher variance (sharp stars beat smeared)."""
+    if len(window) <= n_sample:
+        sample = window
+    else:
+        step = len(window) // n_sample
+        sample = [window[i] for i in range(0, len(window), step)][:n_sample]
+    # Load just these frames.
+    frames = []
+    for _, fp, t, _ in sample:
+        if not fp.exists():
+            continue
+        frames.append((t.timestamp(), _load_bayer(fp, badmask)))
+    if not frames:
+        return +1.0
+
     n_cols, n_rows = occ["cols"], occ["rows"]
     trees = occ["trees"]
     col_labels = occ["col_labels"]
     row_labels = occ["row_labels"]
     mid = frames[len(frames) // 2][1]
-    best_tile_cr = None
+    best = None
     best_var = -1.0
     for c in range(n_cols):
         for r in range(n_rows):
@@ -406,38 +439,37 @@ def _determine_rotation_sign_global(frames, px, py, occ, t_ref, W, H):
             if label in trees:
                 continue
             x0, x1, y0, y1 = _tile_bounds(c, r, n_cols, n_rows, W, H)
-            v = float(mid[y0:y1, x0:x1].var())
+            v = float(np.nanvar(mid[y0:y1, x0:x1]))
             if v > best_var:
                 best_var = v
-                best_tile_cr = (c, r, x0, x1, y0, y1)
-    if best_tile_cr is None:
+                best = (c, r, x0, x1, y0, y1)
+    if best is None:
         return +1.0
-    c, r, x0, x1, y0, y1 = best_tile_cr
+    c, r, x0, x1, y0, y1 = best
     tw, th = x1 - x0, y1 - y0
     cpx, cpy = px - x0, py - y0
     scores = {}
-    for sign in (+1.0, -1.0):
-        tile_acc = np.zeros((th, tw), dtype=np.float32)
-        wt_acc = np.zeros((th, tw), dtype=np.float32)
-        ones = np.ones((th, tw), dtype=np.float32)
+    for sg in (+1.0, -1.0):
+        acc = np.zeros((th, tw), dtype=np.float32)
+        wt = np.zeros((th, tw), dtype=np.float32)
         for (ts, data) in frames:
-            dtheta = sign * SIDEREAL_OMEGA * (t_ref - ts)
+            dtheta = sg * SIDEREAL_OMEGA * (t_ref - ts)
             M = _rotation_matrix(cpx, cpy, dtheta)
             src = data[y0:y1, x0:x1]
-            warped = cv2.warpAffine(
-                src, M, (tw, th),
+            valid = np.isfinite(src).astype(np.float32)
+            src_clean = np.nan_to_num(src, nan=0.0)
+            w_ = cv2.warpAffine(src_clean, M, (tw, th),
                 flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                 borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
-            w = cv2.warpAffine(
-                ones, M, (tw, th),
+            wm = cv2.warpAffine(valid, M, (tw, th),
                 flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                 borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
-            tile_acc += warped
-            wt_acc += w
-        stack = np.zeros_like(tile_acc)
-        nz = wt_acc > 0
-        stack[nz] = tile_acc[nz] / wt_acc[nz]
-        scores[sign] = float(stack.var())
+            acc += w_
+            wt += wm
+        stack = np.zeros_like(acc)
+        nz = wt > 0
+        stack[nz] = acc[nz] / wt[nz]
+        scores[sg] = float(stack.var())
     return max(scores, key=scores.get)
 
 
@@ -499,11 +531,13 @@ def latest_finished_co_add():
 
 def main(argv):
     occ = load_occlusion()
-    # Simple argv parsing: --window-end <iso>, --pole <x,y>, --window-s <int>
+    # CLI: --window-end <iso>, --pole <x,y>, --window-s <int>,
+    #      --badmask <path>  (FITS uint8: 0=good, !=0 -> masked)
     args = argv[1:]
     end_utc = None
     forced_pole = None
     window_s = WINDOW_S
+    badmask_path = None
     while args:
         a = args.pop(0)
         if a == "--window-end" and args:
@@ -519,9 +553,18 @@ def main(argv):
                 return 2
         elif a == "--window-s" and args:
             window_s = int(args.pop(0))
+        elif a == "--badmask" and args:
+            badmask_path = args.pop(0)
         else:
             print(f"unknown arg: {a}", file=sys.stderr)
             return 2
+
+    badmask = None
+    if badmask_path is not None:
+        with fits.open(badmask_path) as hdul:
+            m = hdul[1].data
+        badmask = m != 0
+        print(f"loaded bad mask: {badmask.sum()} pixels ({100*badmask.sum()/badmask.size:.3f}%)")
     if end_utc is None:
         end_utc = latest_finished_co_add()
     if end_utc is None:
@@ -553,17 +596,18 @@ def main(argv):
         print(f"global pole: ({px:.1f}, {py:.1f})  rms={rms:.2f}px  "
               f"n_tracks={n_tracks}")
 
-    stack = derot_stack(window, (px, py), occ)
+    stack = derot_stack(window, (px, py), occ, badmask=badmask)
     if stack is None:
         print("no frames could be loaded for stacking", file=sys.stderr)
         return 1
     image, n_stacked, n_tiles_used = stack
 
     # Co-locate the derot output next to the source co-add it ends with.
-    # Filenames are MMSS.fits.fz so .stem strips only the outer .fz.
+    # Filenames are MMSS.fits.fz so we split on the leading dot only.
     last_path = window[-1][1]
     mmss = last_path.name.split(".")[0]
-    out_path = last_path.with_name(f"{mmss}.derot.fits.fz")
+    suffix = ".derot.masked.fits.fz" if badmask is not None else ".derot.fits.fz"
+    out_path = last_path.with_name(f"{mmss}{suffix}")
     write_derot_fits(out_path, image, window,
                      global_pole=(px, py), pole_rms=rms,
                      n_tracks=n_tracks, tile_counts=tile_counts,
