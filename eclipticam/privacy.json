@@ -1,0 +1,8 @@
+{
+  "v3w": {
+    "frame_size_px": [2304, 1296],
+    "publish_keep_top_px": 1064,
+    "publish_crop_notes": "Bottom 232 pixels (rows 1064-1295) include neighbouring windows. Crop them before publishing any v3w-derived image (max/sum/derot/JPEG renders) to anywhere internet-reachable. The crop is symbolic; an attacker could still recover the windows from raw frames, but the published derivatives should not. Established from peter@pip 2026-06-10.",
+    "established": "2026-06-10"
+  }
+}
