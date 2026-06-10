@@ -5,27 +5,36 @@ Day (sun_alt > -6 deg): auto-exposure JPEG.
 Night (sun_alt <= -6 deg): forced 3s @ gain 1, captured as DNG and
 converted in-place to Rice-compressed FITS (.fits.fz); DNG deleted.
 
-Layout: ~/eclipticam-frames/series/YYYY-MM-DD/<camera>/HHMM.{jpg,fits.fz}
+Layout:
+  ~/eclipticam-frames/day/YYYY-MM-DD/<cam>/HH/NNNN.jpg          (UTC date)
+  ~/eclipticam-frames/night/YYYY-MM-DD/<cam>/HH/NNNN.fits.fz    (night-date = UTC - 12h)
+HH is UTC hour; NNNN is per-(cam,HH) zero-padded counter.
 """
 import json
 import subprocess
 import sys
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import rawpy
 from PIL import Image, ExifTags
 from astropy.io import fits
 
+# OV5647 (v1) hardware shutter caps near 3.07 s in video config. To produce
+# a 30 s integration on v1 we stream N raw frames via picamera2 and coadd
+# them in RAM. Per-frame exposure stays at OV5647_FRAME_US (~3 s).
+OV5647_FRAME_US = 3_000_000
+V1_STACK_FRAMES = 10  # 10 x 3s ≈ 30s total integration
+
 HOME = Path.home()
 HERE = Path(__file__).resolve().parent
-FRAMES = HOME / "eclipticam-frames" / "series"
+FRAMES = HOME / "eclipticam-frames"  # day/<date>/<cam>/HH/NNNN.jpg, night/<night-date>/<cam>/HH/NNNN.fits.fz
 STATE_DIR = Path("/var/lib/eclipticam")
 STATE_FILE = STATE_DIR / "luminance.json"
 LOCATION_FILE = HERE / "location.json"
 LENS_POSITION_V3W = 0.0
-NIGHT_SHUTTERS_US = [3_000_000, 30_000_000]  # 3s + 30s per night tick
+NIGHT_SHUTTERS_US = [30_000_000]  # TEMP: 30s only for 1-min cadence
 NIGHT_GAIN = 1.0
 # 3s is the calibration / "no trails" frame used for the brightness state.
 # 30s is for faint-star detection; expect ~9 px star trails near the celestial
@@ -133,13 +142,96 @@ def shoot_night_one(camera_idx, out_path_fits, shutter_us, lens_position=None):
     sidecar_jpg.unlink(missing_ok=True)
 
 
-def shoot_night(camera_idx, out_dir, hhmm, lens_position=None):
-    """Capture all NIGHT_SHUTTERS_US at this tick. Returns path of brightness frame."""
+def shoot_night_v1_stack(out_path_fits, frame_us=OV5647_FRAME_US,
+                         n_frames=V1_STACK_FRAMES):
+    """v1 long-integration via picamera2 streaming + in-RAM coadd.
+
+    OV5647 max single shutter is ~3 s. We run a video pipeline at
+    frame_us per frame and sum n_frames raw Bayer arrays into uint32.
+    Total integration = frame_us * n_frames.
+
+    Bayer pattern stored as SGBRG (OV5647 native, per project convention).
+    """
+    from picamera2 import Picamera2
+    cam = Picamera2(camera_num=CAM_V1)
+    try:
+        cfg = cam.create_video_configuration(
+            raw={"size": (2592, 1944), "format": "SGBRG10"},
+            buffer_count=4,
+        )
+        cam.configure(cfg)
+        cam.set_controls({
+            "AeEnable": False,
+            "AwbEnable": False,
+            "AnalogueGain": NIGHT_GAIN,
+            "FrameDurationLimits": (frame_us, frame_us),
+            "ExposureTime": frame_us,
+        })
+        cam.start()
+        # Drop first frame — controls may not be applied yet.
+        req = cam.capture_request()
+        req.release()
+
+        coadd = None
+        t_start = datetime.now(timezone.utc)
+        for _ in range(n_frames):
+            req = cam.capture_request()
+            try:
+                bayer = req.make_array("raw").view(np.uint16)
+            finally:
+                req.release()
+            if coadd is None:
+                coadd = bayer.astype(np.uint32)
+            else:
+                coadd += bayer
+        t_end = datetime.now(timezone.utc)
+    finally:
+        cam.stop()
+        cam.close()
+
+    # Sensor delivers data left-rotated 180 relative to rpicam-still output
+    # (which we use --rotation 180). Match by flipping both axes.
+    coadd = coadd[::-1, ::-1]
+    hdu = fits.CompImageHDU(data=coadd.astype(np.uint32), compression_type="RICE_1")
+    hdu.header["EXPTIME"] = frame_us * n_frames / 1e6
+    hdu.header["FRAMEEXP"] = frame_us / 1e6
+    hdu.header["NCOADD"] = n_frames
+    hdu.header["GAIN"] = NIGHT_GAIN
+    hdu.header["BAYERPAT"] = "SGBRG"
+    hdu.header["DATE-OBS"] = t_start.isoformat()
+    hdu.header["DATE-END"] = t_end.isoformat()
+    hdu.header["CAMERA"] = "ov5647"
+    fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(out_path_fits, overwrite=True)
+
+
+def next_frame_path(hour_dir, ext):
+    """hour_dir/NNNN.<ext> for the next free 4-digit counter."""
+    hour_dir.mkdir(parents=True, exist_ok=True)
+    used = []
+    for f in hour_dir.glob(f"*.{ext}"):
+        name = f.name.split(".", 1)[0]
+        if name.isdigit():
+            used.append(int(name))
+    n = (max(used) + 1) if used else 1
+    return hour_dir / f"{n:04d}.{ext}"
+
+
+def shoot_night(camera_idx, hour_dir, lens_position=None):
+    """Capture all NIGHT_SHUTTERS_US at this tick. Returns path of brightness frame.
+
+    v1 (OV5647) can't do >3 s in a single exposure, so any shutter > OV5647_FRAME_US
+    is delivered as a streamed coadd via shoot_night_v1_stack().
+    """
     brightness_path = None
     for shutter_us in NIGHT_SHUTTERS_US:
-        secs = shutter_us // 1_000_000
-        out_path = out_dir / f"{hhmm}_{secs}s.fits.fz"
-        shoot_night_one(camera_idx, out_path, shutter_us, lens_position=lens_position)
+        out_path = next_frame_path(hour_dir, "fits.fz")
+        if camera_idx == CAM_V1 and shutter_us > OV5647_FRAME_US:
+            n_frames = max(1, round(shutter_us / OV5647_FRAME_US))
+            shoot_night_v1_stack(out_path, frame_us=OV5647_FRAME_US,
+                                 n_frames=n_frames)
+        else:
+            shoot_night_one(camera_idx, out_path, shutter_us,
+                            lens_position=lens_position)
         if shutter_us == BRIGHTNESS_SHUTTER_US and out_path.exists():
             brightness_path = out_path
     return brightness_path
@@ -165,21 +257,23 @@ def decide_mode(prev, last_lum):
 
 def capture_tick():
     now = datetime.now(timezone.utc)
-    day = now.strftime("%Y-%m-%d")
-    hhmm = now.strftime("%H%M")
+    utc_date = now.strftime("%Y-%m-%d")
+    hh = now.strftime("%H")
+    # Night-of date = UTC minus 12h (Europe/London noon-rollover convention).
+    night_date = (now - timedelta(hours=12)).strftime("%Y-%m-%d")
     state = load_state()
     new_state = {}
     for cam_label, cam_idx, lp in [("v3w", CAM_V3W, LENS_POSITION_V3W),
                                     ("v1", CAM_V1, None)]:
-        out_dir = FRAMES / day / cam_label
-        out_dir.mkdir(parents=True, exist_ok=True)
         prev = state.get(cam_label, {})
         mode, hold = decide_mode(prev, prev.get("lum"))
         if mode == "night":
-            brightness_path = shoot_night(cam_idx, out_dir, hhmm, lens_position=lp)
+            hour_dir = FRAMES / "night" / night_date / cam_label / hh
+            brightness_path = shoot_night(cam_idx, hour_dir, lens_position=lp)
             lum = scene_luminance_from_fits(brightness_path) if brightness_path else None
         else:
-            out_path = out_dir / f"{hhmm}.jpg"
+            hour_dir = FRAMES / "day" / utc_date / cam_label / hh
+            out_path = next_frame_path(hour_dir, "jpg")
             shoot_day(cam_idx, out_path, lens_position=lp)
             lum = scene_luminance_from_jpeg(out_path) if out_path.exists() else None
         new_state[cam_label] = {"mode": mode, "hold": hold,
