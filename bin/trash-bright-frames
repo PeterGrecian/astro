@@ -13,7 +13,8 @@ Usage:
     trash-bright-frames --camera eclipticam <night-dir> --apply
     trash-bright-frames --camera astrocam --threshold 1500 <dir>  # override
 
-Threshold is in counts per second of integration (i.e. mean / EXPTIME).
+Threshold is in counts per second per unit gain (mean / EXPTIME / GAIN),
+so frames captured at different gain settings compare like-for-like.
 A camera's quality.json sets the default; --threshold overrides it.
 
 Inputs that are NEVER trashed:
@@ -67,16 +68,26 @@ def is_derived(path):
 
 
 def scan_one(path):
-    """Return (per_s_mean, exptime_s, mean) or None if the frame can't be read."""
+    """Return (per_s_per_g_mean, exptime_s, gain, mean) or None if unreadable.
+
+    Brightness metric is mean / (EXPTIME * GAIN) so frames with different
+    gain settings compare like-for-like. Co-add normalisation is implicit:
+    for an N-frame co-add EXPTIME records the total integration N*FRAMEEXP,
+    so dividing by it gives per-input-second.
+    """
     try:
         with fits.open(path) as hdul:
             hd = hdul[1].header
-            exp = float(hd.get("EXPTIME", 0))
-            if exp <= 0:
+            exp = hd.get("EXPTIME")
+            gain = hd.get("GAIN")
+            if exp is None or gain is None:
+                return None
+            exp = float(exp); gain = float(gain)
+            if exp <= 0 or gain <= 0:
                 return None
             data = hdul[1].data
             mean = float(data.mean())
-        return mean / exp, exp, mean
+        return mean / (exp * gain), exp, gain, mean
     except Exception:
         return None
 
@@ -132,8 +143,8 @@ def main():
         if r is None:
             skipped_unreadable += 1
             continue
-        per_s, exp, mean = r
-        candidates.append((path, per_s, exp, mean))
+        per_s_g, exp, gain, mean = r
+        candidates.append((path, per_s_g, exp, gain, mean))
 
     if not candidates:
         print("no frames found", file=sys.stderr)
@@ -183,8 +194,9 @@ def main():
         if trash:
             print("\nfirst 5 frames that would be trashed (sorted brightest first):")
             for c in sorted(trash, key=lambda x: -x[1])[:5]:
-                path, per_s, exp, mean = c
-                print(f"  {path}  per_s={per_s:.0f}  exp={exp:.1f}s  mean={mean:.0f}")
+                path, per_s_g, exp, gain, mean = c
+                print(f"  {path}  per_s/gain={per_s_g:.0f}  exp={exp:.1f}s  "
+                      f"gain={gain}  mean={mean:.0f}")
         return 0
 
     # Apply: use super/bin/trash for each candidate.
@@ -195,7 +207,7 @@ def main():
         # Fall back to a manual trash dir.
         backup = root.parent / f".trashbright-{root.name}"
         backup.mkdir(exist_ok=True)
-        for path, _, _, _ in trash:
+        for path, _, _, _, _ in trash:
             rel = path.relative_to(root)
             dst = backup / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -203,7 +215,7 @@ def main():
         print(f"moved {len(trash)} frames to {backup}")
         return 0
 
-    for path, _, _, _ in trash:
+    for path, _, _, _, _ in trash:
         subprocess.run([str(trash_cmd), str(path)], check=True)
     print(f"trashed {len(trash)} frames via {trash_cmd}")
     return 0
