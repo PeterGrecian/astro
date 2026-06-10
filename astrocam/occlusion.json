@@ -16,6 +16,7 @@
     "A6", "B6", "C6", "D6", "E6", "F6", "G6"
   ],
   "notes": "Trees move (wind/leaves) and corrupt per-patch motion fits — exclude from pole solve and stack. Eves are static (no waving) so they're fine to leave in: they contribute no star detections, so the fit naturally downweights them. Eves occupy roughly the bottom half of row 6 across columns A–G plus all of H6.",
-  "pole_prior_tile": "H6",
-  "pole_prior_notes": "Initial guess for the celestial pole projection. Astrocam is roughly zenith-pointed at ~51°N, so the pole sits ~39° below zenith and projects into the bottom-right corner tile. Use as a Bayesian prior for per-patch pole fits: each patch's local pole direction should point toward H6; large disagreements indicate a noisy patch and should be downweighted."
+  "pole_prior_tile": "E5",
+  "pole_prior_xy": [1945, 1823],
+  "pole_prior_notes": "Celestial pole projection identified visually from a 3-hour max-stack of 974 co-adds (2026-06-09 23:00 to 2026-06-10 02:00 UTC). Star-trail arcs converge unambiguously to full-res Bayer pixel (1945, 1823) — inside tile E5. The earlier H6 guess was based on an assumed zenith pointing that the camera does not actually have. Use this xy as the strong prior for pole fits; deviations should be sub-pixel after accounting for any per-patch lens distortion."
 }

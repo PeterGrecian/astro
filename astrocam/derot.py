@@ -58,12 +58,6 @@ ASSOC_RADIUS_PX = 30.0
 # per-tile pole fit. <3 underdetermines the circle.
 TRACK_MIN_EPOCHS = 3
 
-# Maximum acceptable RMS residual (in pixels) of the per-tile circle fit
-# for the pole to be considered "good". Beyond this we fall back to the
-# prior (pole_prior_tile H6, geometrically converted).
-POLE_FIT_MAX_RMS_PX = 2.0
-
-
 def utcnow():
     return datetime.now(timezone.utc)
 
@@ -191,65 +185,71 @@ def fit_circle(points):
     return float(cx), float(cy), r, rms
 
 
-def fit_tile_pole(tracks):
-    """Per-tile pole fit: combine all tracks with ≥TRACK_MIN_EPOCHS
-    detections; each contributes a circle whose centre must coincide.
+def fit_global_pole(by_tile):
+    """Single global pole fit: every track (across every tile) shares a
+    common rotation centre (px, py) but has its own radius. Solve by
+    linear LSQ in (px, py, r_k² - px² - py²) over all detections.
 
-    Returns (pole_x, pole_y, rms_px, n_tracks_used) in the FULL-resolution
-    Bayer pixel grid, or None if the fit underdetermined.
+    Per-tile-independent fits were severely underconstrained and produced
+    one fake pole per tile (each at its own LSQ minimum). The real
+    celestial pole projects to ONE point in the image, modulo lens
+    distortion which is smooth and much smaller than the per-tile scatter.
+
+    Returns (px, py, rms_px, n_tracks_used, tile_track_counts):
+      px, py    : global pole in full-res Bayer coords
+      rms_px    : RMS distance from each detection to its fitted circle
+      n_tracks  : total tracks contributing
+      tile_track_counts : dict tile -> n_tracks for diagnostics
+    or None if the system is underdetermined.
     """
-    useable = [tr for tr in tracks if len(tr) >= TRACK_MIN_EPOCHS]
-    if not useable:
+    # Build tracks per tile, then flatten into one global list, remembering
+    # which tile each track came from for diagnostics.
+    all_tracks = []
+    tile_counts = {}
+    for tile, dets in by_tile.items():
+        tracks = build_tracks(dets)
+        useable = [tr for tr in tracks if len(tr) >= TRACK_MIN_EPOCHS]
+        tile_counts[tile] = len(useable)
+        for tr in useable:
+            all_tracks.append((tile, tr))
+    if not all_tracks:
         return None
-    # Stack all (x, y) from all tracks into one big LSQ for the common
-    # centre. We solve for (cx, cy) only, leaving per-track radius free:
-    #   (xi - cx)² + (yi - cy)² = ri²    for each i in track k, radius rk
-    # Rearrange: 2 xi cx + 2 yi cy + ck = xi² + yi²,  ck := rk² - cx² - cy²
-    # One ck per track. Number of unknowns = 2 + n_tracks, one equation per
-    # detection -> well-determined if sum(len(track)) > 2 + n_tracks.
-    rows = []
-    rhs = []
-    n_tracks = len(useable)
-    n_total_pts = sum(len(t) for t in useable)
+
+    n_tracks = len(all_tracks)
+    n_total_pts = sum(len(tr) for _, tr in all_tracks)
+    # Unknowns: px, py, plus one per-track ck = r_k² - px² - py².
     if n_total_pts < 2 + n_tracks + 1:
         return None
-    for k, tr in enumerate(useable):
+
+    rows = []
+    rhs = []
+    for k, (_, tr) in enumerate(all_tracks):
         for (_, x, y, _) in tr:
-            r = np.zeros(2 + n_tracks)
-            r[0] = 2 * x
-            r[1] = 2 * y
-            r[2 + k] = 1.0
-            rows.append(r)
+            row = np.zeros(2 + n_tracks)
+            row[0] = 2 * x
+            row[1] = 2 * y
+            row[2 + k] = 1.0
+            rows.append(row)
             rhs.append(x * x + y * y)
     A = np.array(rows)
     b = np.array(rhs)
     sol, *_ = np.linalg.lstsq(A, b, rcond=None)
-    cx, cy = float(sol[0]), float(sol[1])
+    px, py = float(sol[0]), float(sol[1])
     ck = sol[2:]
-    # RMS residual: per-detection distance from the fitted circle.
+
     sq_res = []
-    for k, tr in enumerate(useable):
-        r2 = ck[k] + cx * cx + cy * cy
+    for k, (_, tr) in enumerate(all_tracks):
+        r2 = ck[k] + px * px + py * py
         if r2 <= 0:
             continue
         r = np.sqrt(r2)
         for (_, x, y, _) in tr:
-            d = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+            d = np.sqrt((x - px) ** 2 + (y - py) ** 2)
             sq_res.append((d - r) ** 2)
     if not sq_res:
         return None
     rms = float(np.sqrt(np.mean(sq_res)))
-    return cx, cy, rms, n_tracks
-
-
-def fit_all_tiles(by_tile):
-    """Run fit_tile_pole over every tile that has detections.
-    Returns dict: tile -> (cx, cy, rms, n_tracks) or None."""
-    out = {}
-    for tile, dets in by_tile.items():
-        tracks = build_tracks(dets)
-        out[tile] = fit_tile_pole(tracks)
-    return out
+    return px, py, rms, n_tracks, tile_counts
 
 
 def _tile_bounds(c, r, n_cols, n_rows, W, H):
@@ -284,31 +284,32 @@ def _rotation_matrix(pole_x, pole_y, angle_rad):
     return M
 
 
-def derot_stack(window, tile_poles, occ, max_rms_px=POLE_FIT_MAX_RMS_PX):
-    """Derotate and stack the FITS frames in `window` around each tile's
-    local pole. Returns (image, n_frames_stacked, n_tiles_derotated).
+def derot_stack(window, global_pole, occ):
+    """Derotate and stack the FITS frames in `window` around a single
+    global pole. Returns (image, n_frames_stacked, n_tiles_used).
+
+    global_pole: (px, py) in full-res Bayer coords. Same pole used for
+    every tile — there's only ONE celestial pole projected into the
+    image, and lens distortion is sub-pixel over a single tile's extent
+    so a tile-local pole shift would not actually buy precision unless
+    we modelled the distortion globally.
 
     Per-tile flow:
       - Pad tile bounds by TILE_MARGIN_PX (so stars rotating across the
         boundary aren't clipped).
       - For each frame at time tᵢ, rotation angle Δθᵢ = ω (t_ref - tᵢ)
-        around the tile's measured pole (px, py).
+        around the global pole.
       - cv2.warpAffine the padded sub-image, crop back to the tile,
         accumulate into image+weight maps.
-      - Tiles with no good pole fit (RMS > max_rms_px) or in trees are
-        skipped (contribute zero, with weight zero).
-      - Eves tiles: included but rotation angle is ω * Δt anyway; near the
-        pole-prior they essentially don't move and contribute a deep stack.
+      - Tree tiles skipped (contribute zero).
 
-    Rotation sign is chosen by trying +ω and -ω on the best-RMS tile and
-    keeping whichever produces a tighter stack (lower per-tile variance).
+    Rotation sign is chosen by trying +ω and -ω on the brightest tile
+    and keeping whichever produces a tighter stack (higher variance).
     """
     if not window:
         return None
-    # Reference epoch: window midpoint.
     t_ref = (window[0][2].timestamp() + window[-1][2].timestamp()) / 2.0
 
-    # Load all frame data and timestamps once.
     frames = []
     for _, fits_path, t, _ in window:
         if not fits_path.exists():
@@ -319,11 +320,10 @@ def derot_stack(window, tile_poles, occ, max_rms_px=POLE_FIT_MAX_RMS_PX):
     if not frames:
         return None
     H, W = frames[0][1].shape
+    px, py = global_pole
 
-    # Determine rotation sign from the best-RMS tile.
-    sign = _determine_rotation_sign(frames, tile_poles, occ, t_ref, W, H)
+    sign = _determine_rotation_sign_global(frames, px, py, occ, t_ref, W, H)
 
-    # Stack accumulators.
     img_accum = np.zeros((H, W), dtype=np.float32)
     wt_accum = np.zeros((H, W), dtype=np.float32)
     n_tiles_used = 0
@@ -338,10 +338,6 @@ def derot_stack(window, tile_poles, occ, max_rms_px=POLE_FIT_MAX_RMS_PX):
             label = f"{col_labels[c]}{row_labels[r]}"
             if label in trees:
                 continue
-            fit = tile_poles.get(label)
-            if fit is None or fit[2] > max_rms_px:
-                continue
-            px, py, _, _ = fit
             x0, x1, y0, y1 = _tile_bounds(c, r, n_cols, n_rows, W, H)
             px0, px1, py0, py1 = _padded_bounds(
                 x0, x1, y0, y1, TILE_MARGIN_PX, W, H)
@@ -392,34 +388,34 @@ def derot_stack(window, tile_poles, occ, max_rms_px=POLE_FIT_MAX_RMS_PX):
     return out, len(frames), n_tiles_used
 
 
-def _determine_rotation_sign(frames, tile_poles, occ, t_ref, W, H):
-    """Try +ω and -ω against the lowest-RMS tile and pick the sign that
-    produces the sharper stack (lower variance) in that tile."""
-    best_tile = None
-    best_rms = 9e9
-    for tile, fit in tile_poles.items():
-        if fit is None:
-            continue
-        if tile in occ["trees"]:
-            continue
-        if fit[2] < best_rms:
-            best_rms = fit[2]
-            best_tile = tile
-    if best_tile is None:
-        return +1.0
-    # Find the (c, r) of best_tile.
+def _determine_rotation_sign_global(frames, px, py, occ, t_ref, W, H):
+    """Pick rotation sign by stacking the brightest-variance sky tile
+    under both +ω and -ω and keeping whichever maximises variance
+    (sharp stars beat smeared ones)."""
+    # Pick the tile with the most variance in the middle-of-window frame.
+    n_cols, n_rows = occ["cols"], occ["rows"]
+    trees = occ["trees"]
     col_labels = occ["col_labels"]
     row_labels = occ["row_labels"]
-    n_cols = occ["cols"]
-    n_rows = occ["rows"]
-    c = col_labels.index(best_tile[0])
-    r = row_labels.index(best_tile[1])
-    px, py, _, _ = tile_poles[best_tile]
-    x0, x1, y0, y1 = _tile_bounds(c, r, n_cols, n_rows, W, H)
+    mid = frames[len(frames) // 2][1]
+    best_tile_cr = None
+    best_var = -1.0
+    for c in range(n_cols):
+        for r in range(n_rows):
+            label = f"{col_labels[c]}{row_labels[r]}"
+            if label in trees:
+                continue
+            x0, x1, y0, y1 = _tile_bounds(c, r, n_cols, n_rows, W, H)
+            v = float(mid[y0:y1, x0:x1].var())
+            if v > best_var:
+                best_var = v
+                best_tile_cr = (c, r, x0, x1, y0, y1)
+    if best_tile_cr is None:
+        return +1.0
+    c, r, x0, x1, y0, y1 = best_tile_cr
     tw, th = x1 - x0, y1 - y0
-    scores = {}
-    # Translate pole into cropped-frame coords.
     cpx, cpy = px - x0, py - y0
+    scores = {}
     for sign in (+1.0, -1.0):
         tile_acc = np.zeros((th, tw), dtype=np.float32)
         wt_acc = np.zeros((th, tw), dtype=np.float32)
@@ -441,50 +437,43 @@ def _determine_rotation_sign(frames, tile_poles, occ, t_ref, W, H):
         stack = np.zeros_like(tile_acc)
         nz = wt_acc > 0
         stack[nz] = tile_acc[nz] / wt_acc[nz]
-        # Sharpness proxy: variance of the stack. A correctly-derotated
-        # stack has sharp stars (high variance); wrong sign smears them
-        # (low variance).
         scores[sign] = float(stack.var())
     return max(scores, key=scores.get)
 
 
-def write_derot_fits(out_path, image, window, tile_poles,
-                     n_stacked=None, n_tiles_used=None):
-    """Write the stacked image with per-tile pole table HDU."""
+def write_derot_fits(out_path, image, window, global_pole, pole_rms,
+                     n_tracks, tile_counts, n_stacked, n_tiles_used):
+    """Write the stacked image plus a small per-tile track-count table."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     primary = fits.PrimaryHDU()
     img_hdu = fits.CompImageHDU(data=image.astype(np.float32),
                                 compression_type="RICE_1")
-    t_start = window[0][2].isoformat()
-    t_end = window[-1][2].isoformat()
-    img_hdu.header["DATE-OBS"] = t_start
-    img_hdu.header["DATE-END"] = t_end
-    img_hdu.header["NFRAMES"] = n_stacked if n_stacked is not None else len(window)
-    img_hdu.header["NTILES"] = n_tiles_used if n_tiles_used is not None else 0
+    px, py = global_pole
+    img_hdu.header["DATE-OBS"] = window[0][2].isoformat()
+    img_hdu.header["DATE-END"] = window[-1][2].isoformat()
+    img_hdu.header["NFRAMES"] = n_stacked
+    img_hdu.header["NTILES"] = n_tiles_used
     img_hdu.header["WINDOW_S"] = WINDOW_S
     img_hdu.header["BAYERPAT"] = "BGGR"
     img_hdu.header["CAMERA"] = "imx219"
-    img_hdu.header["DEROT"] = "v1"
+    img_hdu.header["DEROT"] = "v2-global"
+    img_hdu.header["POLE_X"] = float(px)
+    img_hdu.header["POLE_Y"] = float(py)
+    # POLE_RMS may be NaN for forced poles (no fit performed). FITS headers
+    # disallow NaN floats, so omit the card in that case.
+    if pole_rms is not None and np.isfinite(pole_rms):
+        img_hdu.header["POLE_RMS"] = float(pole_rms)
+    img_hdu.header["NTRACKS"] = int(n_tracks)
 
-    # Per-tile pole table.
-    tiles, pxs, pys, rmss, n_tracks = [], [], [], [], []
-    for tile, fit in tile_poles.items():
-        tiles.append(tile)
-        if fit is None:
-            pxs.append(np.nan); pys.append(np.nan)
-            rmss.append(np.nan); n_tracks.append(0)
-        else:
-            cx, cy, rms, n = fit
-            pxs.append(cx); pys.append(cy); rmss.append(rms); n_tracks.append(n)
-    pole_hdu = fits.BinTableHDU.from_columns([
+    # Tile track-count diagnostics.
+    tiles = list(tile_counts.keys())
+    counts = [tile_counts[t] for t in tiles]
+    table_hdu = fits.BinTableHDU.from_columns([
         fits.Column(name="TILE", format="3A", array=np.array(tiles)),
-        fits.Column(name="POLE_X", format="E", array=np.array(pxs)),
-        fits.Column(name="POLE_Y", format="E", array=np.array(pys)),
-        fits.Column(name="RMS_PX", format="E", array=np.array(rmss)),
-        fits.Column(name="N_TRACKS", format="J", array=np.array(n_tracks)),
+        fits.Column(name="N_TRACKS", format="J", array=np.array(counts)),
     ])
-    pole_hdu.name = "TILEPOLES"
-    fits.HDUList([primary, img_hdu, pole_hdu]).writeto(out_path, overwrite=True)
+    table_hdu.name = "TILETRACKS"
+    fits.HDUList([primary, img_hdu, table_hdu]).writeto(out_path, overwrite=True)
 
 
 def latest_finished_co_add():
@@ -510,16 +499,35 @@ def latest_finished_co_add():
 
 def main(argv):
     occ = load_occlusion()
-    if len(argv) > 1 and argv[1] == "--window-end" and len(argv) > 2:
-        end_utc = datetime.fromisoformat(argv[2])
-        if end_utc.tzinfo is None:
-            end_utc = end_utc.replace(tzinfo=timezone.utc)
-    else:
+    # Simple argv parsing: --window-end <iso>, --pole <x,y>, --window-s <int>
+    args = argv[1:]
+    end_utc = None
+    forced_pole = None
+    window_s = WINDOW_S
+    while args:
+        a = args.pop(0)
+        if a == "--window-end" and args:
+            v = args.pop(0)
+            end_utc = datetime.fromisoformat(v)
+            if end_utc.tzinfo is None:
+                end_utc = end_utc.replace(tzinfo=timezone.utc)
+        elif a == "--pole" and args:
+            v = args.pop(0)
+            forced_pole = tuple(float(s) for s in v.split(","))
+            if len(forced_pole) != 2:
+                print(f"--pole expects 'x,y', got '{v}'", file=sys.stderr)
+                return 2
+        elif a == "--window-s" and args:
+            window_s = int(args.pop(0))
+        else:
+            print(f"unknown arg: {a}", file=sys.stderr)
+            return 2
+    if end_utc is None:
         end_utc = latest_finished_co_add()
     if end_utc is None:
         print("no candidate files found; nothing to do", file=sys.stderr)
         return 1
-    window = scan_window(end_utc)
+    window = scan_window(end_utc, window_s=window_s)
     if len(window) < 3:
         print(f"window too short: {len(window)} epochs", file=sys.stderr)
         return 1
@@ -530,22 +538,35 @@ def main(argv):
     print(f"detections per tile (top): "
           f"{sorted(((t, len(v)) for t, v in by_tile.items()), key=lambda x: -x[1])[:6]}")
 
-    tile_poles = fit_all_tiles(by_tile)
-    good = [t for t, f in tile_poles.items()
-            if f is not None and f[2] <= POLE_FIT_MAX_RMS_PX]
-    print(f"per-tile poles fitted: {len([f for f in tile_poles.values() if f is not None])}/{len(tile_poles)} "
-          f"(good: {len(good)})")
+    if forced_pole is not None:
+        px, py = forced_pole
+        rms = float("nan")
+        n_tracks = 0
+        tile_counts = {t: 0 for t in by_tile}
+        print(f"forced pole: ({px:.1f}, {py:.1f})  (no fit)")
+    else:
+        fit = fit_global_pole(by_tile)
+        if fit is None:
+            print("global pole fit failed (insufficient data)", file=sys.stderr)
+            return 1
+        px, py, rms, n_tracks, tile_counts = fit
+        print(f"global pole: ({px:.1f}, {py:.1f})  rms={rms:.2f}px  "
+              f"n_tracks={n_tracks}")
 
-    stack = derot_stack(window, tile_poles, occ)
+    stack = derot_stack(window, (px, py), occ)
     if stack is None:
         print("no frames could be loaded for stacking", file=sys.stderr)
         return 1
     image, n_stacked, n_tiles_used = stack
 
-    derot_root = FRAMES / "derot"
-    out_dir = derot_root / end_utc.strftime("%Y-%m-%d") / end_utc.strftime("%H")
-    out_path = out_dir / f"{end_utc.strftime('%M%S')}.fits.fz"
-    write_derot_fits(out_path, image, window, tile_poles,
+    # Co-locate the derot output next to the source co-add it ends with.
+    # Filenames are MMSS.fits.fz so .stem strips only the outer .fz.
+    last_path = window[-1][1]
+    mmss = last_path.name.split(".")[0]
+    out_path = last_path.with_name(f"{mmss}.derot.fits.fz")
+    write_derot_fits(out_path, image, window,
+                     global_pole=(px, py), pole_rms=rms,
+                     n_tracks=n_tracks, tile_counts=tile_counts,
                      n_stacked=n_stacked, n_tiles_used=n_tiles_used)
     print(f"wrote {out_path}  ({n_stacked} frames stacked, "
           f"{n_tiles_used} tiles derotated)")
