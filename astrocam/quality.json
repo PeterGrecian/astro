@@ -1,0 +1,7 @@
+{
+  "camera": "imx219",
+  "exposure_s": 1.2,
+  "gain": 4.0,
+  "stack_brightness_max_per_s": 1100.0,
+  "stack_brightness_max_notes": "Per-second frame mean ceiling for inclusion in stacks. From night of 2026-06-09, dark-sky 10s co-adds (8x1.2s) had mean ~520, i.e. ~52 per second. Twilight rose ~5-10x that before mode flip. 1100 leaves headroom for cloud-lit dark frames (which still add some signal) while excluding twilight/dawn pollution. Threshold scales linearly with EXPTIME at the GAIN above; for a different GAIN, multiply by the gain ratio."
+}

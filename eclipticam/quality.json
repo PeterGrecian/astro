@@ -1,0 +1,8 @@
+{
+  "camera": "imx708",
+  "exposure_s": 30.0,
+  "gain": 1.0,
+  "stack_brightness_max_per_s": 700.0,
+  "stack_brightness_max_notes": "Per-second frame mean ceiling for inclusion in stacks. From night of 2026-06-09, 30s XXb dark-sky frames had mean ~17800, i.e. ~593 per second. Twilight at 21:50 BST reached ~17500 per second (30x dark). 700 per second cleanly separates dark observations from twilight pollution. v1 stream uses different exposure (3s) — re-tune separately if needed.",
+  "tune_notes": "Re-derive when conditions change (different gain, exposure, camera config). The dark floor is photon noise + sky background per second; threshold is set 1.2x above to allow modest cloud-lit nights."
+}
