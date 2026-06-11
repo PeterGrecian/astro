@@ -73,24 +73,57 @@ def make_render(cfg, subcam):
     return render
 
 
-def stack_and_measure(frames):
-    """One pass over (t, path): max/min/sum stacks + brightness rows."""
+# A frame whose median sits at/near the dtype ceiling is saturated
+# (daylight/twilight leak) regardless of any per-camera threshold.
+SATURATED_MEDIAN = 64000
+
+
+def stack_and_measure(frames, max_per_s=None):
+    """One pass over (t, path): max/min/sum stacks + brightness rows.
+
+    Frames brighter than `max_per_s` (mean/(EXPTIME*GAIN), the
+    trash-bright-frames metric) or with a saturated median are measured
+    for the brightness series but excluded from the stacks — one
+    twilight frame would otherwise white out the whole max image.
+
+    Returns (max_img, min_img, sum_img, rows, stacked_set) where
+    stacked_set holds the paths that entered the stacks.
+    """
     with fits.open(frames[0][1]) as hdul:
         H, W = hdul[1].data.shape
     max_img = np.zeros((H, W), dtype=np.uint16)
     min_img = np.full((H, W), 65535, dtype=np.uint16)
     sum_img = np.zeros((H, W), dtype=np.float64)
     rows = []
+    stacked = set()
+    n_skipped = 0
     for i, (t, f) in enumerate(frames):
         with fits.open(f) as hdul:
             d = hdul[1].data
-        np.maximum(max_img, d, out=max_img)
-        np.minimum(min_img, d, out=min_img)
-        sum_img += d
-        rows.append(brightness.measure(d, t, f))
+            hdr = hdul[1].header
+        row = brightness.measure(d, t, f)
+        rows.append(row)
+        mean = float(row[3])
+        median = float(row[4])
+        per_s = None
+        exp = hdr.get("EXPTIME")
+        if exp:
+            per_s = mean / (float(exp) * float(hdr.get("GAIN", 1.0) or 1.0))
+        too_bright = (max_per_s is not None and per_s is not None
+                      and per_s > max_per_s)
+        if too_bright or median >= SATURATED_MEDIAN:
+            n_skipped += 1
+        else:
+            np.maximum(max_img, d, out=max_img)
+            np.minimum(min_img, d, out=min_img)
+            sum_img += d
+            stacked.add(f)
         if i % 100 == 0:
             print(f"  {i}/{len(frames)}", flush=True)
-    return max_img, min_img, sum_img, rows
+    if n_skipped:
+        print(f"  skipped {n_skipped}/{len(frames)} bright/saturated frames "
+              f"(max_per_s={max_per_s})")
+    return max_img, min_img, sum_img, rows, stacked
 
 
 def write_fits(arr, path, dtype):
@@ -135,8 +168,15 @@ def main() -> int:
     stem = f"{args.subcam}_" if args.subcam else ""
 
     t0 = time.monotonic()
-    max_img, min_img, sum_img, rows = stack_and_measure(frames)
-    print(f"stacked in {time.monotonic()-t0:.1f}s")
+    max_img, min_img, sum_img, rows, stacked = stack_and_measure(
+        frames, max_per_s=cfg.stack_brightness_max_per_s)
+    print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
+    if not stacked:
+        print("every frame was bright/saturated; no stacks written",
+              file=sys.stderr)
+        return 1
+    stacked_frames = [(t, f) for (t, f) in frames if f in stacked]
+    stacked_rows = [r for r in rows if Path(r[2]) in stacked]
 
     write_fits(max_img, out_dir / f"{stem}max.fits.fz", np.uint16)
     write_fits(min_img, out_dir / f"{stem}min.fits.fz", np.uint16)
@@ -145,7 +185,7 @@ def main() -> int:
     hot, cold, sky_med, sky_sigma, hot_thr, cold_thr = \
         compute_bad_pixel_mask(min_img, max_img)
     write_bad_mask(hot, cold, sky_med, sky_sigma, hot_thr, cold_thr,
-                   len(frames), out_dir / f"{stem}badpixel.fits")
+                   len(stacked), out_dir / f"{stem}badpixel.fits")
     badpix_info = {"n_hot": int(hot.sum()), "n_cold": int(cold.sum()),
                    "bad_pct": round(100.0 * float(hot.sum() + cold.sum())
                                     / hot.size, 4)}
@@ -174,9 +214,9 @@ def main() -> int:
         if pole is None:
             print("no pole prior; skipping derot (use --pole)", file=sys.stderr)
         else:
-            win = brightness.darkest_window(rows, args.window_s)
+            win = brightness.darkest_window(stacked_rows, args.window_s)
             w_start, w_end = win
-            window = [(None, f, t, {}) for (t, f) in frames
+            window = [(None, f, t, {}) for (t, f) in stacked_frames
                       if w_start <= t <= w_end]
             print(f"derot window: {w_start.isoformat()} .. "
                   f"{w_end.isoformat()}  ({len(window)} frames)  "
@@ -206,11 +246,13 @@ def main() -> int:
                     "n_frames": n_stacked,
                 }
 
+    summary_extra = {"n_stacked": len(stacked)}
     s = summary_mod.build(cfg.name, night, rows, badpix_info, derot_info,
                           outputs={"max_jpg": f"{stem}max.jpg",
                                    "derot_jpg": f"{stem}derot.jpg" if derot_info else None,
                                    "brightness_png": f"{stem}brightness.png",
                                    "brightness_csv": f"{stem}brightness.csv"})
+    s.update(summary_extra)
     summary_mod.write(s, out_dir / f"{stem}summary.json")
     print(f"wrote {out_dir}/{stem}summary.json")
 

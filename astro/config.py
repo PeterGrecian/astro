@@ -54,6 +54,18 @@ class CameraConfig:
     def frames_root(self) -> Path:
         return Path(self._data["frames_root"]).expanduser()
 
+    @property
+    def stack_brightness_max_per_s(self):
+        """Quality threshold on mean/(EXPTIME*GAIN) above which a frame is
+        twilight/moonlight-polluted and must not enter stacks. Comes from
+        the sibling quality.json when its camera matches this sensor
+        (eclipticam's file covers only the v3w/imx708; v1 is unset)."""
+        q = self.quality
+        sensor = self._data.get("sensor") or ""
+        if q and q.get("camera", "").lower() == sensor.lower():
+            return q.get("stack_brightness_max_per_s")
+        return None
+
     def subcam(self, sub: str) -> "CameraConfig":
         """A view of one sub-camera: subcams[sub] fields override the parent's."""
         subs = self._data.get("subcams") or {}
