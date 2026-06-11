@@ -99,8 +99,11 @@ def stack_and_measure(frames, max_per_s=None):
     with fits.open(frames[0][1]) as hdul:
         H, W = hdul[1].data.shape
     H, W = H // 2, W // 2
-    max_img = np.zeros((H, W), dtype=np.uint16)
-    min_img = np.full((H, W), 65535, dtype=np.uint16)
+    # 2x2 sum of uint16 raws needs 18 bits — uint32 is the right type for
+    # max/min; otherwise np.maximum(out=uint16, ...) silently truncates
+    # any binned pixel > 65535 (was killing v3w bright-star max stacks).
+    max_img = np.zeros((H, W), dtype=np.uint32)
+    min_img = np.full((H, W), np.iinfo(np.uint32).max, dtype=np.uint32)
     sum_img = np.zeros((H, W), dtype=np.float64)
     rows = []
     stacked = set()
@@ -137,6 +140,8 @@ def stack_and_measure(frames, max_per_s=None):
 
 def write_fits(arr, path, dtype):
     path.parent.mkdir(parents=True, exist_ok=True)
+    if dtype is np.uint16 and arr.max() > 65535:
+        dtype = np.uint32  # binned sums can exceed uint16 — preserve them
     hdu = fits.CompImageHDU(data=arr.astype(dtype), compression_type="RICE_1")
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path, overwrite=True)
 
