@@ -25,37 +25,24 @@ import glob
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
-from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.nightdir import last_completed_night, night_window  # noqa: E402
+from astro.process.badpix import compute_bad_pixel_mask, write_bad_mask  # noqa: E402
+from astro.present.render import render_asinh_jpeg  # noqa: E402
 
 HOME = Path.home()
 FRAMES = Path(os.environ.get("ASTROCAM_FRAMES", str(HOME / "astrocam-frames")))
 
-# Bad-pixel thresholds (in sky sigmas, MAD-derived):
-#  - HOT:  min over night > sky_median + HOT_SIGMA  -> persistently bright
-#  - COLD: max over night < sky_median - COLD_SIGMA -> persistently dark
-HOT_SIGMA = 10.0
-COLD_SIGMA = 10.0
-
-# JPEG stretch: percentiles used to clip before asinh.
-JPEG_LO_PCT = 25.0
-JPEG_HI_PCT = 99.9
-JPEG_ASINH = 20.0
-
 
 def current_night_dir():
-    """The night that JUST ended. If it's after noon UTC, that's today
-    (since the night runs from yesterday noon to today noon). Before noon,
-    last night ran from the day-before-yesterday noon to yesterday noon —
-    its label is yesterday's date."""
-    now = datetime.now(timezone.utc)
-    if now.hour >= 12:
-        return (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    return (now - timedelta(days=2)).strftime("%Y-%m-%d")
+    """The night that JUST ended (noon-rollover)."""
+    return last_completed_night()
 
 
 def list_night_frames(night):
@@ -65,9 +52,7 @@ def list_night_frames(night):
     Frames are in hourly subdirs YYYY-MM-DD/HH/MMSS.fits.fz, so we
     walk both date dirs and filter to the rollover window.
     """
-    start = datetime.strptime(night, "%Y-%m-%d").replace(
-        hour=12, tzinfo=timezone.utc)
-    end = start + timedelta(days=1)
+    start, end = night_window(night)
     day_a = start.strftime("%Y-%m-%d")
     day_b = end.strftime("%Y-%m-%d")
     files = []
@@ -118,33 +103,9 @@ def stack_night(frames):
     return max_img, min_img, sum_img, len(frames)
 
 
-def compute_bad_pixel_mask(min_img, max_img):
-    """Pixels persistently bright (hot) or dark (cold) across the night.
-    Uses median+MAD of min_img as the sky model — robust against the bad
-    pixels themselves contaminating the statistics."""
-    flat = min_img.ravel()
-    sky_med = float(np.median(flat))
-    mad = float(np.median(np.abs(flat - sky_med)))
-    sky_sigma = mad * 1.4826  # MAD-to-sigma for Gaussian
-    hot_thr = sky_med + HOT_SIGMA * sky_sigma
-    cold_thr = sky_med - COLD_SIGMA * sky_sigma
-    hot = min_img > hot_thr
-    cold = max_img < cold_thr
-    return hot, cold, sky_med, sky_sigma, hot_thr, cold_thr
-
-
 def render_max_jpeg(max_img, dst_path):
     """Asinh-stretched grayscale JPEG of the max image."""
-    f = max_img.astype(np.float32)
-    lo = float(np.percentile(f, JPEG_LO_PCT))
-    hi = float(np.percentile(f, JPEG_HI_PCT))
-    if hi <= lo:
-        hi = lo + 1.0
-    s = np.clip((f - lo) / (hi - lo), 0, 1)
-    s = np.arcsinh(s * JPEG_ASINH) / np.arcsinh(JPEG_ASINH)
-    u8 = (s * 255).astype(np.uint8)
-    Image.fromarray(u8).save(dst_path, quality=88)
-    return lo, hi
+    return render_asinh_jpeg(max_img, dst_path)
 
 
 def write_fits_u16(arr, path):
@@ -160,25 +121,6 @@ def write_fits_f32(arr, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     hdu = fits.CompImageHDU(data=arr.astype(np.float32),
                             compression_type="RICE_1")
-    fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path, overwrite=True)
-
-
-def write_bad_mask(hot, cold, sky_med, sky_sigma, hot_thr, cold_thr,
-                   n_frames, path):
-    """Write a uint8 image where 0 = good, 1 = hot, 2 = cold."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    mask = np.zeros_like(hot, dtype=np.uint8)
-    mask[hot] = 1
-    mask[cold] = 2
-    hdu = fits.ImageHDU(data=mask)
-    hdu.header["SKY_MED"] = sky_med
-    hdu.header["SKY_SIG"] = sky_sigma
-    hdu.header["HOT_THR"] = hot_thr
-    hdu.header["COLD_THR"] = cold_thr
-    hdu.header["N_FRAMES"] = n_frames
-    hdu.header["N_HOT"] = int(hot.sum())
-    hdu.header["N_COLD"] = int(cold.sum())
-    hdu.header["BAD_PCT"] = 100.0 * float(hot.sum() + cold.sum()) / hot.size
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path, overwrite=True)
 
 
