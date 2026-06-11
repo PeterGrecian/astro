@@ -61,27 +61,36 @@ def read_csv(csv_path: Path):
 
 
 def plot_night(rows, night: str, camera: str, out_path: Path):
-    """Scatter of log2(mean) vs local time for one night's rows
-    (as produced by measure()). X-axis ends at 05:00 the next morning
-    (cover-close safety time), matching bin/plot-brightness. The
-    timezone label is whatever Europe/London is on the night-of-date
-    (BST or GMT), so it's never ambiguous."""
+    """Scatter of log2(mean - pedestal) vs local time for one night's
+    rows (as produced by measure()). X-axis ends at 05:00 the next
+    morning (cover-close safety time), matching bin/plot-brightness.
+    The timezone label is whatever Europe/London is on the night-of-date
+    (BST or GMT), so it's never ambiguous.
+
+    Y-axis is stops of signal ABOVE the sensor pedestal (electronic
+    black level, exposed by libcamera's bit-shift unpack of 10-bit
+    raw into the 16-bit container — typically a few thousand counts).
+    Pedestal is estimated as the night's robust low percentile of
+    per-frame means; 0 stops means "as dark as the sensor can
+    register," each gridline is one stop of real signal."""
     times = [datetime.fromisoformat(r[1]).astimezone(LONDON) for r in rows]
     vals = np.array([float(r[3]) for r in rows])
+    # Use the 1st percentile of per-frame means as the pedestal
+    # estimate: robust to dawn outliers and to spuriously-dark flap
+    # frames (which dip below "real" dark sky but still sit at or
+    # above the electronic floor).
+    pedestal = float(np.percentile(vals, 1))
+    signal = np.maximum(vals - pedestal, 1e-3)
     fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.scatter(times, np.maximum(vals, 1e-3), s=3, linewidths=0,
-               color="#007AFF")
+    ax.scatter(times, signal, s=3, linewidths=0, color="#007AFF")
     ax.set_yscale("log", base=2)
     ax.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
-    # Resolve the actual offset for this night so the label is concrete.
     night_date = datetime.strptime(night, "%Y-%m-%d").date()
     tz_label = datetime.combine(
-        night_date, time(22, 0), tzinfo=LONDON).tzname()  # "BST" or "GMT"
+        night_date, time(22, 0), tzinfo=LONDON).tzname()
     ax.set_xlabel(f"local time ({tz_label})")
-    # Mean per-pixel sensor count (0-1023 raw 10-bit, libcamera-unpacked
-    # into the 16-bit container). Each gridline is one stop (factor 2).
-    ax.set_ylabel("log₂(mean count)")
+    ax.set_ylabel(f"stops above pedestal ({pedestal:.0f})")
     ax.set_title(f"{camera} — night {night} — per-frame brightness")
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
