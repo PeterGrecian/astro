@@ -75,39 +75,43 @@ def make_render(cfg, subcam):
 
 
 # A frame whose median sits at/near the dtype ceiling is saturated
-# (daylight/twilight leak) regardless of any per-camera threshold.
+# (daylight/twilight leak) — always reject regardless of band gate.
 SATURATED_MEDIAN = 64000
 
+# Anchor + band defaults. The anchor is the median per_s over the
+# darkest contiguous window of the night (10 min). Frames within
+# ±BAND_TOL of the anchor enter the stack — rejects twilight/dawn
+# AND unusually-dark "flapping" frames (cover slap, cloud edge) that
+# pollute the stack from below.
+ANCHOR_WINDOW_S = 600.0
+BAND_TOL = 0.30
 
-def stack_and_measure(frames, max_per_s=None):
-    """One pass over (t, path): max/min/sum stacks + brightness rows.
 
-    Brightness is measured on the RAW Bayer frame (so the quality
-    thresholds stay in raw ADU), then the frame is 2x2 sum-binned into
-    grey superpixels before stacking — deliverables are derived from
-    binned data, never from the raw mosaic (starcam pipeline convention;
-    stacking the mosaic leaves a Bayer checkerboard).
+def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
+                      band_tol=BAND_TOL):
+    """Two passes over (t, path):
+      pass 1 — measure brightness on the RAW Bayer frame, compute
+        per_s = mean / (EXPTIME * GAIN), tag saturated frames
+      pass 2 — accumulate 2x2-binned frames whose per_s is within
+        ±band_tol of the night's darkest-window anchor
 
-    Frames brighter than `max_per_s` (mean/(EXPTIME*GAIN), the
-    trash-bright-frames metric) or with a saturated median are measured
-    for the brightness series but excluded from the stacks — one
-    twilight frame would otherwise white out the whole max image.
+    Deliverables are always derived from binned data, never the raw
+    mosaic (starcam pipeline convention; stacking the mosaic leaves a
+    Bayer checkerboard).
 
-    Returns (max_img, min_img, sum_img, rows, stacked_set), stacks in
-    binned coordinates; stacked_set holds the paths that entered them.
+    Returns (max_img, min_img, sum_img, rows, stacked_set, anchor_info).
+    anchor_info: {"per_s", "lo", "hi", "window_utc": [start, end]} or
+    None if the night was too short / had no usable frames.
     """
     with fits.open(frames[0][1]) as hdul:
         H, W = hdul[1].data.shape
     H, W = H // 2, W // 2
-    # 2x2 sum of uint16 raws needs 18 bits — uint32 is the right type for
-    # max/min; otherwise np.maximum(out=uint16, ...) silently truncates
-    # any binned pixel > 65535 (was killing v3w bright-star max stacks).
-    max_img = np.zeros((H, W), dtype=np.uint32)
-    min_img = np.full((H, W), np.iinfo(np.uint32).max, dtype=np.uint32)
-    sum_img = np.zeros((H, W), dtype=np.float64)
+
+    # Pass 1: measure every frame; build (t, per_s) for the anchor.
     rows = []
-    stacked = set()
-    n_skipped = 0
+    per_s_by_path = {}
+    saturated = set()
+    t_per_s = []
     for i, (t, f) in enumerate(frames):
         with fits.open(f) as hdul:
             d = hdul[1].data
@@ -116,26 +120,65 @@ def stack_and_measure(frames, max_per_s=None):
         rows.append(row)
         mean = float(row[3])
         median = float(row[4])
-        per_s = None
-        exp = hdr.get("EXPTIME")
-        if exp:
-            per_s = mean / (float(exp) * float(hdr.get("GAIN", 1.0) or 1.0))
-        too_bright = (max_per_s is not None and per_s is not None
-                      and per_s > max_per_s)
-        if too_bright or median >= SATURATED_MEDIAN:
-            n_skipped += 1
-        else:
-            b = bayer.bin2x2(d)
-            np.maximum(max_img, b, out=max_img)
-            np.minimum(min_img, b, out=min_img)
-            sum_img += b
-            stacked.add(f)
-        if i % 100 == 0:
-            print(f"  {i}/{len(frames)}", flush=True)
-    if n_skipped:
-        print(f"  skipped {n_skipped}/{len(frames)} bright/saturated frames "
-              f"(max_per_s={max_per_s})")
-    return max_img, min_img, sum_img, rows, stacked
+        exp = float(hdr.get("EXPTIME", 1.0) or 1.0)
+        gain = float(hdr.get("GAIN", 1.0) or 1.0)
+        per_s = mean / (exp * gain) if exp * gain > 0 else mean
+        per_s_by_path[f] = per_s
+        t_per_s.append((t, per_s))
+        if median >= SATURATED_MEDIAN:
+            saturated.add(f)
+        if i % 200 == 0:
+            print(f"  measure {i}/{len(frames)}", flush=True)
+
+    anchor = brightness.darkest_anchor(t_per_s, window_s=anchor_window_s)
+    if anchor is None:
+        anchor_info = None
+        lo, hi = float("-inf"), float("inf")
+    else:
+        anchor_per_s, a_start, a_end = anchor
+        lo = anchor_per_s * (1.0 - band_tol)
+        hi = anchor_per_s * (1.0 + band_tol)
+        anchor_info = {
+            "per_s": anchor_per_s, "lo": lo, "hi": hi,
+            "window_utc": [a_start.isoformat(), a_end.isoformat()],
+            "window_s": anchor_window_s, "tol": band_tol,
+        }
+        print(f"  anchor: per_s={anchor_per_s:.1f} over "
+              f"{a_start.isoformat()} .. {a_end.isoformat()}  "
+              f"band [{lo:.1f}, {hi:.1f}]")
+
+    # 2x2 sum of uint16 raws needs 18 bits — uint32 is the right type
+    # for max/min; otherwise np.maximum(out=uint16, ...) silently
+    # truncates any binned pixel > 65535.
+    max_img = np.zeros((H, W), dtype=np.uint32)
+    min_img = np.full((H, W), np.iinfo(np.uint32).max, dtype=np.uint32)
+    sum_img = np.zeros((H, W), dtype=np.float64)
+
+    stacked = set()
+    n_skipped_band = 0
+    n_skipped_sat = 0
+    for i, (t, f) in enumerate(frames):
+        if f in saturated:
+            n_skipped_sat += 1
+            continue
+        per_s = per_s_by_path[f]
+        if not (lo <= per_s <= hi):
+            n_skipped_band += 1
+            continue
+        with fits.open(f) as hdul:
+            d = hdul[1].data
+        b = bayer.bin2x2(d)
+        np.maximum(max_img, b, out=max_img)
+        np.minimum(min_img, b, out=min_img)
+        sum_img += b
+        stacked.add(f)
+        if i % 200 == 0:
+            print(f"  stack {i}/{len(frames)}", flush=True)
+
+    print(f"  stacked {len(stacked)}/{len(frames)}  "
+          f"(skipped: {n_skipped_sat} saturated, "
+          f"{n_skipped_band} out of band)")
+    return max_img, min_img, sum_img, rows, stacked, anchor_info
 
 
 def write_fits(arr, path, dtype):
@@ -182,8 +225,8 @@ def main() -> int:
     stem = f"{args.subcam}_" if args.subcam else ""
 
     t0 = time.monotonic()
-    max_img, min_img, sum_img, rows, stacked = stack_and_measure(
-        frames, max_per_s=cfg.stack_brightness_max_per_s)
+    max_img, min_img, sum_img, rows, stacked, anchor_info = \
+        stack_and_measure(frames)
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:
         print("every frame was bright/saturated; no stacks written",
@@ -265,7 +308,7 @@ def main() -> int:
                     "n_frames": n_stacked,
                 }
 
-    summary_extra = {"n_stacked": len(stacked)}
+    summary_extra = {"n_stacked": len(stacked), "anchor": anchor_info}
     s = summary_mod.build(cfg.name, night, rows, badpix_info, derot_info,
                           outputs={"max_jpg": f"{stem}max.jpg",
                                    "derot_jpg": f"{stem}derot.jpg" if derot_info else None,

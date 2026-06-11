@@ -101,6 +101,37 @@ def plot_night(rows, night: str, camera: str, out_path: Path):
     plt.close(fig)
 
 
+def darkest_anchor(times_per_s, window_s: float = 600.0):
+    """The median brightness over the darkest contiguous `window_s`
+    of the night — the "typical dark frame" anchor. Returns
+    (anchor_per_s, anchor_start_utc, anchor_end_utc) or None.
+
+    times_per_s: list of (utc_datetime, per_s) — per_s is the brightness
+    quality metric mean/(EXPTIME*GAIN), already computed by the caller.
+
+    10 min is long enough that a single bad frame can't drag the anchor
+    off, short enough that twilight can't creep in. Good for automation:
+    one knob (window length), no per-camera threshold.
+    """
+    pts = sorted(times_per_s)
+    if len(pts) < 2:
+        return None
+    times = [p[0] for p in pts]
+    vals = np.array([p[1] for p in pts])
+    best = None  # (median_per_s, start_utc, end_utc)
+    j = 0
+    for i in range(len(pts)):
+        while j < len(pts) and (times[j] - times[i]).total_seconds() <= window_s:
+            j += 1
+        n = j - i
+        if n < 2:
+            continue
+        med = float(np.median(vals[i:j]))
+        if best is None or med < best[0]:
+            best = (med, times[i], times[j - 1])
+    return best
+
+
 def darkest_window(rows, window_s: float):
     """(start_utc, end_utc) of the contiguous window of length window_s
     with the lowest mean brightness, or None if the night is shorter
