@@ -11,11 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import math
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.ticker import FuncFormatter
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -66,8 +69,12 @@ def plot_night(rows, night: str, camera: str, out_path: Path):
     ax.scatter(times, np.maximum(vals, 1e-3), s=3, linewidths=0,
                color="#007AFF")
     ax.set_yscale("log", base=2)
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
     ax.set_xlabel("local time (Europe/London, GMT/BST)")
-    ax.set_ylabel("mean ADU (log2)")
+    # Mean per-pixel sensor count (0-1023 raw 10-bit, libcamera-unpacked
+    # into the 16-bit container). Each gridline is one stop (factor 2).
+    ax.set_ylabel("log₂(mean count)")
     ax.set_title(f"{camera} — night {night} — per-frame brightness")
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
