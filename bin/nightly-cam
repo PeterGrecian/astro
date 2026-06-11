@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""nightly-cam — camera-parametric nightly deliverables.
+
+For one camera and one (noon-rollover) night, produce next to the data:
+  max/min/sum.fits.fz   night stacks
+  badpixel.fits         hot/cold mask (0=good, 1=hot, 2=cold)
+  max.jpg               asinh-stretched star-trail picture
+  derot.fits.fz/.jpg    pole-derotated stack over the darkest window
+  brightness.csv/.png   per-frame brightness series (log2, Europe/London)
+  summary.json          the document the website Lambda reads
+
+then optionally publish the web set to S3 (see astro/present/publish.py).
+
+Usage:
+    nightly-cam --camera astrocam                     # last completed night
+    nightly-cam --camera astrocam --night 2026-06-09
+    nightly-cam --camera eclipticam --subcam v3w --night 2026-06-09
+    nightly-cam --camera astrocam --night ... --publish --dry-run
+"""
+import argparse
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.nightdir import last_completed_night
+from astro.frames import list_night_frames, night_output_dir
+from astro.process import brightness
+from astro.process.badpix import compute_bad_pixel_mask, write_bad_mask
+from astro.process.derot import derot_stack, write_derot_fits
+from astro.present.render import render_asinh_jpeg
+from astro.present import summary as summary_mod
+from astro.present import publish as publish_mod
+
+DEFAULT_DEROT_WINDOW_S = 3 * 3600
+
+# Web-publishable subset of the night's outputs.
+PUBLISH_NAMES = ["summary.json", "brightness.png", "max.jpg", "derot.jpg"]
+
+
+def grid_from_occlusion(occ_json):
+    """Occlusion dict for derot_stack from an occlusion.json blob, or a
+    whole-frame single-tile grid when the camera has no occlusion map."""
+    if occ_json:
+        g = occ_json["grid"]
+        return {"cols": g["cols"], "rows": g["rows"],
+                "col_labels": g["col_labels"], "row_labels": g["row_labels"],
+                "trees": set(occ_json.get("trees", []))}
+    return {"cols": 1, "rows": 1, "col_labels": "A", "row_labels": "1",
+            "trees": set()}
+
+
+def stack_and_measure(frames):
+    """One pass over (t, path): max/min/sum stacks + brightness rows."""
+    with fits.open(frames[0][1]) as hdul:
+        H, W = hdul[1].data.shape
+    max_img = np.zeros((H, W), dtype=np.uint16)
+    min_img = np.full((H, W), 65535, dtype=np.uint16)
+    sum_img = np.zeros((H, W), dtype=np.float64)
+    rows = []
+    for i, (t, f) in enumerate(frames):
+        with fits.open(f) as hdul:
+            d = hdul[1].data
+        np.maximum(max_img, d, out=max_img)
+        np.minimum(min_img, d, out=min_img)
+        sum_img += d
+        rows.append(brightness.measure(d, t, f))
+        if i % 100 == 0:
+            print(f"  {i}/{len(frames)}", flush=True)
+    return max_img, min_img, sum_img, rows
+
+
+def write_fits(arr, path, dtype):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    hdu = fits.CompImageHDU(data=arr.astype(dtype), compression_type="RICE_1")
+    fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path, overwrite=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--subcam", default=None)
+    ap.add_argument("--night", default=None)
+    ap.add_argument("--pole", default=None, metavar="X,Y",
+                    help="override pole (default: camera.json pole_prior_xy)")
+    ap.add_argument("--window-s", type=int, default=DEFAULT_DEROT_WINDOW_S,
+                    help="derot window length (default 3h, darkest picked)")
+    ap.add_argument("--no-derot", action="store_true")
+    ap.add_argument("--publish", action="store_true",
+                    help="upload web assets to S3 after generation")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --publish: list uploads, don't touch S3")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    if args.subcam:
+        cfg = cfg.subcam(args.subcam)
+    night = args.night or last_completed_night()
+    print(f"camera: {cfg.name}  night: {night}")
+
+    frames = list_night_frames(cfg, night, subcam=args.subcam)
+    if not frames:
+        print("no frames found for that night", file=sys.stderr)
+        return 1
+    print(f"frames: {len(frames)}  first={frames[0][0].isoformat()}  "
+          f"last={frames[-1][0].isoformat()}")
+
+    # Whole-night derivations live at the night root (subcam outputs are
+    # distinguished by filename stem, not nested dirs — project convention).
+    out_dir = night_output_dir(cfg, night)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{args.subcam}_" if args.subcam else ""
+
+    t0 = time.monotonic()
+    max_img, min_img, sum_img, rows = stack_and_measure(frames)
+    print(f"stacked in {time.monotonic()-t0:.1f}s")
+
+    write_fits(max_img, out_dir / f"{stem}max.fits.fz", np.uint16)
+    write_fits(min_img, out_dir / f"{stem}min.fits.fz", np.uint16)
+    write_fits(sum_img, out_dir / f"{stem}sum.fits.fz", np.float32)
+
+    hot, cold, sky_med, sky_sigma, hot_thr, cold_thr = \
+        compute_bad_pixel_mask(min_img, max_img)
+    write_bad_mask(hot, cold, sky_med, sky_sigma, hot_thr, cold_thr,
+                   len(frames), out_dir / f"{stem}badpixel.fits")
+    badpix_info = {"n_hot": int(hot.sum()), "n_cold": int(cold.sum()),
+                   "bad_pct": round(100.0 * float(hot.sum() + cold.sum())
+                                    / hot.size, 4)}
+    print(f"badpix: hot={badpix_info['n_hot']} cold={badpix_info['n_cold']}")
+
+    render_asinh_jpeg(max_img, out_dir / f"{stem}max.jpg")
+
+    brightness.write_csv(rows, out_dir / f"{stem}brightness.csv")
+    brightness.plot_night(rows, night, cfg.name,
+                          out_dir / f"{stem}brightness.png")
+
+    derot_info = None
+    if not args.no_derot:
+        if args.pole:
+            pole = tuple(float(s) for s in args.pole.split(","))
+            pole_source = "cli"
+        elif cfg.get("pole_prior_xy"):
+            pole = tuple(cfg.pole_prior_xy)
+            pole_source = "prior"
+        else:
+            pole = None
+        if pole is None:
+            print("no pole prior; skipping derot (use --pole)", file=sys.stderr)
+        else:
+            win = brightness.darkest_window(rows, args.window_s)
+            w_start, w_end = win
+            window = [(None, f, t, {}) for (t, f) in frames
+                      if w_start <= t <= w_end]
+            print(f"derot window: {w_start.isoformat()} .. "
+                  f"{w_end.isoformat()}  ({len(window)} frames)  "
+                  f"pole=({pole[0]:.0f},{pole[1]:.0f}) [{pole_source}]")
+            occ = grid_from_occlusion(cfg.occlusion)
+            badmask = (hot | cold)
+            t0 = time.monotonic()
+            stack = derot_stack(window, pole, occ, badmask=badmask)
+            if stack is None:
+                print("derot produced no output", file=sys.stderr)
+            else:
+                image, n_stacked, n_tiles = stack
+                print(f"derot: {n_stacked} frames, {n_tiles} tiles "
+                      f"in {time.monotonic()-t0:.1f}s")
+                write_derot_fits(
+                    out_dir / f"{stem}derot.fits.fz", image, window,
+                    global_pole=pole, pole_rms=None, n_tracks=0,
+                    tile_counts={}, n_stacked=n_stacked,
+                    n_tiles_used=n_tiles, window_s=args.window_s,
+                    bayerpat=cfg.bayer or "UNKNOWN", camera=cfg.name)
+                render_asinh_jpeg(image, out_dir / f"{stem}derot.jpg")
+                derot_info = {
+                    "pole_xy": [pole[0], pole[1]],
+                    "pole_source": pole_source,
+                    "window_utc": [w_start.isoformat(), w_end.isoformat()],
+                    "n_frames": n_stacked,
+                }
+
+    s = summary_mod.build(cfg.name, night, rows, badpix_info, derot_info,
+                          outputs={"max_jpg": f"{stem}max.jpg",
+                                   "derot_jpg": f"{stem}derot.jpg" if derot_info else None,
+                                   "brightness_png": f"{stem}brightness.png",
+                                   "brightness_csv": f"{stem}brightness.csv"})
+    summary_mod.write(s, out_dir / f"{stem}summary.json")
+    print(f"wrote {out_dir}/{stem}summary.json")
+
+    if args.publish:
+        files = [out_dir / f"{stem}{n}" for n in PUBLISH_NAMES]
+        files = [f for f in files if f.exists()]
+        publish_mod.publish_night(cfg, night, files, dry_run=args.dry_run)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

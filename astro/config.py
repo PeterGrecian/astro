@@ -12,9 +12,12 @@ Usage:
     ecl = CameraConfig.load("eclipticam").subcam("v3w")
 """
 import json
+import os
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# ASTRO_REPO_ROOT overrides where camera dirs are looked up (tests).
+REPO_ROOT = Path(os.environ.get("ASTRO_REPO_ROOT",
+                                Path(__file__).resolve().parent.parent))
 
 _SIBLINGS = ("occlusion", "quality", "location", "privacy")
 
