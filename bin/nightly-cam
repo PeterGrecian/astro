@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 from astro.nightdir import last_completed_night
 from astro.frames import list_night_frames, night_output_dir
+from astro.process import bayer
 from astro.process import brightness
 from astro.process.badpix import compute_bad_pixel_mask, write_bad_mask
 from astro.process.derot import derot_stack, write_derot_fits
@@ -81,16 +82,23 @@ SATURATED_MEDIAN = 64000
 def stack_and_measure(frames, max_per_s=None):
     """One pass over (t, path): max/min/sum stacks + brightness rows.
 
+    Brightness is measured on the RAW Bayer frame (so the quality
+    thresholds stay in raw ADU), then the frame is 2x2 sum-binned into
+    grey superpixels before stacking — deliverables are derived from
+    binned data, never from the raw mosaic (starcam pipeline convention;
+    stacking the mosaic leaves a Bayer checkerboard).
+
     Frames brighter than `max_per_s` (mean/(EXPTIME*GAIN), the
     trash-bright-frames metric) or with a saturated median are measured
     for the brightness series but excluded from the stacks — one
     twilight frame would otherwise white out the whole max image.
 
-    Returns (max_img, min_img, sum_img, rows, stacked_set) where
-    stacked_set holds the paths that entered the stacks.
+    Returns (max_img, min_img, sum_img, rows, stacked_set), stacks in
+    binned coordinates; stacked_set holds the paths that entered them.
     """
     with fits.open(frames[0][1]) as hdul:
         H, W = hdul[1].data.shape
+    H, W = H // 2, W // 2
     max_img = np.zeros((H, W), dtype=np.uint16)
     min_img = np.full((H, W), 65535, dtype=np.uint16)
     sum_img = np.zeros((H, W), dtype=np.float64)
@@ -114,9 +122,10 @@ def stack_and_measure(frames, max_per_s=None):
         if too_bright or median >= SATURATED_MEDIAN:
             n_skipped += 1
         else:
-            np.maximum(max_img, d, out=max_img)
-            np.minimum(min_img, d, out=min_img)
-            sum_img += d
+            b = bayer.bin2x2(d)
+            np.maximum(max_img, b, out=max_img)
+            np.minimum(min_img, b, out=min_img)
+            sum_img += b
             stacked.add(f)
         if i % 100 == 0:
             print(f"  {i}/{len(frames)}", flush=True)
@@ -203,11 +212,13 @@ def main() -> int:
 
     derot_info = None
     if not args.no_derot:
+        # Pole priors are recorded in full-res Bayer pixel coords;
+        # the working frames are 2x2 binned, so halve.
         if args.pole:
-            pole = tuple(float(s) for s in args.pole.split(","))
+            pole = tuple(float(s) / 2 for s in args.pole.split(","))
             pole_source = "cli"
         elif cfg.get("pole_prior_xy"):
-            pole = tuple(cfg.pole_prior_xy)
+            pole = tuple(v / 2 for v in cfg.pole_prior_xy)
             pole_source = "prior"
         else:
             pole = None
@@ -222,9 +233,10 @@ def main() -> int:
                   f"{w_end.isoformat()}  ({len(window)} frames)  "
                   f"pole=({pole[0]:.0f},{pole[1]:.0f}) [{pole_source}]")
             occ = grid_from_occlusion(cfg.occlusion)
-            badmask = (hot | cold)
+            badmask = (hot | cold)  # already in binned coords
             t0 = time.monotonic()
-            stack = derot_stack(window, pole, occ, badmask=badmask)
+            stack = derot_stack(window, pole, occ, badmask=badmask,
+                                bin2=True)
             if stack is None:
                 print("derot produced no output", file=sys.stderr)
             else:
@@ -236,11 +248,13 @@ def main() -> int:
                     global_pole=pole, pole_rms=None, n_tracks=0,
                     tile_counts={}, n_stacked=n_stacked,
                     n_tiles_used=n_tiles, window_s=args.window_s,
-                    bayerpat=cfg.bayer or "UNKNOWN", camera=cfg.name)
+                    bayerpat=f"BIN2({cfg.bayer or 'UNKNOWN'})",
+                    camera=cfg.name)
                 render(image, out_dir / f"{stem}derot.jpg",
                        ignore_zero=True)
                 derot_info = {
                     "pole_xy": [pole[0], pole[1]],
+                    "pole_coords": "bin2",
                     "pole_source": pole_source,
                     "window_utc": [w_start.isoformat(), w_end.isoformat()],
                     "n_frames": n_stacked,

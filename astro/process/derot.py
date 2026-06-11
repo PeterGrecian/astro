@@ -53,12 +53,19 @@ def rotation_matrix(pole_x, pole_y, angle_rad):
     return M
 
 
-def load_bayer(fits_path, badmask):
-    """Load Bayer co-add, apply bad-pixel mask if provided (NaN where bad)."""
+def load_bayer(fits_path, badmask, bin2=False):
+    """Load Bayer co-add, apply bad-pixel mask if provided (NaN where bad).
+    bin2: 2x2 sum-bin the mosaic into grey superpixels first (the badmask
+    must then be in binned coordinates)."""
     with fits.open(fits_path) as hdul:
-        data = hdul[1].data.astype(np.float32)
+        data = hdul[1].data
+    if bin2:
+        from astro.process.bayer import bin2x2
+        data = bin2x2(data)
+    data = data.astype(np.float32)
     if badmask is not None:
-        data = data.copy()
+        if not bin2:
+            data = data.copy()
         # NaN pixels are zeroed before warping and excluded via the
         # weight pass (1.0/0.0 valid-mask) so they stop contributing
         # to the weighted mean.
@@ -67,15 +74,17 @@ def load_bayer(fits_path, badmask):
 
 
 def derot_stack(window, global_pole, occ, badmask=None,
-                tile_margin_px=TILE_MARGIN_PX):
+                tile_margin_px=TILE_MARGIN_PX, bin2=False):
     """Derotate and stack the FITS frames in `window` around a single
     global pole. Streaming: loads one frame at a time, accumulates into
     per-tile accumulators.
 
     window: list of (cands_path, fits_path, utc_datetime, meta) in time order.
-    global_pole: (px, py) in full-res Bayer coords.
+    global_pole: (px, py) in the same coords as the (possibly binned)
+        working frames.
     occ: occlusion dict with cols/rows/col_labels/row_labels/trees.
-    badmask: optional bool array of shape (H, W). True = bad pixel.
+    badmask: optional bool array matching the working frame shape.
+    bin2: 2x2 sum-bin each frame before warping (deliverables path).
 
     Returns (image, n_frames_stacked, n_tiles_used).
     """
@@ -94,6 +103,8 @@ def derot_stack(window, global_pole, occ, badmask=None,
         return None
     with fits.open(first_path) as hdul:
         H, W = hdul[1].shape
+    if bin2:
+        H, W = H // 2, W // 2
 
     n_cols = occ["cols"]
     n_rows = occ["rows"]
@@ -123,13 +134,13 @@ def derot_stack(window, global_pole, occ, badmask=None,
     # Determine rotation sign from a small sample of frames (don't need
     # 1000s for sign disambiguation; 5 well-spaced frames are plenty).
     sign = determine_rotation_sign_streaming(
-        window, px, py, occ, t_ref, W, H, badmask)
+        window, px, py, occ, t_ref, W, H, badmask, bin2=bin2)
 
     n_loaded = 0
     for _, fits_path, t, _ in window:
         if not fits_path.exists():
             continue
-        data = load_bayer(fits_path, badmask)
+        data = load_bayer(fits_path, badmask, bin2=bin2)
         ts = t.timestamp()
         dtheta = sign * SIDEREAL_OMEGA * (t_ref - ts)
         for (label, x0, x1, y0, y1,
@@ -177,7 +188,7 @@ def derot_stack(window, global_pole, occ, badmask=None,
 
 
 def determine_rotation_sign_streaming(window, px, py, occ, t_ref, W, H,
-                                      badmask, n_sample=5):
+                                      badmask, n_sample=5, bin2=False):
     """Pick rotation sign from a small sample of frames spanning the
     window. Stack the highest-variance tile under both signs; the
     correct sign yields higher variance (sharp stars beat smeared)."""
@@ -190,7 +201,7 @@ def determine_rotation_sign_streaming(window, px, py, occ, t_ref, W, H,
     for _, fp, t, _ in sample:
         if not fp.exists():
             continue
-        frames.append((t.timestamp(), load_bayer(fp, badmask)))
+        frames.append((t.timestamp(), load_bayer(fp, badmask, bin2=bin2)))
     if not frames:
         return +1.0
 

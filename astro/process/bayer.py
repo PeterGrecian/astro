@@ -32,6 +32,22 @@ def for_sensor(sensor: str) -> str:
     return pattern(SENSOR_RAW_FORMAT[sensor.upper()])
 
 
+def bin2x2(arr):
+    """2x2 sum-bin a Bayer mosaic into grey superpixels (one full RGGB
+    quad per output pixel). This is what deliverables are derived from —
+    stacking/derotating the raw mosaic leaves a Bayer checkerboard and
+    mixes Bayer phases under interpolation. Sum (not mean) to preserve
+    integer photon counts, matching bin-frames. Output uint16 when the
+    sums fit (10-bit sources always do), else uint32."""
+    import numpy as np
+    H, W = arr.shape
+    b = arr[:H - H % 2, :W - W % 2].reshape(
+        H // 2, 2, W // 2, 2).sum(axis=(1, 3), dtype=np.uint32)
+    if b.max() <= 65535:
+        return b.astype(np.uint16)
+    return b
+
+
 def plane_offsets(pat: str) -> dict:
     """Map plane name -> (row_offset, col_offset) for a 4-letter pattern.
     Green planes are named G1 (first in reading order) and G2."""
