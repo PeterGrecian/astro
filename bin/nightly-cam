@@ -33,6 +33,7 @@ from astro.process import brightness
 from astro.process.badpix import compute_bad_pixel_mask, write_bad_mask
 from astro.process.derot import derot_stack, write_derot_fits
 from astro.present.render import render_asinh_jpeg
+from astro.present import privacy as privacy_mod
 from astro.present import summary as summary_mod
 from astro.present import publish as publish_mod
 
@@ -52,6 +53,24 @@ def grid_from_occlusion(occ_json):
                 "trees": set(occ_json.get("trees", []))}
     return {"cols": 1, "rows": 1, "col_labels": "A", "row_labels": "1",
             "trees": set()}
+
+
+def make_render(cfg, subcam):
+    """Privacy-aware JPEG renderer: applies the publication crop for
+    restricted subcams and writes the privacy-ok sidecar whenever the
+    camera has a privacy policy (unlisted subcams are unrestricted, but
+    the marker records that the policy was consciously applied)."""
+    spec = privacy_mod.entry_for(cfg, subcam)
+    has_policy = bool(getattr(cfg, "privacy", None))
+
+    def render(img, dst_path, **kw):
+        out = privacy_mod.crop_for_publication(img, spec)
+        result = render_asinh_jpeg(out, dst_path, **kw)
+        if has_policy:
+            privacy_mod.mark_ok(dst_path)
+        return result
+
+    return render
 
 
 def stack_and_measure(frames):
@@ -132,7 +151,8 @@ def main() -> int:
                                     / hot.size, 4)}
     print(f"badpix: hot={badpix_info['n_hot']} cold={badpix_info['n_cold']}")
 
-    render_asinh_jpeg(max_img, out_dir / f"{stem}max.jpg")
+    render = make_render(cfg, args.subcam)
+    render(max_img, out_dir / f"{stem}max.jpg")
 
     brightness.write_csv(rows, out_dir / f"{stem}brightness.csv")
     brightness.plot_night(rows, night, cfg.name,
@@ -174,7 +194,8 @@ def main() -> int:
                     tile_counts={}, n_stacked=n_stacked,
                     n_tiles_used=n_tiles, window_s=args.window_s,
                     bayerpat=cfg.bayer or "UNKNOWN", camera=cfg.name)
-                render_asinh_jpeg(image, out_dir / f"{stem}derot.jpg")
+                render(image, out_dir / f"{stem}derot.jpg",
+                       ignore_zero=True)
                 derot_info = {
                     "pole_xy": [pole[0], pole[1]],
                     "pole_source": pole_source,

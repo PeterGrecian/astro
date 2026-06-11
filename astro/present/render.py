@@ -12,11 +12,18 @@ JPEG_ASINH = 20.0
 
 
 def render_asinh_jpeg(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
-                      asinh=JPEG_ASINH, quality=88):
-    """Asinh-stretched grayscale JPEG. Returns (lo, hi) clip values."""
+                      asinh=JPEG_ASINH, quality=88, ignore_zero=False):
+    """Asinh-stretched grayscale JPEG. Returns (lo, hi) clip values.
+
+    ignore_zero: compute the stretch percentiles over non-zero pixels
+    only — for derot/mosaic images where masked tiles are exactly 0 and
+    would otherwise drag the lo percentile to the floor."""
     f = img.astype(np.float32)
-    lo = float(np.percentile(f, lo_pct))
-    hi = float(np.percentile(f, hi_pct))
+    sample = f[f != 0] if ignore_zero else f
+    if sample.size == 0:
+        sample = f
+    lo = float(np.percentile(sample, lo_pct))
+    hi = float(np.percentile(sample, hi_pct))
     if hi <= lo:
         hi = lo + 1.0
     s = np.clip((f - lo) / (hi - lo), 0, 1)
