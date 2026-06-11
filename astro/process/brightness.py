@@ -7,7 +7,7 @@ Plot conventions (GLOBAL.md / astro CLAUDE.md): x-axis in Europe/London,
 y log base 2 so each gridline is one stop.
 """
 import csv
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -62,7 +62,10 @@ def read_csv(csv_path: Path):
 
 def plot_night(rows, night: str, camera: str, out_path: Path):
     """Scatter of log2(mean) vs local time for one night's rows
-    (as produced by measure())."""
+    (as produced by measure()). X-axis ends at 05:00 the next morning
+    (cover-close safety time), matching bin/plot-brightness. The
+    timezone label is whatever Europe/London is on the night-of-date
+    (BST or GMT), so it's never ambiguous."""
     times = [datetime.fromisoformat(r[1]).astimezone(LONDON) for r in rows]
     vals = np.array([float(r[3]) for r in rows])
     fig, ax = plt.subplots(figsize=(10, 4.5))
@@ -71,7 +74,11 @@ def plot_night(rows, night: str, camera: str, out_path: Path):
     ax.set_yscale("log", base=2)
     ax.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
-    ax.set_xlabel("local time (Europe/London, GMT/BST)")
+    # Resolve the actual offset for this night so the label is concrete.
+    night_date = datetime.strptime(night, "%Y-%m-%d").date()
+    tz_label = datetime.combine(
+        night_date, time(22, 0), tzinfo=LONDON).tzname()  # "BST" or "GMT"
+    ax.set_xlabel(f"local time ({tz_label})")
     # Mean per-pixel sensor count (0-1023 raw 10-bit, libcamera-unpacked
     # into the 16-bit container). Each gridline is one stop (factor 2).
     ax.set_ylabel("log₂(mean count)")
@@ -80,6 +87,13 @@ def plot_night(rows, night: str, camera: str, out_path: Path):
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
     ax.xaxis.set_major_formatter(
         mdates.DateFormatter("%H:%M", tz=LONDON))
+    # 22:00 (night N) -> 05:00 next morning, matching bin/plot-brightness:
+    # the 05:00 BST cover-close.service safety close is the rightmost event
+    # we expect to see.
+    start = datetime.combine(night_date, time(22, 0), tzinfo=LONDON)
+    end = datetime.combine(night_date + timedelta(days=1),
+                           time(5, 0), tzinfo=LONDON)
+    ax.set_xlim(start, end)
     fig.autofmt_xdate()
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
