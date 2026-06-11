@@ -1,0 +1,34 @@
+{
+  "name": "eclipticam",
+  "host": "eclipticam",
+  "sensor": null,
+  "bayer": null,
+  "resolution": null,
+  "frames_root": "~/eclipticam-frames",
+  "night_layout": "percam",
+  "night_layout_notes": "day/YYYY-MM-DD/<cam>/HH/NNNN.jpg (UTC date); night/YYYY-MM-DD/<cam>/HH/NNNN.fits.fz (noon-rollover night date). HHb/ siblings hold 2x2 sum-binned frames.",
+  "subcams": {
+    "v1": {
+      "sensor": "OV5647",
+      "bayer": "SGBRG10",
+      "resolution": [2592, 1944],
+      "plate_scale_deg_px": 0.0206,
+      "plate_scale_notes": "OV5647 stock lens, 53.50 deg horizontal / 2592 px (official RPi figure).",
+      "max_single_exposure_us": 3066985,
+      "max_single_exposure_notes": "picamera2 video-config ceiling ~3.07 s; longer integrations must use the streaming coadd path."
+    },
+    "v3w": {
+      "sensor": "IMX708",
+      "bayer": "SRGGB10",
+      "resolution": [2304, 1296],
+      "plate_scale_deg_px": 0.0443,
+      "plate_scale_notes": "Module 3 Wide, 102 deg horizontal / 2304 px at the half-res capture mode in use (native 4608x2592)."
+    }
+  },
+  "processing_host": "eclipticam",
+  "s3": {"bucket": "astro-berrylands-eu-west-1", "prefix": "eclipticam/nights"},
+  "occlusion_file": null,
+  "quality_file": "quality.json",
+  "location_file": "location.json",
+  "privacy_file": "privacy.json"
+}

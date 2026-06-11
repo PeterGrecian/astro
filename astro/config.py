@@ -1,0 +1,61 @@
+"""Per-camera configuration loader.
+
+Each camera has a directory <repo>/<name>/ containing camera.json
+(hardware + pipeline facts) plus optional sibling files with their own
+lifecycles: occlusion.json, quality.json, location.json, privacy.json.
+
+Usage:
+    from astro.config import CameraConfig
+    cam = CameraConfig.load("astrocam")
+    cam.bayer, cam.frames_root, cam.s3["bucket"]
+    cam.occlusion          # dict or None
+    ecl = CameraConfig.load("eclipticam").subcam("v3w")
+"""
+import json
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_SIBLINGS = ("occlusion", "quality", "location", "privacy")
+
+
+class CameraConfig:
+    def __init__(self, data: dict, camera_dir: Path):
+        self._data = data
+        self.camera_dir = camera_dir
+        for key in _SIBLINGS:
+            fname = data.get(f"{key}_file")
+            val = None
+            if fname and (camera_dir / fname).exists():
+                val = json.loads((camera_dir / fname).read_text())
+            setattr(self, key, val)
+
+    @classmethod
+    def load(cls, name: str, repo_root: Path | None = None) -> "CameraConfig":
+        camera_dir = (repo_root or REPO_ROOT) / name
+        cfg_path = camera_dir / "camera.json"
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"no camera.json for '{name}' at {cfg_path}")
+        return cls(json.loads(cfg_path.read_text()), camera_dir)
+
+    def __getattr__(self, key):
+        try:
+            return self._data[key]
+        except KeyError:
+            raise AttributeError(f"{self._data.get('name', '?')}: no config field '{key}'")
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    @property
+    def frames_root(self) -> Path:
+        return Path(self._data["frames_root"]).expanduser()
+
+    def subcam(self, sub: str) -> "CameraConfig":
+        """A view of one sub-camera: subcams[sub] fields override the parent's."""
+        subs = self._data.get("subcams") or {}
+        if sub not in subs:
+            raise KeyError(f"{self._data['name']}: no subcam '{sub}' (have {sorted(subs)})")
+        merged = {**self._data, **subs[sub], "name": f"{self._data['name']}-{sub}",
+                  "subcams": None}
+        return CameraConfig(merged, self.camera_dir)
