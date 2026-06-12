@@ -168,6 +168,16 @@ def main():
     ax.set_yscale("log", base=2)
     ax.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
+    # Sky-clear ceiling: nights whose darkest 10-min anchor sits above
+    # this line are flagged "cloudy" (see SKY_CLEAR_MAX_STOPS in
+    # bin/nightly-cam). Curves spending the night below this line are
+    # genuinely dark.
+    SKY_CLEAR_MAX_STOPS = 10.0
+    ax.axhline(2 ** SKY_CLEAR_MAX_STOPS, color="#888", linestyle="--",
+               linewidth=1.0, alpha=0.7)
+    ax.text(0.99, 0.50, f"clear/cloudy: +{SKY_CLEAR_MAX_STOPS:.0f}",
+            transform=ax.transAxes, ha="right", va="bottom",
+            fontsize=8, color="#666")
     ax.set_xlabel("local time (BST)")
     ax.set_ylabel("stops above pedestal")
     title_cam = cfg.name.split("-", 1)[-1] if "-" in cfg.name else cfg.name

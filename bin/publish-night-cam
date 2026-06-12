@@ -138,6 +138,7 @@ names = [
     f"${stem}sweep-colour.mp4",
 ]
 files = [nd/n for n in names if (nd/n).exists()]
+missing = [n for n in names if not (nd/n).exists()]
 # Videos and the thumb come out of privacy-cropped frames; mark them
 # OK so publish's privacy guard doesn't refuse them.
 if getattr(cfg, "privacy", None):
@@ -146,6 +147,21 @@ if getattr(cfg, "privacy", None):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
+# Sweep stale S3 keys for deliverables that no longer exist locally
+# (e.g. a previously-clear night that re-ran as cloudy with no stack).
+if missing:
+    import boto3
+    s3 = boto3.client("s3")
+    bucket = cfg.s3["bucket"]
+    prefix = cfg.s3["prefix"].strip("/")
+    for n in missing:
+        key = f"{prefix}/$NIGHT/{n}"
+        try:
+            s3.head_object(Bucket=bucket, Key=key)
+        except Exception:
+            continue
+        s3.delete_object(Bucket=bucket, Key=key)
+        print(f"deleted stale s3://{bucket}/{key}")
 PYEOF
 
 # Refresh the multi-night combined brightness plot at the camera

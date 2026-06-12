@@ -312,9 +312,32 @@ def main() -> int:
             pedestal=cfg.get("pedestal"))
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:
-        print("every frame was bright/saturated; no stacks written",
-              file=sys.stderr)
-        return 1
+        # Cloudy / no-usable-sky night: clear out any stale stack
+        # outputs (max.jpg, derot.jpg, badpixel, sum/min/max .fits.fz)
+        # so the website doesn't show an old image labelled "cloudy".
+        # Leave the brightness CSV/PNG + summary.json — the curve and
+        # verdict are the deliverables for a cloudy night.
+        for stale in ("max.fits.fz", "min.fits.fz", "sum.fits.fz",
+                      "badpixel.fits", "max.jpg", "derot.jpg",
+                      "derot.fits.fz"):
+            p = out_dir / f"{stem}{stale}"
+            if p.exists():
+                p.unlink()
+                print(f"removed stale {p.name}")
+        # Still write the brightness + summary deliverables.
+        brightness.write_csv(rows, out_dir / f"{stem}brightness.csv")
+        brightness.plot_night(rows, night, cfg.name,
+                              out_dir / f"{stem}brightness.png",
+                              pedestal=cfg.get("pedestal"))
+        s = summary_mod.build(cfg.name, night, rows,
+                              badpix=None, derot=None,
+                              outputs={"brightness_png": f"{stem}brightness.png",
+                                       "brightness_csv": f"{stem}brightness.csv"})
+        s.update({"n_stacked": 0, "anchor": anchor_info,
+                  "verdict": (anchor_info or {}).get("verdict", "no-data")})
+        summary_mod.write(s, out_dir / f"{stem}summary.json")
+        print(f"cloudy / no-data night: wrote brightness + summary only")
+        return 0
     stacked_frames = [(t, f) for (t, f) in frames if f in stacked]
     stacked_rows = [r for r in rows if Path(r[2]) in stacked]
     stacked_window_utc = [stacked_frames[0][0].isoformat(),
