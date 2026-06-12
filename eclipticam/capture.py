@@ -230,8 +230,14 @@ def shoot_night(camera_idx, hour_dir, lens_position=None):
 
     v1 (OV5647) can't do >3 s in a single exposure, so any shutter > OV5647_FRAME_US
     is delivered as a streamed coadd via shoot_night_v1_stack().
+
+    The brightness frame is preferred at BRIGHTNESS_SHUTTER_US (a short
+    no-trails reference), but if that shutter isn't in NIGHT_SHUTTERS_US
+    today we fall back to the longest available frame — otherwise the
+    luminance state never updates and the mode machine gets stuck.
     """
     brightness_path = None
+    fallback_path = None
     for shutter_us in NIGHT_SHUTTERS_US:
         out_path = next_frame_path(hour_dir, "fits.fz")
         if camera_idx == CAM_V1 and shutter_us > OV5647_FRAME_US:
@@ -241,9 +247,12 @@ def shoot_night(camera_idx, hour_dir, lens_position=None):
         else:
             shoot_night_one(camera_idx, out_path, shutter_us,
                             lens_position=lens_position)
-        if shutter_us == BRIGHTNESS_SHUTTER_US and out_path.exists():
-            brightness_path = out_path
-    return brightness_path
+        if out_path.exists():
+            if shutter_us == BRIGHTNESS_SHUTTER_US:
+                brightness_path = out_path
+            else:
+                fallback_path = out_path
+    return brightness_path or fallback_path
 
 
 def decide_mode(prev, last_lum):
