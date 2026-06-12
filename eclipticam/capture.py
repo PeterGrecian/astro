@@ -34,13 +34,14 @@ STATE_DIR = Path("/var/lib/eclipticam")
 STATE_FILE = STATE_DIR / "luminance.json"
 LOCATION_FILE = HERE / "location.json"
 LENS_POSITION_V3W = 0.0
-NIGHT_SHUTTERS_US = [30_000_000]  # TEMP: 30s only for 1-min cadence
+# Near-60s exposure at 1-min cadence: 55 s leaves ~5 s for libcamera
+# warm-up + write before the next timer fire. The IMX708 (v3w) ceiling
+# is ~112 s in still-config so we're well inside it. Saturation tends
+# to land around twilight where it's expected anyway — the anchor-band
+# gate downstream rejects bright frames.
+NIGHT_SHUTTERS_US = [55_000_000]
 NIGHT_GAIN = 1.0
-# 3s is the calibration / "no trails" frame used for the brightness state.
-# 30s is for faint-star detection; expect ~9 px star trails near the celestial
-# equator in the lower part of the v3w field. Trails are fine for first-night
-# data; revisit (derot stacking vs longer exposure) after we see real frames.
-BRIGHTNESS_SHUTTER_US = 3_000_000
+BRIGHTNESS_SHUTTER_US = 55_000_000  # same frame drives both stack + brightness
 # Hysteresis on scene_luminance = mean_pixel / (shutter_us * gain).
 # DAY -> NIGHT when below the dark threshold for MODE_HOLD_TICKS ticks.
 # NIGHT -> DAY when above the light threshold for MODE_HOLD_TICKS ticks.
@@ -287,21 +288,32 @@ def capture_tick():
     hh = now.strftime("%H")
     # Night-of date = UTC minus 12h (Europe/London noon-rollover convention).
     night_date = (now - timedelta(hours=12)).strftime("%Y-%m-%d")
+    # Per-camera capture policy. v3w runs in both day and night so its
+    # state machine drives the cover/exposure decisions; v1 stays
+    # day-only because its 3 s single-exposure ceiling makes useful
+    # night astronomy hard at the 1-min cadence (no time for a 10x
+    # streamed coadd plus v3w's 55 s exposure inside 60 s). Revisit
+    # when v1 gets its own role (e.g. solar imaging during the day).
     state = load_state()
     new_state = {}
-    for cam_label, cam_idx, lp in [("v3w", CAM_V3W, LENS_POSITION_V3W),
-                                    ("v1", CAM_V1, None)]:
+    for cam_label, cam_idx, lp, night_capable in [
+            ("v3w", CAM_V3W, LENS_POSITION_V3W, True),
+            ("v1",  CAM_V1,  None,              False)]:
         prev = state.get(cam_label, {})
         mode, hold = decide_mode(prev, prev.get("lum"))
-        if mode == "night":
+        if mode == "night" and night_capable:
             hour_dir = FRAMES / "night" / night_date / cam_label / hh
             brightness_path = shoot_night(cam_idx, hour_dir, lens_position=lp)
             lum = scene_luminance_from_fits(brightness_path) if brightness_path else None
-        else:
+        elif mode == "day" or not night_capable:
+            # Day-only cameras still capture (and update lum) even when
+            # the scene is dark — operator can find them and check.
             hour_dir = FRAMES / "day" / utc_date / cam_label / hh
             out_path = next_frame_path(hour_dir, "jpg")
             shoot_day(cam_idx, out_path, lens_position=lp)
             lum = scene_luminance_from_jpeg(out_path) if out_path.exists() else None
+        else:
+            lum = None
         new_state[cam_label] = {"mode": mode, "hold": hold,
                                 "lum": lum if lum is not None else prev.get("lum")}
     save_state(new_state)
