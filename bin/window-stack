@@ -43,10 +43,14 @@ def parse_hhmm_to_utc(night: str, hhmm: str) -> datetime:
 
 
 def _burn_label(jpeg_path: Path, label: str):
-    """Reopen the JPEG, paint `label` along the bottom dead-strip, save."""
+    """Reopen the JPEG, paint `label` along the bottom dead-strip, save.
+    Preserves the source mode (RGB stays RGB; greyscale stays L)."""
     from PIL import Image, ImageDraw, ImageFont
-    img = Image.open(jpeg_path).convert("L")
+    img = Image.open(jpeg_path)
+    if img.mode not in ("L", "RGB"):
+        img = img.convert("RGB")
     W, H = img.size
+    fill = 255 if img.mode == "L" else (255, 255, 255)
     # Try a real font; fall back to PIL default (small but always works).
     font = None
     for candidate in (
@@ -66,9 +70,9 @@ def _burn_label(jpeg_path: Path, label: str):
     x = W - tw - margin
     y = H - th - margin
     if font:
-        draw.text((x, y), label, fill=255, font=font)
+        draw.text((x, y), label, fill=fill, font=font)
     else:
-        draw.text((x, y), label, fill=255)
+        draw.text((x, y), label, fill=fill)
     img.save(jpeg_path, quality=88)
 
 
