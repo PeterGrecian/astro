@@ -61,7 +61,8 @@ def read_csv(csv_path: Path):
 
 
 def plot_night(rows, night: str, camera: str, out_path: Path,
-               pedestal: float | None = None):
+               pedestal: float | None = None,
+               stacked_window_utc: tuple[str, str] | None = None):
     """Scatter of log2(mean - pedestal) vs local time for one night's
     rows (as produced by measure()). X-axis ends at 05:00 the next
     morning (cover-close safety time), matching bin/plot-brightness.
@@ -105,6 +106,18 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     end = datetime.combine(night_date + timedelta(days=1),
                            time(5, 0), tzinfo=LONDON)
     ax.set_xlim(start, end)
+    # Mark the time-range of frames that entered max/min/sum stacks.
+    # These bounds come from nightly-cam's anchor-band gate; everything
+    # outside is twilight, dawn, or unusually-dark flap frames.
+    if stacked_window_utc:
+        try:
+            t_lo = datetime.fromisoformat(stacked_window_utc[0]).astimezone(LONDON)
+            t_hi = datetime.fromisoformat(stacked_window_utc[1]).astimezone(LONDON)
+            for t in (t_lo, t_hi):
+                ax.axvline(t, color="#FF9500", linestyle="--",
+                           linewidth=1.2, alpha=0.7)
+        except (ValueError, TypeError):
+            pass
     fig.autofmt_xdate()
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)

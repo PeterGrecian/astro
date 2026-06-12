@@ -275,6 +275,8 @@ def main() -> int:
         return 1
     stacked_frames = [(t, f) for (t, f) in frames if f in stacked]
     stacked_rows = [r for r in rows if Path(r[2]) in stacked]
+    stacked_window_utc = [stacked_frames[0][0].isoformat(),
+                          stacked_frames[-1][0].isoformat()]
 
     write_fits(max_img, out_dir / f"{stem}max.fits.fz", np.uint16)
     write_fits(min_img, out_dir / f"{stem}min.fits.fz", np.uint16)
@@ -295,7 +297,8 @@ def main() -> int:
     brightness.write_csv(rows, out_dir / f"{stem}brightness.csv")
     brightness.plot_night(rows, night, cfg.name,
                           out_dir / f"{stem}brightness.png",
-                          pedestal=cfg.get("pedestal"))
+                          pedestal=cfg.get("pedestal"),
+                          stacked_window_utc=stacked_window_utc)
     if getattr(cfg, "privacy", None):
         # Plots contain no camera pixels — privacy-safe by construction.
         privacy_mod.mark_ok(out_dir / f"{stem}brightness.png")
@@ -350,7 +353,8 @@ def main() -> int:
                     "n_frames": n_stacked,
                 }
 
-    summary_extra = {"n_stacked": len(stacked), "anchor": anchor_info}
+    summary_extra = {"n_stacked": len(stacked), "anchor": anchor_info,
+                     "stacked_window_utc": stacked_window_utc}
     s = summary_mod.build(cfg.name, night, rows, badpix_info, derot_info,
                           outputs={"max_jpg": f"{stem}max.jpg",
                                    "derot_jpg": f"{stem}derot.jpg" if derot_info else None,
