@@ -42,6 +42,36 @@ def parse_hhmm_to_utc(night: str, hhmm: str) -> datetime:
                             tzinfo=timezone.utc).replace(hour=h, minute=m)
 
 
+def _burn_label(jpeg_path: Path, label: str):
+    """Reopen the JPEG, paint `label` along the bottom dead-strip, save."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.open(jpeg_path).convert("L")
+    W, H = img.size
+    # Try a real font; fall back to PIL default (small but always works).
+    font = None
+    for candidate in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ):
+        try:
+            font = ImageFont.truetype(candidate, size=max(20, H // 30))
+            break
+        except OSError:
+            continue
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0, 0), label, font=font) if font \
+        else (0, 0, len(label) * 8, 14)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    margin = max(8, H // 80)
+    x = W - tw - margin
+    y = H - th - margin
+    if font:
+        draw.text((x, y), label, fill=255, font=font)
+    else:
+        draw.text((x, y), label, fill=255)
+    img.save(jpeg_path, quality=88)
+
+
 def stack_window(frames, raw_shape):
     """Stream the frames into a 2x2-binned uint32 max image."""
     H, W = raw_shape[0] // 2, raw_shape[1] // 2
@@ -64,6 +94,10 @@ def main() -> int:
                     help="UTC, exclusive")
     ap.add_argument("--out", required=True, type=Path,
                     help="output JPEG path")
+    ap.add_argument("--label", default=None,
+                    help="text to burn into the bottom strip of the JPEG "
+                         "(e.g. '01:36 BST  +2.1 stops'). Left blank: no "
+                         "overlay.")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -90,6 +124,8 @@ def main() -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     render_asinh_jpeg(out_img, args.out)
+    if args.label:
+        _burn_label(args.out, args.label)
     if cfg.get("privacy_file"):
         privacy_mod.mark_ok(args.out)
 

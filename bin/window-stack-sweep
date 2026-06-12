@@ -20,7 +20,8 @@ set -euo pipefail
 
 CAMERA=""; SUBCAM=""; NIGHT=""; SWEEP_START=""; SWEEP_END=""
 WINDOW_MIN=10; STEP_MIN=1; OUT_DIR=""; FPS=60; JOBS=8
-NO_MP4=0; FORCE=0
+NO_MP4=0; FORCE=0; BRIGHTNESS_CSV=""; STAGGER_S=0
+LABEL_TZ="Europe/London"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -36,6 +37,8 @@ while [[ $# -gt 0 ]]; do
         --jobs)         JOBS="$2";         shift 2;;
         --no-mp4)       NO_MP4=1;          shift;;
         --force)        FORCE=1;           shift;;
+        --brightness-csv) BRIGHTNESS_CSV="$2"; shift 2;;
+        --stagger-s)    STAGGER_S="$2";    shift 2;;
         -h|--help)      sed -n '1,/^set -euo/p' "$0" | head -n -1; exit 0;;
         *)              echo "unknown arg: $1" >&2; exit 2;;
     esac
@@ -56,9 +59,13 @@ mkdir -p "$OUT_DIR/frames"
 JOBS_LIST=$(mktemp)
 trap "rm -f '$JOBS_LIST'" EXIT
 "$PY" - <<PYEOF > "$JOBS_LIST"
+import csv, os
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+import numpy as np
 
 night_d = datetime.strptime("$NIGHT", "%Y-%m-%d").date()
+TZ = ZoneInfo("$LABEL_TZ")
 
 def hhmm_to_utc(hhmm):
     h, m = (int(x) for x in hhmm.split(":"))
@@ -71,25 +78,82 @@ end   = hhmm_to_utc("$SWEEP_END")
 window = timedelta(minutes=$WINDOW_MIN)
 step   = timedelta(minutes=$STEP_MIN)
 
-# Frame N starts at start + N*step; last frame's WINDOW ends at end.
+# Load brightness CSV if given, build sorted (utc_dt, per_s) arrays.
+csv_path = "$BRIGHTNESS_CSV"
+times_arr = vals_per_s = pedestal = None
+if csv_path:
+    rows_t, rows_per_s, means = [], [], []
+    # Need EXPTIME/GAIN per row — pull from FITS header lazily; if all
+    # frames share the same exposure (the eclipticam case) one peek is
+    # enough. Fall back to mean if exposure unknown.
+    from astropy.io import fits as _fits
+    seen_exp_gain = None
+    with open(csv_path) as fh:
+        for row in csv.DictReader(fh):
+            try:
+                t = datetime.fromisoformat(row["iso_utc"])
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                m = float(row["mean"])
+            except (KeyError, ValueError):
+                continue
+            if seen_exp_gain is None:
+                try:
+                    with _fits.open(row["filename"]) as h:
+                        hdr = h[1].header
+                    seen_exp_gain = (float(hdr.get("EXPTIME", 1.0) or 1.0),
+                                     float(hdr.get("GAIN", 1.0) or 1.0))
+                except (OSError, KeyError, ValueError):
+                    seen_exp_gain = (1.0, 1.0)
+            exp, gain = seen_exp_gain
+            rows_t.append(t)
+            means.append(m)
+            rows_per_s.append(m / (exp * gain) if exp * gain > 0 else m)
+    if rows_t:
+        order = sorted(range(len(rows_t)), key=lambda i: rows_t[i])
+        times_arr = [rows_t[i] for i in order]
+        vals_per_s = np.array([rows_per_s[i] for i in order])
+        means_arr = np.array([means[i] for i in order])
+        # Robust pedestal: 1st percentile of per-frame means.
+        pedestal = float(np.percentile(means_arr, 1))
+
+def window_label(w_start, w_end):
+    centre = w_start + (w_end - w_start) / 2
+    hhmm_local = centre.astimezone(TZ).strftime("%H:%M")
+    if times_arr is None or pedestal is None:
+        return hhmm_local
+    in_win = [i for i, t in enumerate(times_arr) if w_start <= t < w_end]
+    if not in_win:
+        return hhmm_local
+    mean_count = float(means_arr[in_win].mean())
+    signal = max(mean_count - pedestal, 1e-3)
+    stops = float(np.log2(signal))
+    return f"{hhmm_local}   {stops:+.1f} stops"
+
 n = 0
 t = start
 while t + window <= end:
     w_end = t + window
-    print(f"{n:05d}\t{t.strftime('%H:%M')}\t{w_end.strftime('%H:%M')}")
+    lbl = window_label(t, w_end)
+    # NUL-separate fields AND rows so labels with spaces survive xargs.
+    import sys
+    sys.stdout.write(f"{n:05d}\0{t.strftime('%H:%M')}\0"
+                     f"{w_end.strftime('%H:%M')}\0{lbl}\0")
     n += 1
     t += step
 PYEOF
 
-N_FRAMES=$(wc -l < "$JOBS_LIST")
+# Job list is NUL-separated; row count = nulls / 4.
+N_NULLS=$(tr -cd '\0' < "$JOBS_LIST" | wc -c)
+N_FRAMES=$((N_NULLS / 4))
 echo "sweep: $SWEEP_START - $SWEEP_END  window=${WINDOW_MIN}min  step=${STEP_MIN}min"
-echo "frames: $N_FRAMES  (concurrent: $JOBS)"
+echo "frames: $N_FRAMES  (concurrent: $JOBS, stagger=${STAGGER_S}s)"
 
 # Run window-stack per row, 8-way concurrent. xargs -P with -n3 -I gives
 # us up to JOBS workers each chewing one (idx, start, end) triple.
-export CAMERA SUBCAM NIGHT OUT_DIR PY HERE FORCE
+export CAMERA SUBCAM NIGHT OUT_DIR PY HERE FORCE STAGGER_S
 worker() {
-    local idx="$1" w_start="$2" w_end="$3"
+    local idx="$1" w_start="$2" w_end="$3" label="$4"
     local out="$OUT_DIR/frames/frame_${idx}.jpg"
     if [[ "$FORCE" -eq 0 && -s "$out" ]]; then
         return 0
@@ -98,12 +162,32 @@ worker() {
                 --window-start "$w_start" --window-end "$w_end"
                 --out "$out" --quiet)
     [[ -n "$SUBCAM" ]] && args+=(--subcam "$SUBCAM")
+    [[ -n "$label" ]] && args+=(--label "$label")
     "$PY" "$HERE/window-stack" "${args[@]}"
 }
 export -f worker
 
+# Stagger: each of the first $JOBS workers sleeps slot_index*STAGGER_S
+# at start, so Python/import I/O is spread out. After warm-up the pool
+# stays at JOBS-wide. xargs hands us process_slot 1..JOBS via
+# --process-slot-var; we sleep that-many seconds on first invocation.
+SLOT_STATE_DIR=$(mktemp -d)
+trap "rm -f '$JOBS_LIST'; rm -rf '$SLOT_STATE_DIR'" EXIT
+export SLOT_STATE_DIR
+worker_stagger() {
+    local slot="${XARGS_PROCESS_SLOT:-1}"
+    if [[ "$STAGGER_S" != 0 ]] && [[ ! -e "$SLOT_STATE_DIR/$slot" ]]; then
+        touch "$SLOT_STATE_DIR/$slot"
+        sleep $(awk "BEGIN { print ($slot - 1) * $STAGGER_S }")
+    fi
+    worker "$@"
+}
+export -f worker_stagger
+
 t0=$(date +%s)
-< "$JOBS_LIST" tr '\t' '\n' | xargs -n3 -P "$JOBS" bash -c 'worker "$@"' _
+< "$JOBS_LIST" xargs -0 -n4 -P "$JOBS" \
+    --process-slot-var=XARGS_PROCESS_SLOT \
+    bash -c 'worker_stagger "$@"' _
 t1=$(date +%s)
 echo "rendered $N_FRAMES frames in $((t1 - t0))s wall"
 
