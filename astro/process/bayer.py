@@ -48,6 +48,31 @@ def bin2x2(arr):
     return b
 
 
+def bin2x2_rgb(arr, pattern: str):
+    """Split a Bayer mosaic into 3 colour planes by stride-2 slicing,
+    summing the two greens. Output shape (H/2, W/2, 3), one full
+    RGGB quad per pixel — same shape as bin2x2() but RGB.
+
+    For video / colour visualisation only. Stacking and the science
+    pipeline always use grey bin2x2.
+    """
+    import numpy as np
+    H, W = arr.shape
+    a = arr[:H - H % 2, :W - W % 2]
+    off = plane_offsets(pattern)
+    def _plane(rc):
+        r, c = rc
+        return a[r::2, c::2]
+    r = _plane(off["R"])
+    g = _plane(off["G1"]).astype(np.uint32) + _plane(off["G2"])
+    b = _plane(off["B"])
+    out = np.empty((r.shape[0], r.shape[1], 3), dtype=np.uint32)
+    out[..., 0] = r
+    out[..., 1] = g
+    out[..., 2] = b
+    return out
+
+
 def plane_offsets(pat: str) -> dict:
     """Map plane name -> (row_offset, col_offset) for a 4-letter pattern.
     Green planes are named G1 (first in reading order) and G2."""

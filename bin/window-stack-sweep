@@ -21,7 +21,7 @@ set -euo pipefail
 CAMERA=""; SUBCAM=""; NIGHT=""; SWEEP_START=""; SWEEP_END=""
 WINDOW_MIN=10; STEP_MIN=1; OUT_DIR=""; FPS=60; JOBS=8
 NO_MP4=0; FORCE=0; BRIGHTNESS_CSV=""; STAGGER_S=0
-LABEL_TZ="Europe/London"
+LABEL_TZ="Europe/London"; RGB=0; AUTO_START_STOPS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,6 +39,8 @@ while [[ $# -gt 0 ]]; do
         --force)        FORCE=1;           shift;;
         --brightness-csv) BRIGHTNESS_CSV="$2"; shift 2;;
         --stagger-s)    STAGGER_S="$2";    shift 2;;
+        --rgb)          RGB=1;             shift;;
+        --auto-start-stops) AUTO_START_STOPS="$2"; shift 2;;
         -h|--help)      sed -n '1,/^set -euo/p' "$0" | head -n -1; exit 0;;
         *)              echo "unknown arg: $1" >&2; exit 2;;
     esac
@@ -77,6 +79,10 @@ start = hhmm_to_utc("$SWEEP_START")
 end   = hhmm_to_utc("$SWEEP_END")
 window = timedelta(minutes=$WINDOW_MIN)
 step   = timedelta(minutes=$STEP_MIN)
+
+# AUTO_START_STOPS: bash empty string -> no autodetect.
+auto_start_stops = "$AUTO_START_STOPS"
+auto_start_stops = float(auto_start_stops) if auto_start_stops else None
 
 # Load brightness CSV if given, build sorted (utc_dt, per_s) arrays.
 csv_path = "$BRIGHTNESS_CSV"
@@ -117,6 +123,17 @@ if csv_path:
         # Robust pedestal: 1st percentile of per-frame means.
         pedestal = float(np.percentile(means_arr, 1))
 
+def stops_at(t_query):
+    """Stops above pedestal for the single nearest CSV row, or None."""
+    if times_arr is None or pedestal is None:
+        return None
+    # nearest neighbour
+    best_i = min(range(len(times_arr)),
+                 key=lambda i: abs((times_arr[i] - t_query).total_seconds()))
+    signal = max(float(means_arr[best_i]) - pedestal, 1e-3)
+    return float(np.log2(signal))
+
+
 def window_label(w_start, w_end):
     centre = w_start + (w_end - w_start) / 2
     hhmm_local = centre.astimezone(TZ).strftime("%H:%M")
@@ -129,6 +146,42 @@ def window_label(w_start, w_end):
     signal = max(mean_count - pedestal, 1e-3)
     stops = float(np.log2(signal))
     return f"{hhmm_local}   {stops:+.1f} stops"
+
+
+# Optional autodetect: shift `start` later until the window's mean stops
+# is below auto_start_stops AND no individual frame in the window is
+# below -2 stops (flap signature: a frame darker than the pedestal-
+# subtracted floor by more than ~2 stops). 10-min lookahead is the
+# window itself, so checking the first window is enough.
+if auto_start_stops is not None and times_arr is not None:
+    FLAP_STOPS = -2.0
+    t = start
+    chosen = None
+    while t + window <= end:
+        w_end = t + window
+        in_win = [i for i, ti in enumerate(times_arr) if t <= ti < w_end]
+        if in_win:
+            mean_count = float(means_arr[in_win].mean())
+            stops = float(np.log2(max(mean_count - pedestal, 1e-3)))
+            # Per-frame stops in the window (for flap test).
+            per_frame_stops = np.log2(
+                np.maximum(means_arr[in_win] - pedestal, 1e-3))
+            if stops < auto_start_stops and per_frame_stops.min() > FLAP_STOPS:
+                chosen = t
+                break
+        t += step
+    if chosen is not None:
+        import sys as _sys
+        _sys.stderr.write(
+            f"auto-start: shifted from {start.strftime('%H:%M')} to "
+            f"{chosen.strftime('%H:%M')} UTC "
+            f"(first window with mean<{auto_start_stops:+.1f} stops "
+            f"and no flap below {FLAP_STOPS} stops)\n")
+        start = chosen
+    else:
+        import sys as _sys
+        _sys.stderr.write(
+            f"auto-start: no window matched, keeping {start.strftime('%H:%M')}\n")
 
 n = 0
 t = start
@@ -151,7 +204,7 @@ echo "frames: $N_FRAMES  (concurrent: $JOBS, stagger=${STAGGER_S}s)"
 
 # Run window-stack per row, 8-way concurrent. xargs -P with -n3 -I gives
 # us up to JOBS workers each chewing one (idx, start, end) triple.
-export CAMERA SUBCAM NIGHT OUT_DIR PY HERE FORCE STAGGER_S
+export CAMERA SUBCAM NIGHT OUT_DIR PY HERE FORCE STAGGER_S RGB
 worker() {
     local idx="$1" w_start="$2" w_end="$3" label="$4"
     local out="$OUT_DIR/frames/frame_${idx}.jpg"
@@ -163,6 +216,7 @@ worker() {
                 --out "$out" --quiet)
     [[ -n "$SUBCAM" ]] && args+=(--subcam "$SUBCAM")
     [[ -n "$label" ]] && args+=(--label "$label")
+    [[ "$RGB" -eq 1 ]] && args+=(--rgb)
     "$PY" "$HERE/window-stack" "${args[@]}"
 }
 export -f worker

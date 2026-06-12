@@ -28,7 +28,7 @@ from astro.config import CameraConfig
 from astro.frames import list_night_frames
 from astro.process import bayer
 from astro.present import privacy as privacy_mod
-from astro.present.render import render_asinh_jpeg
+from astro.present.render import render_asinh_jpeg, render_asinh_jpeg_rgb
 
 
 def parse_hhmm_to_utc(night: str, hhmm: str) -> datetime:
@@ -72,14 +72,24 @@ def _burn_label(jpeg_path: Path, label: str):
     img.save(jpeg_path, quality=88)
 
 
-def stack_window(frames, raw_shape):
-    """Stream the frames into a 2x2-binned uint32 max image."""
+def stack_window(frames, raw_shape, rgb_pattern=None):
+    """Stream the frames into a 2x2-binned uint32 max image.
+    rgb_pattern: if given, bin into 3-channel RGB (per-plane). Output
+    shape (H/2, W/2, 3); else greyscale (H/2, W/2)."""
     H, W = raw_shape[0] // 2, raw_shape[1] // 2
-    max_img = np.zeros((H, W), dtype=np.uint32)
-    for _, f in frames:
-        with fits.open(f) as h:
-            d = h[1].data
-        np.maximum(max_img, bayer.bin2x2(d), out=max_img)
+    if rgb_pattern:
+        max_img = np.zeros((H, W, 3), dtype=np.uint32)
+        for _, f in frames:
+            with fits.open(f) as h:
+                d = h[1].data
+            np.maximum(max_img, bayer.bin2x2_rgb(d, rgb_pattern),
+                       out=max_img)
+    else:
+        max_img = np.zeros((H, W), dtype=np.uint32)
+        for _, f in frames:
+            with fits.open(f) as h:
+                d = h[1].data
+            np.maximum(max_img, bayer.bin2x2(d), out=max_img)
     return max_img
 
 
@@ -94,6 +104,10 @@ def main() -> int:
                     help="UTC, exclusive")
     ap.add_argument("--out", required=True, type=Path,
                     help="output JPEG path")
+    ap.add_argument("--rgb", action="store_true",
+                    help="produce a 3-channel RGB JPEG (per-plane Bayer bin "
+                         "with auto-WB asinh stretch) instead of greyscale. "
+                         "Resolution unchanged — same H/2 x W/2 binned shape.")
     ap.add_argument("--label", default=None,
                     help="text to burn into the bottom strip of the JPEG "
                          "(e.g. '01:36 BST  +2.1 stops'). Left blank: no "
@@ -116,14 +130,21 @@ def main() -> int:
 
     with fits.open(frames[0][1]) as h:
         raw_shape = h[1].data.shape
-    max_img = stack_window(frames, raw_shape)
 
-    # Privacy crop if the camera requires it.
+    rgb_pattern = None
+    if args.rgb:
+        sensor_raw = cfg.get("bayer") or ""
+        rgb_pattern = bayer.pattern(sensor_raw)
+    max_img = stack_window(frames, raw_shape, rgb_pattern=rgb_pattern)
+
     spec = privacy_mod.entry_for(cfg, args.subcam)
     out_img = privacy_mod.crop_for_publication(max_img, spec)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    render_asinh_jpeg(out_img, args.out)
+    if args.rgb:
+        render_asinh_jpeg_rgb(out_img, args.out)
+    else:
+        render_asinh_jpeg(out_img, args.out)
     if args.label:
         _burn_label(args.out, args.label)
     if cfg.get("privacy_file"):
