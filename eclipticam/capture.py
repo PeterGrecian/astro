@@ -84,13 +84,22 @@ def scene_luminance_from_jpeg(path):
 
 
 def scene_luminance_from_fits(path):
-    """Same metric, from FITS using stored EXPTIME + GAIN."""
+    """Same metric, from FITS using stored EXPTIME + GAIN.
+
+    Saturation guard: if the frame is clipped (mean at or near uint16
+    ceiling) the lum calculation underestimates badly — a saturated 30s
+    daytime frame returns ~0.002 which falsely reads as "night". Force a
+    huge lum in that case so decide_mode trips the night→day transition
+    immediately rather than sticking in night for hours of wasted 30s
+    daylight captures."""
     with fits.open(path) as hdul:
         hdr = hdul[1].header
         data = hdul[1].data
     shutter_us = float(hdr["EXPTIME"]) * 1e6
     gain = float(hdr["GAIN"])
     mean = float(np.mean(data))
+    if mean >= 64000:
+        return 1.0  # forces above any LUMINANCE_NIGHT_EXIT
     if shutter_us * gain <= 0:
         return None
     return mean / (shutter_us * gain)
@@ -241,11 +250,19 @@ def decide_mode(prev, last_lum):
     """Apply hysteresis + min-hold. prev = {'mode': 'day'|'night', 'hold': int, 'lum': float}.
 
     Returns new mode + new hold counter. Day is the default if no prev state.
+
+    SATURATED_EXIT bypasses min-hold: a lum of 1.0 (from a saturated
+    frame in scene_luminance_from_fits) means we're definitively in
+    daylight — no point waiting MODE_HOLD_TICKS more 30s captures of
+    pure white. Same shape but with no hold delay.
     """
+    SATURATED_EXIT = 0.5  # any lum above this is an unambiguous "day"
     mode = prev.get("mode", "day")
     hold = int(prev.get("hold", MODE_HOLD_TICKS))
     if last_lum is None:
         return mode, hold + 1
+    if mode == "night" and last_lum >= SATURATED_EXIT:
+        return "day", 0  # bypass min-hold
     if hold < MODE_HOLD_TICKS:
         return mode, hold + 1
     if mode == "day" and last_lum < LUMINANCE_NIGHT_ENTER:
