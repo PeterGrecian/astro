@@ -18,6 +18,7 @@ CONTENT_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".yaml": "application/x-yaml",
+    ".mp4": "video/mp4",
 }
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}

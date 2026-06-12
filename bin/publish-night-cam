@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# publish-night-cam — full deliverables for one camera/night, publish to S3.
+#
+# 1. nightly-cam : stacks, badpix, brightness CSV/PNG, summary.json
+# 2. window-stack-sweep --rgb : colour sliding-window mp4 + label overlay
+# 3. publish: upload everything to s3://<bucket>/<camera>/nights/<night>/
+#
+# Usage:
+#   publish-night-cam --camera eclipticam --subcam v3w --night 2026-06-09
+#   publish-night-cam --camera eclipticam --subcam v3w --night 2026-06-09 \
+#                     --no-sweep         # skip the (slow) sweep render
+#                     --no-publish       # leave artefacts on local disk only
+set -euo pipefail
+
+CAMERA=""; SUBCAM=""; NIGHT=""
+NO_SWEEP=0; NO_PUBLISH=0
+WINDOW_MIN=10; STEP_MIN=1; FPS=60; JOBS=8
+AUTO_START_STOPS=12; AUTO_END_STOPS=13
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --camera)        CAMERA="$2";        shift 2;;
+        --subcam)        SUBCAM="$2";        shift 2;;
+        --night)         NIGHT="$2";         shift 2;;
+        --no-sweep)      NO_SWEEP=1;         shift;;
+        --no-publish)    NO_PUBLISH=1;       shift;;
+        --window-min)    WINDOW_MIN="$2";    shift 2;;
+        --step-min)      STEP_MIN="$2";      shift 2;;
+        --jobs)          JOBS="$2";          shift 2;;
+        --auto-start-stops) AUTO_START_STOPS="$2"; shift 2;;
+        --auto-end-stops)   AUTO_END_STOPS="$2";   shift 2;;
+        -h|--help)       sed -n '1,/^set -euo/p' "$0" | head -n -1; exit 0;;
+        *)               echo "unknown arg: $1" >&2; exit 2;;
+    esac
+done
+
+for arg in CAMERA NIGHT; do
+    [[ -n "${!arg}" ]] || { echo "--${arg,,} required" >&2; exit 2; }
+done
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+PY="${ASTRO_VENV_PY:-$REPO/.venv/bin/python}"
+[[ -x "$PY" ]] || PY="$HOME/astro/.venv/bin/python"
+
+stem=""; [[ -n "$SUBCAM" ]] && stem="${SUBCAM}_"
+echo "=== publish-night-cam ${CAMERA}${SUBCAM:+/$SUBCAM} ${NIGHT} ==="
+
+# --- 1. nightly-cam: stacks + brightness + summary -------------------
+nc_args=(--camera "$CAMERA" --night "$NIGHT" --no-derot)
+[[ -n "$SUBCAM" ]] && nc_args+=(--subcam "$SUBCAM")
+echo "--- nightly-cam"
+"$PY" "$HERE/nightly-cam" "${nc_args[@]}"
+
+# Locate the night dir from the config so the sweeper + publish find
+# the same place. `night_output_dir(cfg, night)` is the canonical path.
+night_dir=$("$PY" - <<PYEOF
+import sys; sys.path.insert(0, "$REPO")
+from astro.config import CameraConfig
+from astro.frames import night_output_dir
+cfg = CameraConfig.load("$CAMERA")
+print(night_output_dir(cfg, "$NIGHT"))
+PYEOF
+)
+brightness_csv="${night_dir}/${stem}brightness.csv"
+
+# --- 2. window-stack-sweep: RGB video -------------------------------
+mp4_path=""
+if [[ "$NO_SWEEP" -eq 0 ]]; then
+    sweep_dir="${night_dir}/${stem}sweep"
+    mkdir -p "$sweep_dir"
+    echo "--- window-stack-sweep --rgb"
+    sweep_args=(
+        --camera "$CAMERA" --night "$NIGHT"
+        --sweep-start 22:00 --sweep-end 04:00
+        --window-min "$WINDOW_MIN" --step-min "$STEP_MIN"
+        --out-dir "$sweep_dir"
+        --fps "$FPS" --jobs "$JOBS" --stagger-s 1
+        --brightness-csv "$brightness_csv"
+        --rgb
+        --auto-start-stops "$AUTO_START_STOPS"
+        --auto-end-stops   "$AUTO_END_STOPS"
+        --force
+    )
+    [[ -n "$SUBCAM" ]] && sweep_args+=(--subcam "$SUBCAM")
+    "$HERE/window-stack-sweep" "${sweep_args[@]}"
+    # Promote the mp4 to <stem>sweep.mp4 at the night-dir root so the
+    # publish step picks it up naturally alongside the other artefacts.
+    mp4_path="${night_dir}/${stem}sweep.mp4"
+    cp "$sweep_dir/sweep.mp4" "$mp4_path"
+    echo "wrote $mp4_path"
+fi
+
+# --- 3. publish to S3 ------------------------------------------------
+if [[ "$NO_PUBLISH" -eq 1 ]]; then
+    echo "skip publish (--no-publish)"
+    exit 0
+fi
+echo "--- publish to S3"
+"$PY" - <<PYEOF
+import sys; sys.path.insert(0, "$REPO")
+from pathlib import Path
+from astro.config import CameraConfig
+from astro.present import privacy as P
+from astro.present.publish import publish_night
+cfg = CameraConfig.load("$CAMERA")
+if "$SUBCAM": cfg = cfg.subcam("$SUBCAM")
+nd = Path("$night_dir")
+names = [
+    f"${stem}summary.json",
+    f"${stem}brightness.png",
+    f"${stem}max.jpg",
+    f"${stem}derot.jpg",
+    f"${stem}sweep.mp4",
+]
+files = [nd/n for n in names if (nd/n).exists()]
+# Videos that came out of window-stack-sweep are made from privacy-
+# cropped frames; mark them OK if the camera has a privacy policy.
+if getattr(cfg, "privacy", None):
+    mp4 = nd / f"${stem}sweep.mp4"
+    if mp4.exists():
+        P.mark_ok(mp4)
+publish_night(cfg, "$NIGHT", files)
+PYEOF
+echo "=== done ==="
