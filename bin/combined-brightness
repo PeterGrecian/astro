@@ -130,8 +130,11 @@ def main():
         pedestal = float(np.percentile(vals, 1))
         signal = np.maximum(vals - pedestal, 1e-3)
         xs = to_anchor_axis(times, night_str)
-        ax.scatter(xs, signal, s=2, linewidths=0,
-                   color=cmap(i % 10), label=night_str)
+        # Plot as a thin line (1-min cadence is dense enough that points
+        # would overlap into a smear). gapcolor=None keeps any frame-
+        # less stretches visibly broken rather than interpolated.
+        ax.plot(xs, signal, linewidth=1.0, color=cmap(i % 10),
+                label=night_str, solid_joinstyle="round")
         plotted += 1
         print(f"  {night_str}: {len(times)} pts  pedestal={pedestal:.0f}")
 
@@ -155,13 +158,7 @@ def main():
         datetime.combine(anchor_date, time(22, 0), tzinfo=LONDON),
         datetime.combine(anchor_date + timedelta(days=1),
                          time(5, 0), tzinfo=LONDON))
-    # Custom legend with thicker dots so they show through the scatter
-    from matplotlib.lines import Line2D
-    handles = [Line2D([0], [0], marker="o", color="w",
-                      markerfacecolor=cmap(i % 10), markersize=8,
-                      label=nc[0])
-               for i, nc in enumerate(nights[:plotted])]
-    ax.legend(handles=handles, loc="upper right", fontsize=9)
+    ax.legend(loc="upper right", fontsize=9)
     fig.autofmt_xdate()
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
