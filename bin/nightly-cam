@@ -198,6 +198,14 @@ def main() -> int:
                     help="override pole (default: camera.json pole_prior_xy)")
     ap.add_argument("--window-s", type=int, default=DEFAULT_DEROT_WINDOW_S,
                     help="derot window length (default 3h, darkest picked)")
+    ap.add_argument("--window-start", default=None, metavar="HH:MM",
+                    help="restrict stacks + derot to frames at/after this "
+                         "UTC time (e.g. 23:00). Use with --window-end to "
+                         "stack an explicit window instead of letting the "
+                         "anchor-band gate choose. UTC, not BST.")
+    ap.add_argument("--window-end", default=None, metavar="HH:MM",
+                    help="restrict stacks + derot to frames before this UTC "
+                         "time (e.g. 23:30).")
     ap.add_argument("--no-derot", action="store_true")
     ap.add_argument("--publish", action="store_true",
                     help="upload web assets to S3 after generation")
@@ -215,6 +223,35 @@ def main() -> int:
     if not frames:
         print("no frames found for that night", file=sys.stderr)
         return 1
+
+    if args.window_start or args.window_end:
+        # Build absolute UTC bounds from the night-of date + the HH:MM.
+        # A time at or after 12:00 belongs to the night's start-date;
+        # before 12:00 it belongs to the next calendar day. Matches the
+        # noon-rollover night convention.
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        nd = _dt.strptime(night, "%Y-%m-%d").date()
+
+        def bound(hhmm):
+            if not hhmm:
+                return None
+            h, m = (int(x) for x in hhmm.split(":"))
+            day = nd if h >= 12 else nd + _td(days=1)
+            return _dt.combine(day, _dt.min.time(),
+                               tzinfo=_tz.utc).replace(hour=h, minute=m)
+
+        w_start = bound(args.window_start)
+        w_end = bound(args.window_end)
+        kept = [(t, f) for (t, f) in frames
+                if (w_start is None or t >= w_start)
+                and (w_end is None or t < w_end)]
+        print(f"--window-start/end: kept {len(kept)}/{len(frames)} frames "
+              f"in [{w_start}, {w_end})")
+        frames = kept
+        if not frames:
+            print("no frames in the requested window", file=sys.stderr)
+            return 1
+
     print(f"frames: {len(frames)}  first={frames[0][0].isoformat()}  "
           f"last={frames[-1][0].isoformat()}")
 
@@ -225,8 +262,12 @@ def main() -> int:
     stem = f"{args.subcam}_" if args.subcam else ""
 
     t0 = time.monotonic()
+    # Explicit window means the user has chosen the frames; skip the
+    # anchor-band gate so everything in the window enters the stack.
+    explicit_window = bool(args.window_start or args.window_end)
     max_img, min_img, sum_img, rows, stacked, anchor_info = \
-        stack_and_measure(frames)
+        stack_and_measure(frames,
+                          band_tol=float("inf") if explicit_window else BAND_TOL)
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:
         print("every frame was bright/saturated; no stacks written",

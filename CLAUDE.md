@@ -73,6 +73,55 @@ argued this and it's right. Decision recorded in DECISIONS.md.
 - **`~/photography/timelapse/starcam/`** — day-mode timelapse,
   pretty pictures. **Different repo, different goals.**
 
+## Unified pipeline (`unify-cameras` branch, 2026-06-12)
+
+One CLI — `bin/nightly-cam --camera <name> [--subcam v1|v3w] [--night
+YYYY-MM-DD]` — produces a night's deliverables for any camera and
+publishes them to `s3://astro-berrylands-eu-west-1/<camera>/nights/<night>/`.
+The website (`mywebsite` /astro/astrocam, /astro/eclipticam) reads
+this bucket.
+
+Per-camera dirs (`astrocam/`, `eclipticam/`, `starcam/`) hold a
+`camera.json` (sensor / Bayer / resolution / plate scale / pole prior /
+S3 target / frames root / night layout) plus optional sibling
+`occlusion.json`, `quality.json`, `location.json`, `privacy.json`.
+`astro.config.CameraConfig.load(name)` merges them.
+
+Shared package `astro/astro/`:
+- `nightdir` — canonical noon-rollover (`(utc - 12h).date()`)
+- `frames` — list a night's frames per camera layout (flat / percam /
+  starcam-npy)
+- `process/bayer` — sensor → Bayer registry + `bin2x2()` (2×2 sum-bin,
+  returns uint32 when 65 535 is exceeded — the actual deliverables are
+  always derived from the binned grey image, never the raw mosaic)
+- `process/badpix` — MAD hot/cold pixel mask from night min/max
+- `process/pole` + `process/derot` — global LSQ pole fit + streaming
+  per-tile derotated stack
+- `process/brightness` — per-frame mean/median CSV; "darkest 10 min"
+  anchor used for frame-quality gating; pedestal-subtracted log₂ plot
+  (BST/GMT auto-resolved, x-axis to 05:00)
+- `present/render` — asinh JPEG (with `ignore_zero` for derot mosaics)
+- `present/privacy` — publication crop + `.privacy-ok` sidecar marker;
+  `publish` refuses uncropped images for cameras with `privacy.json`
+- `present/summary` — `summary.json` schema-2 the website Lambda reads
+- `present/publish` — S3 upload
+
+**Frame-quality gating is derived per night, not configured.** Pass 1
+finds the median per_s over the darkest contiguous 10-minute window
+(per_s = `mean / (EXPTIME × GAIN)`, same metric as `bin/trash-bright-frames`).
+Pass 2 stacks every frame within ±30% of that anchor — rejects
+twilight/dawn *and* spuriously-dark "flapping" frames. No
+per-camera threshold to tune.
+
+**Explicit windows** with `--window-start HH:MM --window-end HH:MM`
+(UTC, noon-rollover-aware) skip the band gate. Useful for spot-checks
+like "stack v3w 23:00–23:30 UTC for the dense star-trail picture."
+
+starcam's existing `bin/pipeline-night` pipeline is **untouched** by
+this branch — adoption is deferred until the shared code has been
+side-by-side-validated on real starcam nights. Don't delete the
+fit-pole/derot-patches bootstrap loop.
+
 ## State as of 2026-05-22
 
 - Repo just created. Skeleton only.

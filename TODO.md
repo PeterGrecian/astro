@@ -1,5 +1,27 @@
 # astro — TODO
 
+## Storage budget (2026-06-12)
+
+Deliverables to AWS — few MBy per day, negligible.
+
+Local capacity:
+- muppet 200G, 56G left
+- puppy 450G, 85G left
+- pip 50G emergency only
+- total 700G used / 180G left of ~900
+
+Per-night raw consumption:
+- starcam frames: 40G per night × 10 nights
+- v1 unimportant
+- v2 ~3 h per June night
+- v3w currently sampling 30s of 60s → 7G per night
+
+Easy wins: trash or sum the raw bayer images (75% of storage, ~200G saved).
+Binned-only is 200MB/h for v1 and v3w → ~4G per night.
+
+With binned-only we have storage headroom for ~100 days, then rolling
+retention: extract artifacts, delete frames.
+
 see TODO_fit.MD for matching to catalog (parked 2026-06-07; orientation
 not yet confirmed by visual side-by-side).
 
