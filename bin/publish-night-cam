@@ -65,30 +65,33 @@ PYEOF
 brightness_csv="${night_dir}/${stem}brightness.csv"
 
 # --- 2. window-stack-sweep: RGB video -------------------------------
-mp4_path=""
 if [[ "$NO_SWEEP" -eq 0 ]]; then
-    sweep_dir="${night_dir}/${stem}sweep"
-    mkdir -p "$sweep_dir"
-    echo "--- window-stack-sweep --rgb"
-    sweep_args=(
+    common_args=(
         --camera "$CAMERA" --night "$NIGHT"
         --sweep-start 22:00 --sweep-end 04:00
         --window-min "$WINDOW_MIN" --step-min "$STEP_MIN"
-        --out-dir "$sweep_dir"
         --fps "$FPS" --jobs "$JOBS" --stagger-s 1
         --brightness-csv "$brightness_csv"
-        --rgb
         --auto-start-stops "$AUTO_START_STOPS"
         --auto-end-stops   "$AUTO_END_STOPS"
         --force
     )
-    [[ -n "$SUBCAM" ]] && sweep_args+=(--subcam "$SUBCAM")
-    "$HERE/window-stack-sweep" "${sweep_args[@]}"
-    # Promote the mp4 to <stem>sweep.mp4 at the night-dir root so the
-    # publish step picks it up naturally alongside the other artefacts.
-    mp4_path="${night_dir}/${stem}sweep.mp4"
-    cp "$sweep_dir/sweep.mp4" "$mp4_path"
-    echo "wrote $mp4_path"
+    [[ -n "$SUBCAM" ]] && common_args+=(--subcam "$SUBCAM")
+
+    # Two sweeps share the same auto-start/end window: colour for the
+    # pretty side, mono for the science-leaning side. Both get the
+    # BST/stops burn-in. Filename suffixes distinguish them.
+    for mode in mono colour; do
+        sweep_dir="${night_dir}/${stem}sweep-${mode}"
+        mkdir -p "$sweep_dir"
+        mode_args=("${common_args[@]}" --out-dir "$sweep_dir")
+        [[ "$mode" == "colour" ]] && mode_args+=(--rgb)
+        echo "--- window-stack-sweep (${mode})"
+        "$HERE/window-stack-sweep" "${mode_args[@]}"
+        out="${night_dir}/${stem}sweep-${mode}.mp4"
+        cp "$sweep_dir/sweep.mp4" "$out"
+        echo "wrote $out"
+    done
 fi
 
 # --- 3. publish to S3 ------------------------------------------------
@@ -111,15 +114,16 @@ names = [
     f"${stem}brightness.png",
     f"${stem}max.jpg",
     f"${stem}derot.jpg",
-    f"${stem}sweep.mp4",
+    f"${stem}sweep-mono.mp4",
+    f"${stem}sweep-colour.mp4",
 ]
 files = [nd/n for n in names if (nd/n).exists()]
 # Videos that came out of window-stack-sweep are made from privacy-
 # cropped frames; mark them OK if the camera has a privacy policy.
 if getattr(cfg, "privacy", None):
-    mp4 = nd / f"${stem}sweep.mp4"
-    if mp4.exists():
-        P.mark_ok(mp4)
+    for n in (f"${stem}sweep-mono.mp4", f"${stem}sweep-colour.mp4"):
+        if (nd/n).exists():
+            P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
 PYEOF
 echo "=== done ==="
