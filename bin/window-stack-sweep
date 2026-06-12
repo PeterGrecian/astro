@@ -148,38 +148,68 @@ def window_label(w_start, w_end):
     return f"{hhmm_local}   {stops:+.1f} stops"
 
 
-# Optional autodetect: shift `start` later until the window's mean stops
-# is below auto_start_stops AND no individual frame in the window is
-# below -2 stops (flap signature: a frame darker than the pedestal-
-# subtracted floor by more than ~2 stops). 10-min lookahead is the
-# window itself, so checking the first window is enough.
+# Autodetect: shift `start` later so the sweep begins after the LAST
+# pre-dark flap and after the brightness has dropped below the
+# threshold. Both conditions must hold; whichever happens later wins.
+# A flap is a frame below FLAP_STOPS (-2 stops = darker than pedestal).
+# We look across the whole night and find the last flap time before
+# the post-twilight dark stretch — that point in the data, plus a 5
+# min buffer, is when the cover stopped getting interfered with.
 if auto_start_stops is not None and times_arr is not None:
     FLAP_STOPS = -2.0
+    BUFFER = timedelta(minutes=5)
+    per_frame_stops = np.log2(np.maximum(means_arr - pedestal, 1e-3))
+    # All flap events; we want the last one inside the "twilight side"
+    # of the night (before the main dark window, defined as the first
+    # time the rolling mean is below auto_start_stops).
+    # Find the first window where the rolling mean stays below threshold
+    # FOR THE NEXT STABLE_MIN minutes — i.e. real darkness sets in,
+    # not a brief dip mid-twilight. The previous "first <threshold"
+    # rule fired the moment the mean grazed below 12, leaving +14
+    # spikes later in the sweep.
+    STABLE_MIN = 30
+    first_dark_t = None
     t = start
-    chosen = None
     while t + window <= end:
-        w_end = t + window
-        in_win = [i for i, ti in enumerate(times_arr) if t <= ti < w_end]
-        if in_win:
-            mean_count = float(means_arr[in_win].mean())
-            stops = float(np.log2(max(mean_count - pedestal, 1e-3)))
-            # Per-frame stops in the window (for flap test).
-            per_frame_stops = np.log2(
-                np.maximum(means_arr[in_win] - pedestal, 1e-3))
-            if stops < auto_start_stops and per_frame_stops.min() > FLAP_STOPS:
-                chosen = t
-                break
+        # Scan windows [t, t+window) ... [t + STABLE_MIN, t + STABLE_MIN + window).
+        ok = True
+        t_check = t
+        while t_check <= t + timedelta(minutes=STABLE_MIN):
+            w_end = t_check + window
+            in_win = [i for i, ti in enumerate(times_arr)
+                      if t_check <= ti < w_end]
+            if not in_win:
+                ok = False; break
+            mc = float(means_arr[in_win].mean())
+            stops_w = float(np.log2(max(mc - pedestal, 1e-3)))
+            if stops_w >= auto_start_stops:
+                ok = False; break
+            t_check += step
+        if ok:
+            first_dark_t = t
+            break
         t += step
-    if chosen is not None:
-        import sys as _sys
+    # Last flap up to and including the first-dark moment.
+    flap_idx = [i for i, ti in enumerate(times_arr)
+                if per_frame_stops[i] < FLAP_STOPS
+                and (first_dark_t is None or ti <= first_dark_t + window)]
+    last_flap_t = times_arr[flap_idx[-1]] if flap_idx else None
+    import sys as _sys
+    _sys.stderr.write(
+        f"auto-start: first window <{auto_start_stops:+.1f} stops = "
+        f"{first_dark_t.strftime('%H:%M') if first_dark_t else 'never'} UTC; "
+        f"last pre-dark flap = "
+        f"{last_flap_t.strftime('%H:%M:%S') if last_flap_t else 'none'} UTC\n")
+    candidates = [c for c in (first_dark_t,
+                              last_flap_t + BUFFER if last_flap_t else None)
+                  if c is not None]
+    if candidates:
+        chosen = max(candidates)
         _sys.stderr.write(
             f"auto-start: shifted from {start.strftime('%H:%M')} to "
-            f"{chosen.strftime('%H:%M')} UTC "
-            f"(first window with mean<{auto_start_stops:+.1f} stops "
-            f"and no flap below {FLAP_STOPS} stops)\n")
+            f"{chosen.strftime('%H:%M')} UTC\n")
         start = chosen
     else:
-        import sys as _sys
         _sys.stderr.write(
             f"auto-start: no window matched, keeping {start.strftime('%H:%M')}\n")
 
