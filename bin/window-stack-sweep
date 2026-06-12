@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# window-stack-sweep — generate a sliding-window JPEG sequence + mp4.
+#
+# Drives bin/window-stack across a span like 23:00 → 04:00 UTC with a
+# fixed window length (default 10 min) sliding by a fixed step (default
+# 1 min). 8-way concurrent via xargs -P. Stitches the JPEGs into a
+# 60fps mp4 with ffmpeg.
+#
+# Usage:
+#     window-stack-sweep --camera eclipticam --subcam v3w \
+#         --night 2026-06-09 \
+#         --sweep-start 23:00 --sweep-end 04:00 \
+#         --window-min 10 --step-min 1 \
+#         --out-dir ~/tmp/v3w-video \
+#         [--fps 60] [--jobs 8] [--no-mp4] [--force]
+#
+# Frames land at <out-dir>/frames/frame_NNNN.jpg, video at <out-dir>/sweep.mp4.
+# Already-rendered frames are skipped unless --force is given.
+set -euo pipefail
+
+CAMERA=""; SUBCAM=""; NIGHT=""; SWEEP_START=""; SWEEP_END=""
+WINDOW_MIN=10; STEP_MIN=1; OUT_DIR=""; FPS=60; JOBS=8
+NO_MP4=0; FORCE=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --camera)       CAMERA="$2";       shift 2;;
+        --subcam)       SUBCAM="$2";       shift 2;;
+        --night)        NIGHT="$2";        shift 2;;
+        --sweep-start)  SWEEP_START="$2";  shift 2;;
+        --sweep-end)    SWEEP_END="$2";    shift 2;;
+        --window-min)   WINDOW_MIN="$2";   shift 2;;
+        --step-min)     STEP_MIN="$2";     shift 2;;
+        --out-dir)      OUT_DIR="$2";      shift 2;;
+        --fps)          FPS="$2";          shift 2;;
+        --jobs)         JOBS="$2";         shift 2;;
+        --no-mp4)       NO_MP4=1;          shift;;
+        --force)        FORCE=1;           shift;;
+        -h|--help)      sed -n '1,/^set -euo/p' "$0" | head -n -1; exit 0;;
+        *)              echo "unknown arg: $1" >&2; exit 2;;
+    esac
+done
+
+for arg in CAMERA NIGHT SWEEP_START SWEEP_END OUT_DIR; do
+    [[ -n "${!arg}" ]] || { echo "--${arg,,} required" >&2; exit 2; }
+done
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+PY="${ASTRO_VENV_PY:-$REPO/.venv/bin/python}"
+[[ -x "$PY" ]] || PY="$HOME/astro/.venv/bin/python"  # puppy convention
+
+mkdir -p "$OUT_DIR/frames"
+
+# Build the job list with python (cross-midnight, noon-rollover math).
+JOBS_LIST=$(mktemp)
+trap "rm -f '$JOBS_LIST'" EXIT
+"$PY" - <<PYEOF > "$JOBS_LIST"
+from datetime import datetime, timedelta, timezone
+
+night_d = datetime.strptime("$NIGHT", "%Y-%m-%d").date()
+
+def hhmm_to_utc(hhmm):
+    h, m = (int(x) for x in hhmm.split(":"))
+    day = night_d if h >= 12 else night_d + timedelta(days=1)
+    return datetime.combine(day, datetime.min.time(),
+                            tzinfo=timezone.utc).replace(hour=h, minute=m)
+
+start = hhmm_to_utc("$SWEEP_START")
+end   = hhmm_to_utc("$SWEEP_END")
+window = timedelta(minutes=$WINDOW_MIN)
+step   = timedelta(minutes=$STEP_MIN)
+
+# Frame N starts at start + N*step; last frame's WINDOW ends at end.
+n = 0
+t = start
+while t + window <= end:
+    w_end = t + window
+    print(f"{n:05d}\t{t.strftime('%H:%M')}\t{w_end.strftime('%H:%M')}")
+    n += 1
+    t += step
+PYEOF
+
+N_FRAMES=$(wc -l < "$JOBS_LIST")
+echo "sweep: $SWEEP_START - $SWEEP_END  window=${WINDOW_MIN}min  step=${STEP_MIN}min"
+echo "frames: $N_FRAMES  (concurrent: $JOBS)"
+
+# Run window-stack per row, 8-way concurrent. xargs -P with -n3 -I gives
+# us up to JOBS workers each chewing one (idx, start, end) triple.
+export CAMERA SUBCAM NIGHT OUT_DIR PY HERE FORCE
+worker() {
+    local idx="$1" w_start="$2" w_end="$3"
+    local out="$OUT_DIR/frames/frame_${idx}.jpg"
+    if [[ "$FORCE" -eq 0 && -s "$out" ]]; then
+        return 0
+    fi
+    local args=(--camera "$CAMERA" --night "$NIGHT"
+                --window-start "$w_start" --window-end "$w_end"
+                --out "$out" --quiet)
+    [[ -n "$SUBCAM" ]] && args+=(--subcam "$SUBCAM")
+    "$PY" "$HERE/window-stack" "${args[@]}"
+}
+export -f worker
+
+t0=$(date +%s)
+< "$JOBS_LIST" tr '\t' '\n' | xargs -n3 -P "$JOBS" bash -c 'worker "$@"' _
+t1=$(date +%s)
+echo "rendered $N_FRAMES frames in $((t1 - t0))s wall"
+
+if [[ "$NO_MP4" -eq 0 ]]; then
+    out_mp4="$OUT_DIR/sweep.mp4"
+    echo "stitching $out_mp4 at ${FPS}fps..."
+    ffmpeg -y -loglevel error -framerate "$FPS" \
+        -i "$OUT_DIR/frames/frame_%05d.jpg" \
+        -c:v libx264 -pix_fmt yuv420p -crf 20 -preset medium \
+        "$out_mp4"
+    echo "wrote $out_mp4  ($(du -h "$out_mp4" | cut -f1))"
+fi

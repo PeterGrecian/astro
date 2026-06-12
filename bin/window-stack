@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""window-stack — single-window 2x2-binned max stack -> JPEG, fast.
+
+Strips everything `nightly-cam` does that's not needed for one stacked
+frame: no summary, no min/sum, no badpix, no brightness CSV/plot, no
+S3 publish. Just load → bin → max → asinh JPEG (with privacy crop
+when the camera config requires it).
+
+Designed for sliding-window video sweeps where the same window
+machinery runs hundreds of times and only the JPEG output matters.
+
+Usage:
+    window-stack --camera eclipticam --subcam v3w \\
+                 --night 2026-06-09 \\
+                 --window-start 23:00 --window-end 23:10 \\
+                 --out ~/tmp/v3w-video/frames/frame_0000.jpg
+"""
+import argparse
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.frames import list_night_frames
+from astro.process import bayer
+from astro.present import privacy as privacy_mod
+from astro.present.render import render_asinh_jpeg
+
+
+def parse_hhmm_to_utc(night: str, hhmm: str) -> datetime:
+    """Resolve HH:MM (UTC) inside the noon-rollover night-of date.
+    Times >= 12:00 belong to the night's start-date, < 12:00 to the
+    next day. Matches nightly-cam --window-start semantics."""
+    nd = datetime.strptime(night, "%Y-%m-%d").date()
+    h, m = (int(x) for x in hhmm.split(":"))
+    day = nd if h >= 12 else nd + timedelta(days=1)
+    return datetime.combine(day, datetime.min.time(),
+                            tzinfo=timezone.utc).replace(hour=h, minute=m)
+
+
+def stack_window(frames, raw_shape):
+    """Stream the frames into a 2x2-binned uint32 max image."""
+    H, W = raw_shape[0] // 2, raw_shape[1] // 2
+    max_img = np.zeros((H, W), dtype=np.uint32)
+    for _, f in frames:
+        with fits.open(f) as h:
+            d = h[1].data
+        np.maximum(max_img, bayer.bin2x2(d), out=max_img)
+    return max_img
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--subcam", default=None)
+    ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
+    ap.add_argument("--window-start", required=True, metavar="HH:MM",
+                    help="UTC, inclusive")
+    ap.add_argument("--window-end", required=True, metavar="HH:MM",
+                    help="UTC, exclusive")
+    ap.add_argument("--out", required=True, type=Path,
+                    help="output JPEG path")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    if args.subcam:
+        cfg = cfg.subcam(args.subcam)
+
+    w_start = parse_hhmm_to_utc(args.night, args.window_start)
+    w_end = parse_hhmm_to_utc(args.night, args.window_end)
+
+    all_frames = list_night_frames(cfg, args.night, subcam=args.subcam)
+    frames = [(t, f) for (t, f) in all_frames if w_start <= t < w_end]
+    if not frames:
+        print(f"no frames in [{w_start}, {w_end})", file=sys.stderr)
+        return 1
+
+    with fits.open(frames[0][1]) as h:
+        raw_shape = h[1].data.shape
+    max_img = stack_window(frames, raw_shape)
+
+    # Privacy crop if the camera requires it.
+    spec = privacy_mod.entry_for(cfg, args.subcam)
+    out_img = privacy_mod.crop_for_publication(max_img, spec)
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    render_asinh_jpeg(out_img, args.out)
+    if cfg.get("privacy_file"):
+        privacy_mod.mark_ok(args.out)
+
+    if not args.quiet:
+        print(f"{args.out}  ({len(frames)} frames in "
+              f"{args.window_start}-{args.window_end})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
