@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""combined-brightness — overlay per-night brightness curves on a
+shared 22:00 BST → 05:00 BST axis.
+
+Reads every per-night brightness CSV for a (camera, subcam) under the
+camera's frames_root, computes stops above the per-night pedestal, and
+plots one line per night onto a single PNG.
+
+Designed to be called once per `publish-night-cam` run so the combined
+view is always current. Lands as a single fixed-key S3 object — no per-
+night keys, no presigning lifetime concerns for the website.
+
+Usage:
+    combined-brightness --camera eclipticam --subcam v3w \\
+        [--out PATH] [--publish]
+"""
+import argparse
+import csv
+import math
+import sys
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.ticker import FuncFormatter
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+LONDON = ZoneInfo("Europe/London")
+
+
+def find_nights(cfg, subcam: str | None):
+    """Yield (night_str, csv_path) for every per-night brightness CSV."""
+    stem = f"{subcam}_" if subcam else ""
+    nights_root = cfg.frames_root / "night"
+    if not nights_root.exists():
+        # astrocam-style flat layout: look directly under frames_root
+        for d in sorted(cfg.frames_root.iterdir()):
+            csv_p = d / f"{stem}brightness.csv"
+            if csv_p.exists() and d.name[:4].isdigit():
+                yield d.name, csv_p
+        return
+    for d in sorted(nights_root.iterdir()):
+        csv_p = d / f"{stem}brightness.csv"
+        if csv_p.exists():
+            yield d.name, csv_p
+
+
+def load_curve(csv_path: Path):
+    """Returns (times_local, vals) where vals are floats from `mean`.
+    Times are Europe/London datetimes."""
+    rows = []
+    with open(csv_path, newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                t = datetime.fromisoformat(row["iso_utc"])
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                v = float(row["mean"])
+                rows.append((t.astimezone(LONDON), v))
+            except (KeyError, ValueError):
+                continue
+    rows.sort()
+    if not rows:
+        return None, None
+    return np.array([r[0] for r in rows]), np.array([r[1] for r in rows])
+
+
+def to_anchor_axis(times, night_str: str):
+    """Map real datetimes to a shared 22:00 → 05:00 axis anchored at
+    a single reference date. A time of 23:00 on night N becomes the
+    anchor date 23:00; 02:00 on night N+1 becomes anchor+1 day 02:00."""
+    anchor_date = datetime(2000, 1, 1).date()
+    anchor = datetime.combine(anchor_date, time(22, 0), tzinfo=LONDON)
+    next_noon = datetime.combine(anchor_date + timedelta(days=1),
+                                 time(12, 0), tzinfo=LONDON)
+    out = np.empty(len(times), dtype=object)
+    for i, t in enumerate(times):
+        if t.hour >= 12:
+            out[i] = anchor.replace(hour=t.hour, minute=t.minute,
+                                    second=t.second)
+        else:
+            out[i] = next_noon.replace(hour=t.hour, minute=t.minute,
+                                       second=t.second)
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--subcam", default=None)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output PNG path (default: <frames-root>/"
+                         "<stem>brightness-combined.png)")
+    ap.add_argument("--publish", action="store_true",
+                    help="upload to S3 as <camera>/brightness-combined.png "
+                         "(no per-night prefix; one key)")
+    ap.add_argument("--limit", type=int, default=14,
+                    help="plot the N most recent nights (default 14)")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    if args.subcam:
+        cfg = cfg.subcam(args.subcam)
+    stem = f"{args.subcam}_" if args.subcam else ""
+    out_path = args.out or (cfg.frames_root
+                            / f"{stem}brightness-combined.png")
+
+    nights = list(find_nights(cfg, args.subcam))
+    # Most recent N by date string (yyyy-mm-dd sorts lexically)
+    nights = sorted(nights, key=lambda nc: nc[0])[-args.limit:]
+    if not nights:
+        print(f"no per-night brightness CSVs under {cfg.frames_root}",
+              file=sys.stderr)
+        return 1
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    cmap = plt.get_cmap("tab10")
+    plotted = 0
+    for i, (night_str, csv_p) in enumerate(nights):
+        times, vals = load_curve(csv_p)
+        if times is None:
+            continue
+        pedestal = float(np.percentile(vals, 1))
+        signal = np.maximum(vals - pedestal, 1e-3)
+        xs = to_anchor_axis(times, night_str)
+        ax.scatter(xs, signal, s=2, linewidths=0,
+                   color=cmap(i % 10), label=night_str)
+        plotted += 1
+        print(f"  {night_str}: {len(times)} pts  pedestal={pedestal:.0f}")
+
+    if not plotted:
+        print("no curves plotted", file=sys.stderr)
+        return 1
+
+    ax.set_yscale("log", base=2)
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
+    ax.set_xlabel("local time (BST)")
+    ax.set_ylabel("stops above pedestal")
+    title_cam = cfg.name.split("-", 1)[-1] if "-" in cfg.name else cfg.name
+    ax.set_title(f"{title_cam} — last {plotted} nights")
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    ax.xaxis.set_major_formatter(
+        mdates.DateFormatter("%H:%M", tz=LONDON))
+    anchor_date = datetime(2000, 1, 1).date()
+    ax.set_xlim(
+        datetime.combine(anchor_date, time(22, 0), tzinfo=LONDON),
+        datetime.combine(anchor_date + timedelta(days=1),
+                         time(5, 0), tzinfo=LONDON))
+    # Custom legend with thicker dots so they show through the scatter
+    from matplotlib.lines import Line2D
+    handles = [Line2D([0], [0], marker="o", color="w",
+                      markerfacecolor=cmap(i % 10), markersize=8,
+                      label=nc[0])
+               for i, nc in enumerate(nights[:plotted])]
+    ax.legend(handles=handles, loc="upper right", fontsize=9)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=110, facecolor="white")
+    plt.close(fig)
+    print(f"wrote {out_path}")
+
+    if args.publish:
+        from astro.present import privacy as P
+        # Plot has no camera pixels — privacy-safe by construction
+        if getattr(cfg, "privacy", None):
+            P.mark_ok(out_path)
+        import boto3
+        bucket = cfg.s3["bucket"]
+        # cfg.s3.prefix is "<camera>/nights"; strip the "/nights" suffix
+        # so the combined plot sits at "<camera>/brightness-combined.png"
+        # — one stable key, no per-night nesting.
+        cam_prefix = cfg.s3["prefix"].removesuffix("/nights")
+        key = f"{cam_prefix}/{stem}brightness-combined.png"
+        s3 = boto3.client("s3")
+        s3.upload_file(str(out_path), bucket, key,
+                       ExtraArgs={"ContentType": "image/png"})
+        print(f"uploaded s3://{bucket}/{key}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

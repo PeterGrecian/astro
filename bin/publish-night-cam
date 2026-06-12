@@ -147,4 +147,12 @@ if getattr(cfg, "privacy", None):
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
 PYEOF
+
+# Refresh the multi-night combined brightness plot at the camera
+# prefix (one fixed key, regenerated every night so the website is
+# always current).
+echo "--- combined brightness (multi-night)"
+cb_args=(--camera "$CAMERA" --publish)
+[[ -n "$SUBCAM" ]] && cb_args+=(--subcam "$SUBCAM")
+"$HERE/combined-brightness" "${cb_args[@]}" || true
 echo "=== done ==="
