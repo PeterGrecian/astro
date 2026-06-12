@@ -85,8 +85,8 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         sweep_dir="${night_dir}/${stem}sweep-${mode}"
         mkdir -p "$sweep_dir"
         mode_args=("${common_args[@]}" --out-dir "$sweep_dir")
-        # Mono = science view: BST clock + stops above pedestal burn-in.
-        # Colour = pretty view: clean, no overlay.
+        # Mono = science view: keep the BST clock + stops burn-in.
+        # Colour = pretty view: drop the burn-in for a clean image.
         if [[ "$mode" == "colour" ]]; then
             mode_args+=(--rgb --no-label)
         fi
