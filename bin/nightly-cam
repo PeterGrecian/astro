@@ -294,7 +294,8 @@ def main() -> int:
 
     brightness.write_csv(rows, out_dir / f"{stem}brightness.csv")
     brightness.plot_night(rows, night, cfg.name,
-                          out_dir / f"{stem}brightness.png")
+                          out_dir / f"{stem}brightness.png",
+                          pedestal=cfg.get("pedestal"))
     if getattr(cfg, "privacy", None):
         # Plots contain no camera pixels — privacy-safe by construction.
         privacy_mod.mark_ok(out_dir / f"{stem}brightness.png")

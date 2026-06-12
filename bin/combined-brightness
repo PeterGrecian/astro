@@ -122,13 +122,22 @@ def main():
 
     fig, ax = plt.subplots(figsize=(11, 5))
     cmap = plt.get_cmap("tab10")
+    # Fixed sensor pedestal from camera.json — same zero point for every
+    # night so curves are directly comparable. Falls back to per-night
+    # p1 (loose, used only if camera.json lacks the calibration).
+    fixed_pedestal = cfg.get("pedestal")
     plotted = 0
     for i, (night_str, csv_p) in enumerate(nights):
         times, vals = load_curve(csv_p)
         if times is None:
             continue
-        pedestal = float(np.percentile(vals, 1))
-        signal = np.maximum(vals - pedestal, 1e-3)
+        if fixed_pedestal is not None:
+            pedestal = float(fixed_pedestal)
+        else:
+            pedestal = float(np.percentile(vals, 1))
+        # Use small positive floor for the log: signal at or below
+        # pedestal becomes ~0 stops, not a -10 clip artefact.
+        signal = np.maximum(vals - pedestal, 0.5)
         xs = to_anchor_axis(times, night_str)
         # Plot as a thin line (1-min cadence is dense enough that points
         # would overlap into a smear). gapcolor=None keeps any frame-

@@ -60,7 +60,8 @@ def read_csv(csv_path: Path):
     return out
 
 
-def plot_night(rows, night: str, camera: str, out_path: Path):
+def plot_night(rows, night: str, camera: str, out_path: Path,
+               pedestal: float | None = None):
     """Scatter of log2(mean - pedestal) vs local time for one night's
     rows (as produced by measure()). X-axis ends at 05:00 the next
     morning (cover-close safety time), matching bin/plot-brightness.
@@ -70,17 +71,18 @@ def plot_night(rows, night: str, camera: str, out_path: Path):
     Y-axis is stops of signal ABOVE the sensor pedestal (electronic
     black level, exposed by libcamera's bit-shift unpack of 10-bit
     raw into the 16-bit container — typically a few thousand counts).
-    Pedestal is estimated as the night's robust low percentile of
-    per-frame means; 0 stops means "as dark as the sensor can
-    register," each gridline is one stop of real signal."""
+    `pedestal` is the per-sensor calibration constant (from camera.json);
+    fall back to the night's 1st percentile if not given. With a fixed
+    pedestal, 0 stops means "as dark as this sensor ever reads," each
+    gridline is one stop of real signal."""
     times = [datetime.fromisoformat(r[1]).astimezone(LONDON) for r in rows]
     vals = np.array([float(r[3]) for r in rows])
-    # Use the 1st percentile of per-frame means as the pedestal
-    # estimate: robust to dawn outliers and to spuriously-dark flap
-    # frames (which dip below "real" dark sky but still sit at or
-    # above the electronic floor).
-    pedestal = float(np.percentile(vals, 1))
-    signal = np.maximum(vals - pedestal, 1e-3)
+    if pedestal is None:
+        pedestal = float(np.percentile(vals, 1))
+    pedestal = float(pedestal)
+    # 0.5-count floor (= log2 -1) prevents the -10 clip spikes when
+    # mean ~= pedestal; real lens-covered drops still go negative.
+    signal = np.maximum(vals - pedestal, 0.5)
     fig, ax = plt.subplots(figsize=(10, 4.5))
     ax.scatter(times, signal, s=3, linewidths=0, color="#007AFF")
     ax.set_yscale("log", base=2)

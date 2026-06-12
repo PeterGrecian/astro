@@ -12,6 +12,8 @@
       "sensor": "OV5647",
       "bayer": "SGBRG10",
       "resolution": [2592, 1944],
+      "pedestal": 10180,
+      "pedestal_notes": "Sensor black level in libcamera's 16-bit container — measured 2026-06-12 as the minimum mean of all deep-night (00:00-03:00 UTC) frames across 1 night of v1 data. Use as fixed zero point so 'stops above pedestal' is comparable across nights.",
       "plate_scale_deg_px": 0.0206,
       "plate_scale_notes": "OV5647 stock lens, 53.50 deg horizontal / 2592 px (official RPi figure).",
       "max_single_exposure_us": 3066985,
@@ -21,6 +23,8 @@
       "sensor": "IMX708",
       "bayer": "SRGGB10",
       "resolution": [2304, 1296],
+      "pedestal": 4380,
+      "pedestal_notes": "Sensor black level in libcamera's 16-bit container — measured 2026-06-12 as the minimum mean across deep-night (00:00-03:00 UTC) frames from 3 nights of v3w data. Slightly above the documented IMX708 black level (~4096) due to dark current. Use as fixed zero point so 'stops above pedestal' is comparable across nights.",
       "plate_scale_deg_px": 0.0443,
       "plate_scale_notes": "Module 3 Wide, 102 deg horizontal / 2304 px at the half-res capture mode in use (native 4608x2592)."
     }

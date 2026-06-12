@@ -89,6 +89,16 @@ auto_start_stops = float(auto_start_stops) if auto_start_stops else None
 auto_end_stops = "$AUTO_END_STOPS"
 auto_end_stops = float(auto_end_stops) if auto_end_stops else None
 
+# Sensor pedestal — fixed calibration constant from camera.json.
+# Falls back to per-night 1st percentile only if camera.json lacks it.
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath("$0"))))
+from astro.config import CameraConfig as _CC
+_cfg = _CC.load("$CAMERA")
+if "$SUBCAM":
+    _cfg = _cfg.subcam("$SUBCAM")
+fixed_pedestal = _cfg.get("pedestal")
+
 # Load brightness CSV if given, build sorted (utc_dt, per_s) arrays.
 csv_path = "$BRIGHTNESS_CSV"
 times_arr = vals_per_s = pedestal = None
@@ -125,8 +135,10 @@ if csv_path:
         times_arr = [rows_t[i] for i in order]
         vals_per_s = np.array([rows_per_s[i] for i in order])
         means_arr = np.array([means[i] for i in order])
-        # Robust pedestal: 1st percentile of per-frame means.
-        pedestal = float(np.percentile(means_arr, 1))
+        # Prefer the fixed sensor pedestal; fall back to per-night p1
+        # for cameras not yet calibrated.
+        pedestal = float(fixed_pedestal) if fixed_pedestal is not None \
+            else float(np.percentile(means_arr, 1))
 
 def stops_at(t_query):
     """Stops above pedestal for the single nearest CSV row, or None."""
@@ -135,7 +147,7 @@ def stops_at(t_query):
     # nearest neighbour
     best_i = min(range(len(times_arr)),
                  key=lambda i: abs((times_arr[i] - t_query).total_seconds()))
-    signal = max(float(means_arr[best_i]) - pedestal, 1e-3)
+    signal = max(float(means_arr[best_i]) - pedestal, 0.5)
     return float(np.log2(signal))
 
 
@@ -148,7 +160,7 @@ def window_label(w_start, w_end):
     if not in_win:
         return hhmm_local
     mean_count = float(means_arr[in_win].mean())
-    signal = max(mean_count - pedestal, 1e-3)
+    signal = max(mean_count - pedestal, 0.5)
     stops = float(np.log2(signal))
     return f"{hhmm_local}   {stops:+.1f} stops"
 
@@ -163,7 +175,7 @@ def window_label(w_start, w_end):
 if auto_start_stops is not None and times_arr is not None:
     FLAP_STOPS = -2.0
     BUFFER = timedelta(minutes=5)
-    per_frame_stops = np.log2(np.maximum(means_arr - pedestal, 1e-3))
+    per_frame_stops = np.log2(np.maximum(means_arr - pedestal, 0.5))
     # All flap events; we want the last one inside the "twilight side"
     # of the night (before the main dark window, defined as the first
     # time the rolling mean is below auto_start_stops).
@@ -186,7 +198,7 @@ if auto_start_stops is not None and times_arr is not None:
             if not in_win:
                 ok = False; break
             mc = float(means_arr[in_win].mean())
-            stops_w = float(np.log2(max(mc - pedestal, 1e-3)))
+            stops_w = float(np.log2(max(mc - pedestal, 0.5)))
             if stops_w >= auto_start_stops:
                 ok = False; break
             t_check += step
@@ -230,7 +242,7 @@ if auto_end_stops is not None and times_arr is not None:
         in_win = [i for i, ti in enumerate(times_arr) if t <= ti < w_end]
         if in_win:
             mc = float(means_arr[in_win].mean())
-            stops_w = float(np.log2(max(mc - pedestal, 1e-3)))
+            stops_w = float(np.log2(max(mc - pedestal, 0.5)))
             if stops_w > auto_end_stops:
                 cut = w_end
                 _sys.stderr.write(
