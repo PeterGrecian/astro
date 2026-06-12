@@ -86,9 +86,19 @@ SATURATED_MEDIAN = 64000
 ANCHOR_WINDOW_S = 600.0
 BAND_TOL = 0.30
 
+# Beyond +SKY_CLEAR_MAX_STOPS above the sensor pedestal we call the sky
+# "not actually dark" (cloud reflecting light pollution, moonlit haze).
+# Any window-mean above this cap is rejected from the stack regardless
+# of the per-night anchor, and the whole night gets verdict="cloudy".
+# The threshold is a project judgement: my v3w on a clear night sits
+# around +0 to +6 stops at the dark trough; +10 is the empirical
+# ceiling where stars stop being separable from the cloud-glow.
+SKY_CLEAR_MAX_STOPS = 10.0
+
 
 def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
-                      band_tol=BAND_TOL):
+                      band_tol=BAND_TOL, pedestal=None,
+                      sky_clear_max_stops=SKY_CLEAR_MAX_STOPS):
     """Two passes over (t, path):
       pass 1 — measure brightness on the RAW Bayer frame, compute
         per_s = mean / (EXPTIME * GAIN), tag saturated frames
@@ -131,6 +141,7 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
             print(f"  measure {i}/{len(frames)}", flush=True)
 
     anchor = brightness.darkest_anchor(t_per_s, window_s=anchor_window_s)
+    verdict = "no-data"
     if anchor is None:
         anchor_info = None
         lo, hi = float("-inf"), float("inf")
@@ -138,14 +149,43 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         anchor_per_s, a_start, a_end = anchor
         lo = anchor_per_s * (1.0 - band_tol)
         hi = anchor_per_s * (1.0 + band_tol)
+        # Read exposure/gain from a sample frame once — assume constant
+        # through the night, which holds for eclipticam captures.
+        exp_gain = (1.0, 1.0)
+        if rows:
+            try:
+                with fits.open(rows[0][2]) as _h:
+                    _hdr = _h[1].header
+                exp_gain = (float(_hdr.get("EXPTIME", 1.0) or 1.0),
+                            float(_hdr.get("GAIN", 1.0) or 1.0))
+            except (OSError, KeyError, ValueError):
+                pass
+        _exp, _gain = exp_gain
+
+        # Cap hi at the sky-clear ceiling so a cloudy anchor doesn't
+        # let bright frames into the stack just because the whole
+        # night was bright.
+        if pedestal is not None:
+            sky_clear_mean = float(pedestal) + 2 ** sky_clear_max_stops
+            sky_clear_hi = sky_clear_mean / (_exp * _gain) \
+                if _exp * _gain > 0 else sky_clear_mean
+            hi = min(hi, sky_clear_hi)
+            anchor_mean = anchor_per_s * _exp * _gain
+            import math as _math
+            anchor_stops = _math.log2(max(anchor_mean - pedestal, 0.5))
+            verdict = "cloudy" if anchor_stops > sky_clear_max_stops \
+                else "clear"
+
         anchor_info = {
             "per_s": anchor_per_s, "lo": lo, "hi": hi,
             "window_utc": [a_start.isoformat(), a_end.isoformat()],
             "window_s": anchor_window_s, "tol": band_tol,
+            "sky_clear_max_stops": sky_clear_max_stops,
+            "verdict": verdict,
         }
         print(f"  anchor: per_s={anchor_per_s:.1f} over "
               f"{a_start.isoformat()} .. {a_end.isoformat()}  "
-              f"band [{lo:.1f}, {hi:.1f}]")
+              f"band [{lo:.1f}, {hi:.1f}]  verdict={verdict}")
 
     # 2x2 sum of uint16 raws needs 18 bits — uint32 is the right type
     # for max/min; otherwise np.maximum(out=uint16, ...) silently
@@ -266,8 +306,10 @@ def main() -> int:
     # anchor-band gate so everything in the window enters the stack.
     explicit_window = bool(args.window_start or args.window_end)
     max_img, min_img, sum_img, rows, stacked, anchor_info = \
-        stack_and_measure(frames,
-                          band_tol=float("inf") if explicit_window else BAND_TOL)
+        stack_and_measure(
+            frames,
+            band_tol=float("inf") if explicit_window else BAND_TOL,
+            pedestal=cfg.get("pedestal"))
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:
         print("every frame was bright/saturated; no stacks written",
@@ -354,7 +396,9 @@ def main() -> int:
                 }
 
     summary_extra = {"n_stacked": len(stacked), "anchor": anchor_info,
-                     "stacked_window_utc": stacked_window_utc}
+                     "stacked_window_utc": stacked_window_utc,
+                     "verdict": (anchor_info or {}).get("verdict",
+                                                       "no-data")}
     s = summary_mod.build(cfg.name, night, rows, badpix_info, derot_info,
                           outputs={"max_jpg": f"{stem}max.jpg",
                                    "derot_jpg": f"{stem}derot.jpg" if derot_info else None,
