@@ -176,9 +176,14 @@ trap "rm -f '$JOBS_LIST'; rm -rf '$SLOT_STATE_DIR'" EXIT
 export SLOT_STATE_DIR
 worker_stagger() {
     local slot="${XARGS_PROCESS_SLOT:-1}"
-    if [[ "$STAGGER_S" != 0 ]] && [[ ! -e "$SLOT_STATE_DIR/$slot" ]]; then
-        touch "$SLOT_STATE_DIR/$slot"
-        sleep $(awk "BEGIN { print ($slot - 1) * $STAGGER_S }")
+    # Stagger only the first batch of workers: slot N waits (N-1) * STAGGER_S
+    # seconds on its first invocation, so 8 Python imports don't collide
+    # on cold cache. Subsequent invocations of the same slot run flat-out.
+    if [[ "$STAGGER_S" != "0" && ! -e "$SLOT_STATE_DIR/$slot" ]]; then
+        touch "$SLOT_STATE_DIR/$slot" 2>/dev/null || true
+        local delay
+        delay=$(awk -v s="$slot" -v g="$STAGGER_S" 'BEGIN { d = (s-1)*g; if (d<0) d=0; print d }')
+        [[ "$delay" != "0" ]] && sleep "$delay"
     fi
     worker "$@"
 }
