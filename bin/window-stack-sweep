@@ -22,7 +22,7 @@ CAMERA=""; SUBCAM=""; NIGHT=""; SWEEP_START=""; SWEEP_END=""
 WINDOW_MIN=10; STEP_MIN=1; OUT_DIR=""; FPS=60; JOBS=8
 NO_MP4=0; FORCE=0; BRIGHTNESS_CSV=""; STAGGER_S=0
 LABEL_TZ="Europe/London"; RGB=0
-AUTO_START_STOPS=""; AUTO_END_STOPS=""
+AUTO_START_STOPS=""; AUTO_END_STOPS=""; NO_LABEL=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,6 +41,7 @@ while [[ $# -gt 0 ]]; do
         --brightness-csv) BRIGHTNESS_CSV="$2"; shift 2;;
         --stagger-s)    STAGGER_S="$2";    shift 2;;
         --rgb)          RGB=1;             shift;;
+        --no-label)     NO_LABEL=1;        shift;;
         --auto-start-stops) AUTO_START_STOPS="$2"; shift 2;;
         --auto-end-stops)   AUTO_END_STOPS="$2";   shift 2;;
         -h|--help)      sed -n '1,/^set -euo/p' "$0" | head -n -1; exit 0;;
@@ -240,11 +241,12 @@ if auto_end_stops is not None and times_arr is not None:
     if cut is not None and cut < end:
         end = cut
 
+no_label = bool(int("$NO_LABEL"))
 n = 0
 t = start
 while t + window <= end:
     w_end = t + window
-    lbl = window_label(t, w_end)
+    lbl = "" if no_label else window_label(t, w_end)
     # NUL-separate fields AND rows so labels with spaces survive xargs.
     import sys
     sys.stdout.write(f"{n:05d}\0{t.strftime('%H:%M')}\0"

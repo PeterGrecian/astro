@@ -85,7 +85,11 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         sweep_dir="${night_dir}/${stem}sweep-${mode}"
         mkdir -p "$sweep_dir"
         mode_args=("${common_args[@]}" --out-dir "$sweep_dir")
-        [[ "$mode" == "colour" ]] && mode_args+=(--rgb)
+        # Mono = science view: BST clock + stops above pedestal burn-in.
+        # Colour = pretty view: clean, no overlay.
+        if [[ "$mode" == "colour" ]]; then
+            mode_args+=(--rgb --no-label)
+        fi
         echo "--- window-stack-sweep (${mode})"
         "$HERE/window-stack-sweep" "${mode_args[@]}"
         out="${night_dir}/${stem}sweep-${mode}.mp4"
