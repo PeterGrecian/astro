@@ -126,10 +126,24 @@ def main():
     # night so curves are directly comparable. Falls back to per-night
     # p1 (loose, used only if camera.json lacks the calibration).
     fixed_pedestal = cfg.get("pedestal")
+    # Drop frames captured outside the night-of-interest window:
+    # day captures land in the same noon-to-noon CSV but read as
+    # saturated (mean = 65535), drawing as a flat line at the top of
+    # the chart that confuses the eye. Restrict to 20:00 UTC -> 04:00 UTC
+    # (= 21:00 -> 05:00 BST).
+    def _in_observing_window(t_local):
+        h = t_local.hour
+        return h >= 21 or h < 5
+
     plotted = 0
     for i, (night_str, csv_p) in enumerate(nights):
         times, vals = load_curve(csv_p)
         if times is None:
+            continue
+        keep = np.array([_in_observing_window(t) for t in times])
+        times = times[keep]
+        vals = vals[keep]
+        if len(times) == 0:
             continue
         if fixed_pedestal is not None:
             pedestal = float(fixed_pedestal)
