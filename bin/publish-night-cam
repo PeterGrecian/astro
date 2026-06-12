@@ -96,6 +96,21 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         cp "$sweep_dir/sweep.mp4" "$out"
         echo "wrote $out"
     done
+    # Calendar thumbnail: middle frame of the colour sweep — a single
+    # 10-min stack from the heart of the autodetected dark window.
+    # Truer-to-night than the all-night max.jpg (which is dominated by
+    # whichever moment was brightest).
+    colour_mp4="${night_dir}/${stem}sweep-colour.mp4"
+    thumb="${night_dir}/${stem}thumb.jpg"
+    if [[ -s "$colour_mp4" ]]; then
+        mid_n=$(ffprobe -v error -count_packets -select_streams v:0 \
+                -show_entries stream=nb_read_packets -of csv=p=0 \
+                "$colour_mp4")
+        mid_n=$(( mid_n / 2 ))
+        ffmpeg -y -loglevel error -i "$colour_mp4" \
+            -vf "select=eq(n\,$mid_n)" -frames:v 1 -q:v 4 "$thumb"
+        echo "wrote $thumb (mid frame $mid_n)"
+    fi
 fi
 
 # --- 3. publish to S3 ------------------------------------------------
@@ -118,14 +133,16 @@ names = [
     f"${stem}brightness.png",
     f"${stem}max.jpg",
     f"${stem}derot.jpg",
+    f"${stem}thumb.jpg",
     f"${stem}sweep-mono.mp4",
     f"${stem}sweep-colour.mp4",
 ]
 files = [nd/n for n in names if (nd/n).exists()]
-# Videos that came out of window-stack-sweep are made from privacy-
-# cropped frames; mark them OK if the camera has a privacy policy.
+# Videos and the thumb come out of privacy-cropped frames; mark them
+# OK so publish's privacy guard doesn't refuse them.
 if getattr(cfg, "privacy", None):
-    for n in (f"${stem}sweep-mono.mp4", f"${stem}sweep-colour.mp4"):
+    for n in (f"${stem}sweep-mono.mp4", f"${stem}sweep-colour.mp4",
+              f"${stem}thumb.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
