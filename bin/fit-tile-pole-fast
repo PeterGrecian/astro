@@ -140,7 +140,11 @@ def fit_pole_from_tracks(tracks, tile_centre):
     useable = [tr for tr in tracks if len(tr) >= TRACK_MIN_EPOCHS]
     if len(useable) < 3:
         return None
-    angles, rates = [], []
+    # Weight by trail LENGTH (squared) — longer tracks have less
+    # noise in their direction and rate measurements, by far. Median
+    # of 5 short tracks gave a 50% underestimate of the rate; weighted
+    # mean of length tracks the longest, most-trusted measurement.
+    angles, rates, weights = [], [], []
     for tr in useable:
         t0, x0, y0, _ = tr[0]
         tN, xN, yN, _ = tr[-1]
@@ -151,10 +155,12 @@ def fit_pole_from_tracks(tracks, tile_centre):
         L = math.hypot(dx, dy)
         angles.append(math.degrees(math.atan2(dy, dx)))
         rates.append(L / dt_min)
+        weights.append(L ** 2)
     if not angles:
         return None
-    angle_deg = float(np.median(angles))
-    px_per_min = float(np.median(rates))
+    w = np.array(weights, dtype=np.float64)
+    angle_deg = float(np.average(angles, weights=w))
+    px_per_min = float(np.average(rates, weights=w))
 
     # Distance from tile centre to pole = (px_per_min) / ω_rad_per_min.
     # Stars move at angular rate ω; their linear speed at radius r is
@@ -329,9 +335,18 @@ def main() -> int:
     #    faintest stacked detection scales by 2.512 per magnitude.
     if useable and dets_stacked:
         bright_track_flux = max(np.mean([p[3] for p in tr]) for tr in useable)
-        faint_stack_flux = float(min(d["flux"] for d in dets_stacked))
-        delta_mag = -2.5 * math.log10(faint_stack_flux / bright_track_flux)
-        depth = args.mag_zero + delta_mag
+        # Use the faintest POSITIVE flux — DAOStarFinder can output
+        # negative fluxes for marginal detections after sky subtraction.
+        positive_fluxes = [float(d["flux"]) for d in dets_stacked
+                           if float(d["flux"]) > 0]
+        if positive_fluxes:
+            faint_stack_flux = min(positive_fluxes)
+            delta_mag = -2.5 * math.log10(faint_stack_flux / bright_track_flux)
+            depth = args.mag_zero + delta_mag
+            print(f"  faintest positive of {len(positive_fluxes)} usable "
+                  f"of {len(dets_stacked)} total detections")
+        else:
+            depth = None
         print(f"\nrough magnitude depth estimate:")
         print(f"  brightest track flux (single frame): {bright_track_flux:.0f}")
         print(f"  faintest stacked detection flux:      {faint_stack_flux:.0f}")
