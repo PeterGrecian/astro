@@ -1,0 +1,9 @@
+[Unit]
+Description=astro: run publish-eclipticam daily at 07:00 Europe/London
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 Europe/London
+Persistent=true
+
+[Install]
+WantedBy=timers.target
