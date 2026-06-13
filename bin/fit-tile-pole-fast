@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""fit-tile-pole-fast — single-tile pole estimate + derot stack + magnitude depth.
+
+Workflow (designed to read top-to-bottom):
+
+  1. Read cands.json sidecars for one tile across a dark UTC window.
+     Greedy-NN track building gives 5-15 trails per tile on v3w.
+  2. Fit each track to a straight line; trail direction is the median
+     of per-track angles, trail RATE (px / sidereal-min) is the median
+     of per-track lengths / track duration.
+  3. Pole position = tile centre + (1 / ω_rad_per_min) * (rate / 1) *
+     perpendicular-to-trail. The perpendicular has two signs; pick the
+     one above the frame (negative y) — v3w looks south, pole is north.
+  4. For each frame in the window: extract the tile, apply a rotation
+     around the pole by sidereal_omega * (t_ref - t), accumulate into
+     a max stack.
+  5. Run DAOStarFinder on the stacked tile with a loose threshold.
+     Compare detection count vs the single-frame median count to
+     estimate effective stacking gain.
+  6. Magnitude-depth guess: brightest matched track flux defines our
+     mag-3 zero point; faintest stacked detection (in flux units)
+     scales by 2.512 per magnitude to give the implied depth.
+
+Outputs:
+  - Console: pole pixel, per-tile metrics, depth estimate
+  - <out>/D3_stack.fits.fz   — derotated, stacked tile (FITS)
+  - <out>/D3_stack.jpg        — asinh-stretched JPEG
+  - <out>/D3_pole.json        — pole + metadata for downstream code
+
+Usage:
+  fit-tile-pole-fast --camera eclipticam --subcam v3w --night 2026-06-10 \\
+                     --occlusion ~/astro/eclipticam/occlusion-v3w.json \\
+                     --tile D3 \\
+                     --window-start 00:00 --window-end 01:30 \\
+                     --out ~/tmp/v3w-tile-d3
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import math
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+from astropy.stats import sigma_clipped_stats
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.frames import list_night_frames
+from astro.process import bayer
+from astro.present.render import render_asinh_jpeg
+
+# Sidereal rotation rate (rad / second) and (rad / minute) handy.
+SIDEREAL_OMEGA = 2 * math.pi / 86164.0905     # rad/s
+SIDEREAL_OMEGA_PER_MIN = SIDEREAL_OMEGA * 60  # rad/min
+
+# Greedy-NN track association: trails on v3w are short enough that 60 px
+# between successive 1-min epochs is generous.
+ASSOC_R = 60.0
+TRACK_MIN_EPOCHS = 3
+
+
+# ---- helpers --------------------------------------------------------------
+
+
+def parse_hhmm_utc(night: str, hhmm: str) -> datetime:
+    nd = datetime.strptime(night, "%Y-%m-%d").date()
+    h, m = (int(x) for x in hhmm.split(":"))
+    day = nd if h >= 12 else nd + timedelta(days=1)
+    return datetime.combine(day, datetime.min.time(),
+                            tzinfo=timezone.utc).replace(hour=h, minute=m)
+
+
+def tile_bounds(tile_label, grid, W, H):
+    """Pixel bounds (x0, x1, y0, y1) of a tile in the binned frame."""
+    col_idx = grid["col_labels"].index(tile_label[0])
+    row_idx = grid["row_labels"].index(tile_label[1])
+    tw, th = W / grid["cols"], H / grid["rows"]
+    return (int(round(col_idx * tw)), int(round((col_idx + 1) * tw)),
+            int(round(row_idx * th)), int(round((row_idx + 1) * th)))
+
+
+def gather_tile_detections(cfg, subcam, night, tile, window_start, window_end):
+    """Walk cands.json sidecars and collect (t, x, y, flux) for one tile."""
+    if cfg.night_layout == "percam":
+        root = cfg.frames_root / "night" / night / (subcam or "")
+    elif cfg.night_layout == "flat":
+        # astrocam: cands sit next to per-hour FITS in <root>/<date>/<HH>/
+        root = cfg.frames_root / night
+    else:
+        raise ValueError(f"unsupported layout {cfg.night_layout!r}")
+    dets = []
+    for f in sorted(root.glob("[0-9][0-9]/*.cands.json")):
+        d = json.loads(f.read_text())
+        if d["utc"] < window_start.isoformat():
+            continue
+        if d["utc"] > window_end.isoformat():
+            continue
+        t = datetime.fromisoformat(d["utc"])
+        for s in d["stars"]:
+            if s["tile"] == tile:
+                dets.append((t, float(s["x"]), float(s["y"]), float(s["flux"])))
+    dets.sort()
+    return dets
+
+
+def build_tracks(dets, assoc_r=ASSOC_R):
+    """Greedy-NN tracks. dets sorted by time."""
+    tracks, open_tracks = [], []
+    for det in dets:
+        t, x, y, _ = det
+        best, best_d2 = None, assoc_r ** 2
+        for tr in open_tracks:
+            ht, hx, hy, _ = tr[-1]
+            if t == ht:
+                continue
+            d2 = (x - hx) ** 2 + (y - hy) ** 2
+            if d2 < best_d2:
+                best_d2, best = d2, tr
+        if best is not None:
+            best.append(det)
+        else:
+            new = [det]
+            open_tracks.append(new)
+            tracks.append(new)
+    return tracks
+
+
+def fit_pole_from_tracks(tracks, tile_centre):
+    """Trail vector + perpendicular = pole direction; rate gives radius.
+
+    Returns (pole_x, pole_y, trail_angle_deg, px_per_min, n_tracks).
+    """
+    useable = [tr for tr in tracks if len(tr) >= TRACK_MIN_EPOCHS]
+    if len(useable) < 3:
+        return None
+    angles, rates = [], []
+    for tr in useable:
+        t0, x0, y0, _ = tr[0]
+        tN, xN, yN, _ = tr[-1]
+        dx, dy = xN - x0, yN - y0
+        dt_min = (tN - t0).total_seconds() / 60.0
+        if dt_min <= 0:
+            continue
+        L = math.hypot(dx, dy)
+        angles.append(math.degrees(math.atan2(dy, dx)))
+        rates.append(L / dt_min)
+    if not angles:
+        return None
+    angle_deg = float(np.median(angles))
+    px_per_min = float(np.median(rates))
+
+    # Distance from tile centre to pole = (px_per_min) / ω_rad_per_min.
+    # Stars move at angular rate ω; their linear speed at radius r is
+    # ω·r — so r = speed / ω.
+    radius_px = px_per_min / SIDEREAL_OMEGA_PER_MIN
+
+    # Pole direction is perpendicular to trail. Two choices; pick the
+    # one with negative dy (above the frame for a south-facing camera).
+    perp_a = angle_deg + 90.0
+    perp_b = angle_deg - 90.0
+    cands_xy = [
+        (tile_centre[0] + radius_px * math.cos(math.radians(perp_a)),
+         tile_centre[1] + radius_px * math.sin(math.radians(perp_a))),
+        (tile_centre[0] + radius_px * math.cos(math.radians(perp_b)),
+         tile_centre[1] + radius_px * math.sin(math.radians(perp_b))),
+    ]
+    # Choose the one with smaller (more negative) y — pole sits above
+    # the frame for v3w (south-pointing camera).
+    pole_x, pole_y = min(cands_xy, key=lambda c: c[1])
+    return pole_x, pole_y, angle_deg, px_per_min, len(useable)
+
+
+def derot_stack_tile(frames_t_path, tile_bb, pole_xy, badmask=None):
+    """Stream-stack the tile region of each frame, derotated around the
+    pole. Returns (max_img, t_ref). Uses each frame's binned tile crop
+    plus a small margin so star trails don't fall off the patch."""
+    x0, x1, y0, y1 = tile_bb
+    margin = 60
+    H_orig, W_orig = None, None
+    # Determine frame shape from first frame.
+    with fits.open(frames_t_path[0][1]) as h:
+        H_orig, W_orig = h[1].shape
+    bH, bW = H_orig // 2, W_orig // 2  # binned shape
+
+    p_x0 = max(0, x0 - margin); p_x1 = min(bW, x1 + margin)
+    p_y0 = max(0, y0 - margin); p_y1 = min(bH, y1 + margin)
+    pw, ph = p_x1 - p_x0, p_y1 - p_y0
+
+    t_ref = (frames_t_path[0][0].timestamp()
+             + frames_t_path[-1][0].timestamp()) / 2.0
+    px, py = pole_xy
+    # Pole in padded tile coords
+    cpx, cpy = px - p_x0, py - p_y0
+
+    max_img = np.zeros((ph, pw), dtype=np.float32)
+    for t, fpath in frames_t_path:
+        with fits.open(fpath) as h:
+            d = h[1].data
+        b = bayer.bin2x2(d).astype(np.float32)
+        src = b[p_y0:p_y1, p_x0:p_x1]
+        if badmask is not None:
+            bm = badmask[p_y0:p_y1, p_x0:p_x1]
+            src = np.where(bm, 0.0, src)
+        ts = t.timestamp()
+        dtheta = SIDEREAL_OMEGA * (t_ref - ts)
+        c, s = math.cos(dtheta), math.sin(dtheta)
+        M = np.array([
+            [c, -s, (1 - c) * cpx + s * cpy],
+            [s,  c, -s * cpx + (1 - c) * cpy],
+        ], dtype=np.float32)
+        warped = cv2.warpAffine(
+            src, M, (pw, ph),
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+        np.maximum(max_img, warped, out=max_img)
+    return max_img, t_ref, (p_x0, p_x1, p_y0, p_y1)
+
+
+def find_detections(stacked, threshold_sigma=3.0, fwhm=3.0):
+    """DAOStarFinder on the stacked tile."""
+    from photutils.detection import DAOStarFinder
+    af = stacked.astype(np.float32)
+    mean, median, std = sigma_clipped_stats(af, sigma=3.0)
+    finder = DAOStarFinder(fwhm=fwhm, threshold=threshold_sigma * std)
+    tbl = finder(af - median)
+    if tbl is None:
+        return [], std, median
+    return list(tbl), std, median
+
+
+# ---- main -----------------------------------------------------------------
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--subcam", default=None)
+    ap.add_argument("--night", required=True)
+    ap.add_argument("--occlusion", type=Path, required=True)
+    ap.add_argument("--tile", required=True,
+                    help="e.g. D3 (col label + row label)")
+    ap.add_argument("--window-start", required=True, metavar="HH:MM UTC")
+    ap.add_argument("--window-end", required=True, metavar="HH:MM UTC")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--detect-threshold", type=float, default=3.0,
+                    help="DAOStarFinder threshold sigma on stacked tile")
+    ap.add_argument("--mag-zero", type=float, default=3.0,
+                    help="catalogue magnitude assigned to the brightest "
+                         "track in this tile (rough zero point)")
+    args = ap.parse_args()
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    cfg = CameraConfig.load(args.camera)
+    if args.subcam:
+        cfg = cfg.subcam(args.subcam)
+    grid = json.loads(args.occlusion.read_text())["grid"]
+    grid["cols"] = int(grid["cols"]); grid["rows"] = int(grid["rows"])
+
+    w_start = parse_hhmm_utc(args.night, args.window_start)
+    w_end   = parse_hhmm_utc(args.night, args.window_end)
+
+    print(f"=== {args.tile}  window {args.window_start}-{args.window_end} UTC ===")
+
+    # 1. Per-tile detections (already in cands.json sidecars)
+    dets = gather_tile_detections(cfg, args.subcam, args.night, args.tile,
+                                  w_start, w_end)
+    print(f"detections: {len(dets)}")
+    if not dets:
+        print("no detections in tile/window", file=sys.stderr)
+        return 1
+
+    # 2. Tracks + per-track stats
+    tracks = build_tracks(dets)
+    useable = [tr for tr in tracks if len(tr) >= TRACK_MIN_EPOCHS]
+    print(f"tracks: {len(tracks)} total, {len(useable)} useable (>={TRACK_MIN_EPOCHS} epochs)")
+
+    # 3. Pole from trail vector at tile centre
+    sample_frame_t, sample_frame_path = None, None
+    for t, f in list_night_frames(cfg, args.night, subcam=args.subcam):
+        if w_start <= t < w_end:
+            sample_frame_t, sample_frame_path = t, f
+            break
+    with fits.open(sample_frame_path) as h:
+        H_orig, W_orig = h[1].shape
+    bH, bW = H_orig // 2, W_orig // 2
+    bb = tile_bounds(args.tile, grid, bW, bH)
+    tile_centre = ((bb[0] + bb[1]) / 2.0, (bb[2] + bb[3]) / 2.0)
+    print(f"tile bounds: {bb}  centre: {tile_centre}")
+
+    fit = fit_pole_from_tracks(tracks, tile_centre)
+    if fit is None:
+        print("pole fit failed (too few useable tracks)", file=sys.stderr)
+        return 1
+    pole_x, pole_y, trail_angle, px_per_min, n_used = fit
+    print(f"trail angle: {trail_angle:+.1f}°  rate: {px_per_min:.1f} px/min")
+    print(f"pole: ({pole_x:.0f}, {pole_y:.0f})  "
+          f"radius from tile: {math.hypot(pole_x - tile_centre[0], pole_y - tile_centre[1]):.0f} px")
+
+    # 4. Derot stack of the tile, all frames in window
+    frames = [(t, f) for (t, f) in list_night_frames(cfg, args.night,
+                                                    subcam=args.subcam)
+              if w_start <= t < w_end]
+    print(f"stacking {len(frames)} frames...")
+    stacked, t_ref, padded_bb = derot_stack_tile(frames, bb, (pole_x, pole_y))
+    out_fits = args.out / f"{args.tile}_stack.fits.fz"
+    out_jpg  = args.out / f"{args.tile}_stack.jpg"
+    fits.HDUList([fits.PrimaryHDU(),
+                  fits.CompImageHDU(data=stacked.astype(np.float32),
+                                    compression_type="RICE_1")]).writeto(
+                                        out_fits, overwrite=True)
+    render_asinh_jpeg(stacked, out_jpg, ignore_zero=True)
+    print(f"wrote {out_fits}\nwrote {out_jpg}")
+
+    # 5. Detection on stacked tile
+    dets_stacked, std, median = find_detections(stacked,
+                                                args.detect_threshold)
+    print(f"\nstacked tile: median={median:.0f}  sigma={std:.1f}  "
+          f"threshold={args.detect_threshold:.1f}σ = {args.detect_threshold*std:.0f}")
+    print(f"detections in stacked tile: {len(dets_stacked)}")
+
+    # 6. Magnitude depth: brightest matched track flux → mag-zero;
+    #    faintest stacked detection scales by 2.512 per magnitude.
+    if useable and dets_stacked:
+        bright_track_flux = max(np.mean([p[3] for p in tr]) for tr in useable)
+        faint_stack_flux = float(min(d["flux"] for d in dets_stacked))
+        delta_mag = -2.5 * math.log10(faint_stack_flux / bright_track_flux)
+        depth = args.mag_zero + delta_mag
+        print(f"\nrough magnitude depth estimate:")
+        print(f"  brightest track flux (single frame): {bright_track_flux:.0f}")
+        print(f"  faintest stacked detection flux:      {faint_stack_flux:.0f}")
+        print(f"  assumed zero point (brightest = mag {args.mag_zero}): "
+              f"depth ≈ mag {depth:.1f}")
+    else:
+        depth = None
+
+    # Save metadata
+    meta = {
+        "camera": cfg.name,
+        "night": args.night,
+        "tile": args.tile,
+        "tile_centre": list(tile_centre),
+        "window_utc": [w_start.isoformat(), w_end.isoformat()],
+        "n_detections": len(dets),
+        "n_tracks": len(tracks),
+        "n_useable_tracks": len(useable),
+        "trail_angle_deg": trail_angle,
+        "trail_rate_px_per_min": px_per_min,
+        "pole_xy": [pole_x, pole_y],
+        "pole_radius_from_tile": math.hypot(pole_x - tile_centre[0],
+                                            pole_y - tile_centre[1]),
+        "n_frames_stacked": len(frames),
+        "stacked_median": float(median),
+        "stacked_sigma": float(std),
+        "stacked_detections": len(dets_stacked),
+        "mag_depth_estimate": depth,
+    }
+    (args.out / f"{args.tile}_pole.json").write_text(
+        json.dumps(meta, indent=2))
+    print(f"\nwrote {args.out}/{args.tile}_pole.json")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
