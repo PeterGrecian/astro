@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""fit-k1 — find the radial distortion k1 that straightens stars after derot.
+
+For a single tile with a known approximate pole, the residual arcs in
+the derot stack are entirely due to lens distortion. We sweep k1 over a
+range, undistort each frame, then derot+stack the tile around the same
+pole. The best k1 minimises the "arc-residual" = how much fainter the
+stacked peak is than its single-frame integral would be if it were a
+perfect point.
+
+Two metrics output for each k1:
+  - max pixel value in the stacked tile (higher = more point-like)
+  - 99.9th percentile / 50th percentile ratio (higher = more peaky vs
+    background)
+
+Usage:
+  fit-k1 --camera eclipticam --subcam v3w --night 2026-06-10 \\
+         --occlusion ~/astro/eclipticam/occlusion-v3w.json \\
+         --tile D3 --pole 1520,-176 \\
+         --window-start 00:00 --window-end 01:30 \\
+         --out ~/tmp/v3w-k1-sweep \\
+         --k1-range -0.6,0.6 --k1-steps 25
+"""
+from __future__ import annotations
+import argparse, json, math, sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import cv2
+import numpy as np
+from astropy.io import fits
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.frames import list_night_frames
+from astro.process import bayer
+from astro.present.render import render_asinh_jpeg
+
+SIDEREAL_OMEGA = 2 * math.pi / 86164.0905
+
+
+def parse_hhmm_utc(night, hhmm):
+    nd = datetime.strptime(night, "%Y-%m-%d").date()
+    h, m = (int(x) for x in hhmm.split(":"))
+    day = nd if h >= 12 else nd + timedelta(days=1)
+    return datetime.combine(day, datetime.min.time(),
+                            tzinfo=timezone.utc).replace(hour=h, minute=m)
+
+
+def tile_bounds(tile, grid, W, H):
+    c = grid["col_labels"].index(tile[0])
+    r = grid["row_labels"].index(tile[1])
+    tw, th = W / grid["cols"], H / grid["rows"]
+    return (int(round(c * tw)), int(round((c + 1) * tw)),
+            int(round(r * th)), int(round((r + 1) * th)))
+
+
+def undistort(arr, k1, cx, cy):
+    """Apply radial barrel distortion correction with one coefficient.
+    Normalises r by half-image-diagonal so k1 is dimensionless."""
+    if k1 == 0.0:
+        return arr
+    H, W = arr.shape
+    f = float(max(H, W))
+    K = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1.0]], dtype=np.float64)
+    dist = np.array([k1, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    return cv2.undistort(arr, K, dist)
+
+
+def derot_stack_with_k1(frames_t_path, tile_bb, pole_xy, k1, cx, cy,
+                        bH, bW):
+    """Undistort each frame with k1, then derot the tile crop around
+    pole, max-stack. Returns the stacked tile."""
+    x0, x1, y0, y1 = tile_bb
+    margin = 60
+    p_x0 = max(0, x0 - margin); p_x1 = min(bW, x1 + margin)
+    p_y0 = max(0, y0 - margin); p_y1 = min(bH, y1 + margin)
+    pw, ph = p_x1 - p_x0, p_y1 - p_y0
+
+    t_ref = (frames_t_path[0][0].timestamp()
+             + frames_t_path[-1][0].timestamp()) / 2.0
+    px, py = pole_xy
+    cpx, cpy = px - p_x0, py - p_y0
+
+    max_img = np.zeros((ph, pw), dtype=np.float32)
+    for t, fpath in frames_t_path:
+        with fits.open(fpath) as h:
+            d = h[1].data
+        b = bayer.bin2x2(d).astype(np.float32)
+        b = undistort(b, k1, cx, cy)
+        src = b[p_y0:p_y1, p_x0:p_x1]
+        ts = t.timestamp()
+        dtheta = SIDEREAL_OMEGA * (t_ref - ts)
+        c, s = math.cos(dtheta), math.sin(dtheta)
+        M = np.array([
+            [c, -s, (1 - c) * cpx + s * cpy],
+            [s,  c, -s * cpx + (1 - c) * cpy],
+        ], dtype=np.float32)
+        warped = cv2.warpAffine(
+            src, M, (pw, ph),
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+        np.maximum(max_img, warped, out=max_img)
+    return max_img
+
+
+def score_stack(stacked):
+    """Two scores: max pixel value (higher = more point-like) and
+    99.9 / 50 percentile ratio (peakiness)."""
+    flat = stacked[stacked > 0].ravel()
+    if flat.size == 0:
+        return 0.0, 0.0
+    return float(stacked.max()), float(np.percentile(flat, 99.9)
+                                       / max(1.0, np.percentile(flat, 50)))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--subcam", default=None)
+    ap.add_argument("--night", required=True)
+    ap.add_argument("--occlusion", type=Path, required=True)
+    ap.add_argument("--tile", required=True)
+    ap.add_argument("--pole", required=True, help="x,y")
+    ap.add_argument("--window-start", required=True)
+    ap.add_argument("--window-end", required=True)
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--k1-range", default="-0.6,0.6")
+    ap.add_argument("--k1-steps", type=int, default=25)
+    ap.add_argument("--cx", type=float, default=None,
+                    help="optical centre x (default image centre)")
+    ap.add_argument("--cy", type=float, default=None,
+                    help="optical centre y (default image centre)")
+    args = ap.parse_args()
+    args.out.mkdir(parents=True, exist_ok=True)
+
+    cfg = CameraConfig.load(args.camera)
+    if args.subcam:
+        cfg = cfg.subcam(args.subcam)
+    grid = json.loads(args.occlusion.read_text())["grid"]
+    pole = tuple(float(v) for v in args.pole.split(","))
+    w_start = parse_hhmm_utc(args.night, args.window_start)
+    w_end   = parse_hhmm_utc(args.night, args.window_end)
+    k1_lo, k1_hi = (float(v) for v in args.k1_range.split(","))
+    k1_values = np.linspace(k1_lo, k1_hi, args.k1_steps)
+
+    frames = [(t, f) for (t, f) in list_night_frames(cfg, args.night,
+                                                    subcam=args.subcam)
+              if w_start <= t < w_end]
+    if not frames:
+        print("no frames in window", file=sys.stderr)
+        return 1
+    print(f"{len(frames)} frames in window")
+
+    with fits.open(frames[0][1]) as h:
+        H_orig, W_orig = h[1].shape
+    bH, bW = H_orig // 2, W_orig // 2
+    bb = tile_bounds(args.tile, grid, bW, bH)
+    cx = args.cx if args.cx is not None else bW / 2
+    cy = args.cy if args.cy is not None else bH / 2
+    print(f"tile={args.tile}  bb={bb}  pole=({pole[0]:.0f}, {pole[1]:.0f})")
+    print(f"optical centre: ({cx:.0f}, {cy:.0f})")
+    print(f"sweeping k1 over {k1_lo} to {k1_hi} in {args.k1_steps} steps")
+
+    results = []
+    best = (-1.0, 0.0)
+    for k1 in k1_values:
+        stacked = derot_stack_with_k1(frames, bb, pole, float(k1),
+                                      cx, cy, bH, bW)
+        mx, peak_ratio = score_stack(stacked)
+        results.append({"k1": float(k1), "max": mx, "peak_ratio": peak_ratio})
+        print(f"  k1={k1:+.3f}  max={mx:7.0f}  peak/median={peak_ratio:6.1f}")
+        if mx > best[0]:
+            best = (mx, float(k1))
+            # Save the current best stack as we go
+            render_asinh_jpeg(stacked, args.out / f"{args.tile}_best.jpg",
+                              ignore_zero=True)
+            fits.HDUList([fits.PrimaryHDU(),
+                          fits.CompImageHDU(data=stacked.astype(np.float32),
+                                            compression_type="RICE_1")]).writeto(
+                              args.out / f"{args.tile}_best.fits.fz",
+                              overwrite=True)
+    print(f"\nbest k1 = {best[1]:+.3f}  (max pixel = {best[0]:.0f})")
+    (args.out / f"{args.tile}_k1_sweep.json").write_text(json.dumps({
+        "tile": args.tile, "pole": list(pole),
+        "k1_range": [k1_lo, k1_hi], "k1_steps": args.k1_steps,
+        "cx": cx, "cy": cy, "best_k1": best[1], "results": results,
+    }, indent=2))
+    print(f"wrote {args.out}/{args.tile}_k1_sweep.json")
+    print(f"wrote {args.out}/{args.tile}_best.fits.fz (k1={best[1]:+.3f})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
