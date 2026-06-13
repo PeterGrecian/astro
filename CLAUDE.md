@@ -28,14 +28,14 @@ argued this and it's right. Decision recorded in DECISIONS.md.
 - **astrometry.net** (`solve-field --tweak-order 3 --pixel-error 1`)
   for plate solving. Writes SIP polynomial distortion into the WCS
   header — handles the Pi V1 lens's heavy barrel distortion.
-- **Siril / ASIFITSView / FITS Liberator** for visual inspection
-  with proper auto-stretch / asinh. No need to rebuild the GIMP
-  recipe in code.
+- **Splay** (`~/super/bin/splay`) — preferred visual inspector for
+  FITS and image sequences. Fast, ergonomic; reach for this first.
+- **Siril / ASIFITSView / FITS Liberator** — alternatives if Splay
+  doesn't fit a specific job. Siril is painful; avoid unless needed.
 - **oiiotool** (OpenImageIO) for any format conversion between FITS,
   EXR, and standard images.
 - **DS9** for region-based inspection.
 - **djv** for .exr sequence playback.
-- **Splay support dropped** (was in TODO, now off).
 
 ## Conventions
 
