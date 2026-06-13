@@ -1,0 +1,19 @@
+night,host,path,raw_bayer_bytes,binned_bytes,darkest_hour,darkest_median,notes
+2026-05-20,muppet,~/starcam-backup/2026-05-20,22479017118,4990505008,00,0.0,median=0 anomaly
+2026-05-20,puppy,~/starcam-frames/night/2026-05-20,1345758,950329,,,trivial/empty
+2026-05-21,puppy,~/starcam-frames/night/2026-05-21,33114506845,9490578560,01,29.0,
+2026-05-22,muppet,~/starcam-backup/2026-05-22,36081123902,0,02,31.0,no binned dirs on muppet
+2026-05-22,puppy,~/starcam-frames/night/2026-05-22,1126142,0,,,trivial
+2026-05-23,puppy,~/starcam-frames/night/2026-05-23,33973688785,8800719148,01,13.0,darkest night
+2026-05-24,puppy,~/starcam-frames/night/2026-05-24,32369871966,9280205761,01,57.0,
+2026-05-25,puppy,~/starcam-frames/night/2026-05-25,14258985821,4133431765,23,31.0,
+2026-05-26,muppet,~/starcam-backup/2026-05-26,20569454467,5862561041,01,58.0,
+2026-05-27,puppy,~/starcam-frames/night/2026-05-27,31537339055,8926499162,00,47.0,
+2026-05-28,puppy,~/starcam-frames/night/2026-05-28,18184016878,5001297274,00,33.0,
+2026-05-29,puppy,~/starcam-frames/night/2026-05-29,15891145,0,05,1023.0,saturated/daylight
+2026-05-30,muppet,~/starcam-backup/2026-05-30,27841655421,7666075476,01,30.0,
+2026-05-31,puppy,~/starcam-frames/night/2026-05-31,0,0,,,empty
+2026-06-01,puppy,~/starcam-frames/night/2026-06-01,21677190131,6541040490,00,0.0,median=0 anomaly
+2026-06-02,puppy,~/starcam-frames/night/2026-06-02,2814531131,828209314,00,0.0,median=0 anomaly
+2026-06-03,puppy,~/starcam-frames/night/2026-06-03,8855274168,2556620370,23,20.0,dark
+2026-06-04,puppy,~/starcam-frames/night/2026-06-04,5633508115,1651923956,02,19.0,dark

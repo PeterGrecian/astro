@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""pair-sum — sum consecutive groups of N FITS frames.
+
+Reduces frame count by N×, multiplies signal per "frame" by N,
+preserves full provenance in the FITS header. Output is uint32
+(BITPIX=32) so sums up to N≈16 from 12-bit raw remain lossless.
+
+Header additions on each summed frame:
+  PAIRED   = T
+  NSUMMED  = N
+  EPOCH1..N    = <ms>           source epoch_ms per frame
+  DATEOBS1..N  = '...'          source DATE-OBS per frame
+  SRCFL1..N    = '...'          source filename per frame
+  EXPTIME      = <sum>          combined exposure (s)
+  DATE-OBS     = (DATEOBS1)     first frame, for sortability
+  HISTORY      pair-sum f1 + f2 [+ ...]
+
+Output filename: HH-MM-SS.fits.fz from the FIRST frame's DATE-OBS (UTC).
+
+Usage:
+  pair-sum /path/to/01b               # default N=2, out = <dir>-sum2 sibling
+  pair-sum /path/to/01b --n 4         # sum-of-4 → <dir>-sum4
+  pair-sum /path/to/01b --n 4 --out /custom/path
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+
+def hhmmss(date_obs: str) -> str:
+    dt = datetime.fromisoformat(date_obs)
+    return f"{dt.hour:02d}-{dt.minute:02d}-{dt.second:02d}"
+
+
+def sum_group(src_dir: Path, out_dir: Path, n: int) -> None:
+    files = sorted(f for f in src_dir.glob("*.fits.fz") if f.stem.split(".")[0].isdigit())
+    if not files:
+        print(f"no frames in {src_dir}", file=sys.stderr)
+        sys.exit(1)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n_groups = len(files) // n
+    print(f"pair-sum n={n}: {len(files)} frames → {n_groups} summed frames in {out_dir}")
+
+    for i in range(n_groups):
+        group = files[n * i : n * i + n]
+        headers = []
+        acc = None
+        for f in group:
+            with fits.open(f) as h:
+                hdu = h[1] if len(h) > 1 else h[0]
+                d = hdu.data.astype(np.uint32)
+                acc = d if acc is None else acc + d
+                headers.append(hdu.header.copy())
+
+        hdr = headers[0]
+        hdr["PAIRED"] = (True, f"summed from {n} source frames")
+        hdr["NSUMMED"] = (n, "number of frames summed")
+        exptime = 0.0
+        for k, (fk, hk) in enumerate(zip(group, headers), start=1):
+            hdr[f"EPOCH{k}"] = (int(hk.get("EPOCH_MS", 0)), f"source {k} epoch_ms")
+            hdr[f"DATEOBS{k}"] = (hk.get("DATE-OBS", ""), f"source {k} DATE-OBS")
+            hdr[f"SRCFL{k}"] = (fk.name, f"source {k} filename")
+            exptime += float(hk.get("EXPTIME", 0))
+        hdr["EXPTIME"] = (exptime, "combined exposure (s)")
+        hdr["BITPIX"] = 32
+        hdr.add_history("pair-sum " + " + ".join(f.name for f in group))
+
+        name = f"{hhmmss(hdr['DATE-OBS'])}.fits.fz"
+        out_path = out_dir / name
+        chdu = fits.CompImageHDU(data=acc, header=hdr, compression_type="RICE_1")
+        phdu = fits.PrimaryHDU()
+        fits.HDUList([phdu, chdu]).writeto(out_path, overwrite=True)
+
+        if (i + 1) % 50 == 0 or i + 1 == n_groups:
+            print(f"  [{i+1}/{n_groups}] {out_path.name}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("src_dir", type=Path)
+    ap.add_argument("--n", type=int, default=2, help="number of frames to sum per group (default 2)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output dir (default: <src>-sum<N> sibling)")
+    args = ap.parse_args()
+    out = args.out or args.src_dir.parent / f"{args.src_dir.name}-sum{args.n}"
+    sum_group(args.src_dir, out, args.n)
+
+
+if __name__ == "__main__":
+    main()
