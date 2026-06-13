@@ -1,0 +1,10 @@
+{
+  "grid": {"cols": 6, "rows": 4, "col_labels": "ABCDEF", "row_labels": "1234"},
+  "frame_size_px": [2304, 1296],
+  "frame_size_notes": "2x2-binned shape; v3w raw is 4608x2592, binned 2304x1296. Privacy crop (publish_keep_top_px = 1064 in privacy.json) is applied at PRESENTATION only — the detector and per-tile pole fit work on the full 1296-row binned image so trails near the rooftop horizon still contribute.",
+  "trees": [],
+  "trees_notes": "Mark tiles dominated by trees / rooftops / lens flare here once the all-night max stack identifies them. Tiles with star tracks should stay out. Empty for the first pass; pole fit residuals will tell us which tiles are unreliable.",
+  "pole_prior_tile": null,
+  "pole_prior_xy": null,
+  "pole_prior_notes": "v3w looks south; the celestial pole projects OFF the sensor (above the top edge). Set after the splay distortion explorer or per-tile pole fit gives a usable estimate. For per-tile derot we don't need a single pole — each tile carries its own."
+}

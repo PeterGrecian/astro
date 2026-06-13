@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""cands — DAOStarFinder per frame, writes <frame>.cands.json sidecars.
+
+Walks one night's binned-FITS frames for a camera (optionally one
+subcam, optionally restricted to a UTC window) and writes a cands.json
+next to each frame. Sidecars feed the per-tile pole fit downstream.
+
+Distinct from bin/detect-stars which runs on per-tile derot STACKS
+and produces a detections.csv. This one runs on RAW per-frame FITS
+and writes one JSON sidecar per frame (the format astrocam/derot.py
+already consumes).
+
+Usage:
+    cands --camera eclipticam --subcam v3w --night 2026-06-10 \\
+          --occlusion ~/astro/eclipticam/occlusion-v3w.json
+    cands --camera eclipticam --subcam v3w --night 2026-06-10 \\
+          --window-start 23:00 --window-end 02:00 \\
+          --occlusion ~/astro/eclipticam/occlusion-v3w.json
+    cands --camera astrocam --night 2026-06-09 --fwhm 2.5 \\
+          --occlusion ~/astro/astrocam/occlusion.json
+
+Re-runs skip frames that already have a sidecar (use --force to
+overwrite). Designed to be cheap to re-execute.
+"""
+import argparse
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.frames import list_night_frames
+from astro.process import bayer
+from astro.process.detect import (
+    FWHM_DEFAULT, THRESHOLD_SIGMA, EDGE_GUARD_PX,
+    cands_path_for, detect_one, load_grid, write_cands,
+)
+
+
+def parse_hhmm_utc(night: str, hhmm: str) -> datetime:
+    """Resolve HH:MM UTC inside the noon-rollover night-of date."""
+    nd = datetime.strptime(night, "%Y-%m-%d").date()
+    h, m = (int(x) for x in hhmm.split(":"))
+    day = nd if h >= 12 else nd + timedelta(days=1)
+    return datetime.combine(day, datetime.min.time(),
+                            tzinfo=timezone.utc).replace(hour=h, minute=m)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--subcam", default=None)
+    ap.add_argument("--night", required=True)
+    ap.add_argument("--window-start", default=None, metavar="HH:MM")
+    ap.add_argument("--window-end", default=None, metavar="HH:MM")
+    ap.add_argument("--occlusion", type=Path, required=True,
+                    help="path to occlusion JSON (grid lives there)")
+    ap.add_argument("--fwhm", type=float, default=FWHM_DEFAULT)
+    ap.add_argument("--threshold-sigma", type=float, default=THRESHOLD_SIGMA)
+    ap.add_argument("--edge-guard-px", type=int, default=EDGE_GUARD_PX)
+    ap.add_argument("--force", action="store_true",
+                    help="re-detect frames that already have a sidecar")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    if args.subcam:
+        cfg = cfg.subcam(args.subcam)
+    grid = load_grid(args.occlusion)
+
+    frames = list_night_frames(cfg, args.night, subcam=args.subcam)
+    if args.window_start or args.window_end:
+        w_start = parse_hhmm_utc(args.night, args.window_start) if args.window_start else None
+        w_end = parse_hhmm_utc(args.night, args.window_end) if args.window_end else None
+        frames = [(t, f) for (t, f) in frames
+                  if (w_start is None or t >= w_start)
+                  and (w_end is None or t < w_end)]
+    if not frames:
+        print("no frames in window", file=sys.stderr)
+        return 1
+    print(f"cands: {len(frames)} frame(s)  grid={grid['cols']}x{grid['rows']}  "
+          f"fwhm={args.fwhm}  thr={args.threshold_sigma}σ")
+
+    t0 = time.monotonic()
+    n_skipped = 0
+    n_detected = 0
+    total_stars = 0
+    for i, (t, f) in enumerate(frames):
+        sc = cands_path_for(f)
+        if sc.exists() and not args.force:
+            n_skipped += 1
+            continue
+        with fits.open(f) as h:
+            d = h[1].data
+        b = bayer.bin2x2(d)
+        stars = detect_one(b, grid,
+                           fwhm=args.fwhm,
+                           threshold_sigma=args.threshold_sigma,
+                           edge_guard_px=args.edge_guard_px)
+        write_cands(f, t.isoformat(), stars)
+        n_detected += 1
+        total_stars += len(stars)
+        if i % 50 == 0:
+            elapsed = time.monotonic() - t0
+            rate = (n_detected + 1) / max(0.001, elapsed)
+            eta = (len(frames) - i - 1) / max(0.001, rate)
+            print(f"  [{i}/{len(frames)}] {f.name}  stars={len(stars)}  "
+                  f"({rate:.1f} fps, ETA {eta:.0f}s)")
+
+    elapsed = time.monotonic() - t0
+    print(f"cands done: detected {n_detected} new, skipped {n_skipped}, "
+          f"total stars {total_stars}  in {elapsed:.1f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
