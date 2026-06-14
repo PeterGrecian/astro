@@ -50,7 +50,10 @@ echo "=== publish-night-cam ${CAMERA}${SUBCAM:+/$SUBCAM} ${NIGHT} ==="
 nc_args=(--camera "$CAMERA" --night "$NIGHT" --no-derot)
 [[ -n "$SUBCAM" ]] && nc_args+=(--subcam "$SUBCAM")
 echo "--- nightly-cam"
-"$PY" "$HERE/nightly-cam" "${nc_args[@]}"
+if ! "$PY" "$HERE/nightly-cam" "${nc_args[@]}"; then
+    echo "nightly-cam produced nothing for ${CAMERA}${SUBCAM:+/$SUBCAM} $NIGHT; skipping sweep + publish"
+    exit 0
+fi
 
 # Locate the night dir from the config so the sweeper + publish find
 # the same place. `night_output_dir(cfg, night)` is the canonical path.
@@ -91,10 +94,13 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             mode_args+=(--rgb --no-label)
         fi
         echo "--- window-stack-sweep (${mode})"
-        "$HERE/window-stack-sweep" "${mode_args[@]}"
-        out="${night_dir}/${stem}sweep-${mode}.mp4"
-        cp "$sweep_dir/sweep.mp4" "$out"
-        echo "wrote $out"
+        if "$HERE/window-stack-sweep" "${mode_args[@]}"; then
+            out="${night_dir}/${stem}sweep-${mode}.mp4"
+            cp "$sweep_dir/sweep.mp4" "$out"
+            echo "wrote $out"
+        else
+            echo "window-stack-sweep (${mode}) FAILED; continuing without it"
+        fi
     done
     # Calendar thumbnail: middle frame of the colour sweep — a single
     # 10-min stack from the heart of the autodetected dark window.
