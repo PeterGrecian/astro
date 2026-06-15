@@ -146,29 +146,50 @@ def main() -> int:
 
     accum_dtype = np.uint32
 
-    # Active accumulators: dict idx -> ndarray
+    # Active accumulators: dict idx -> (ndarray, n_frames_added)
     active = {}
     pending = list(windows)  # not yet opened (sorted by w_start)
     finished = []            # idx ready to close (sorted)
+
+    # Per-binned-pixel pedestal (4× raw pedestal because 2x2 sum-bin
+    # adds 4 raw counts into each binned pixel). Subtracting n_frames *
+    # pedestal_binned from the accumulator before render removes the
+    # constant sky-electronic floor so the asinh stretch puts the noise
+    # at zero and faint stars stand above it.
+    if args.synthetic:
+        pedestal_binned = 0
+    else:
+        ped = cfg.get("pedestal") or 0
+        pedestal_binned = 4 * float(ped)
 
     def open_due(t):
         # Open any window whose w_start <= t.
         while pending and pending[0][1] <= t:
             idx, ws, we = pending.pop(0)
-            active[idx] = np.zeros(shape, dtype=accum_dtype)
+            active[idx] = [np.zeros(shape, dtype=accum_dtype), 0]
 
     # Pre-build (idx -> (ws, we)) so close_due can look up cheaply.
     win_by_idx = {i: (ws, we) for (i, ws, we) in windows}
 
+    def render_window(idx, acc, n):
+        out_path = frames_dir / f"frame_{idx:05d}.jpg"
+        # Subtract accumulated pedestal so the stretch floor sits at 0.
+        if pedestal_binned and n > 0:
+            floor = pedestal_binned * n
+            sub = acc.astype(np.float32) - floor
+            np.maximum(sub, 0, out=sub)
+        else:
+            sub = acc
+        if rgb_pattern is not None:
+            render_asinh_jpeg_rgb(sub, out_path, rotate_180=cfg_rot)
+        else:
+            render_asinh_jpeg(sub, out_path, rotate_180=cfg_rot)
+
     def close_due(t):
         done = [idx for idx in active if win_by_idx[idx][1] <= t]
         for idx in done:
-            acc = active.pop(idx)
-            out_path = frames_dir / f"frame_{idx:05d}.jpg"
-            if rgb_pattern is not None:
-                render_asinh_jpeg_rgb(acc, out_path, rotate_180=cfg_rot)
-            else:
-                render_asinh_jpeg(acc, out_path, rotate_180=cfg_rot)
+            acc, n = active.pop(idx)
+            render_window(idx, acc, n)
             print(f"  closed window {idx:05d}")
 
     n = 0
@@ -176,19 +197,16 @@ def main() -> int:
         open_due(t)
         close_due(t)
         for idx in active:
-            active[idx] += frame
+            active[idx][0] += frame
+            active[idx][1] += 1
         n += 1
         if n % 100 == 0:
             print(f"  frame {n}  active windows: {len(active)}")
 
     # Drain: any windows still open get closed using their declared end.
     for idx in list(active.keys()):
-        acc = active.pop(idx)
-        out_path = frames_dir / f"frame_{idx:05d}.jpg"
-        if rgb_pattern is not None:
-            render_asinh_jpeg_rgb(acc, out_path, rotate_180=cfg_rot)
-        else:
-            render_asinh_jpeg(acc, out_path, rotate_180=cfg_rot)
+        acc, nf = active.pop(idx)
+        render_window(idx, acc, nf)
         print(f"  closed window {idx:05d} (drain)")
 
     print(f"sum-sweep: {n} frames in, {len(windows)} JPEGs written")
