@@ -7,7 +7,7 @@ night mode; exits when:
   - frame mean crosses the dawn saturation threshold → exit 0
   - camera error → exit non-zero (systemd Restart=on-failure)
 
-Writes Rice-compressed FITS to /dev/shm/eclipticam-v3w/. The
+Writes Rice-compressed FITS to /var/lib/eclipticam-buffer/v3w/. The
 eclipticam-v3w-uploader.service drains that dir to NFS asynchronously.
 """
 import logging
@@ -29,7 +29,7 @@ EXPOSURE_US = int(os.environ.get("V3W_EXPOSURE_US", "59_900_000".replace("_", ""
 GAIN = float(os.environ.get("V3W_GAIN", "1.0"))
 LENS_POSITION = float(os.environ.get("V3W_LENS_POSITION", "0.0"))
 BUFFER_DIR = Path(os.environ.get("V3W_BUFFER_DIR",
-                                 "/dev/shm/eclipticam-v3w"))
+                                 "/var/lib/eclipticam-buffer/v3w"))
 # IMX708 pedestal from eclipticam/camera.json — kept in sync there.
 PEDESTAL = int(os.environ.get("V3W_PEDESTAL", "4380"))
 

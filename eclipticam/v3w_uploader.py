@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""eclipticam-v3w-uploader — drain /dev/shm/eclipticam-v3w/*.fits.fz
+"""eclipticam-v3w-uploader — drain /var/lib/eclipticam-buffer/v3w/*.fits.fz
 to NFS night-tree at ~/eclipticam-frames/night/<night>/v3w/HH/.
 
 Same pattern as starcam-uploader: long-running, polls the buffer dir
@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BUFFER_DIR = Path(os.environ.get("V3W_BUFFER_DIR",
-                                 "/dev/shm/eclipticam-v3w"))
+                                 "/var/lib/eclipticam-buffer/v3w"))
 FRAMES_ROOT = Path(os.environ.get("V3W_FRAMES_ROOT",
                                   str(Path.home() / "eclipticam-frames")))
 UPLOAD_INTERVAL_S = float(os.environ.get("V3W_UPLOAD_INTERVAL_S", "5"))

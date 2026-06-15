@@ -114,7 +114,7 @@ def scene_luminance_from_fits(path):
 # only ensures the streaming service is in the right state for the
 # current mode. v3w night frames themselves are written by the
 # streaming daemon, not here.
-V3W_BUFFER_DIR = Path("/dev/shm/eclipticam-v3w")
+V3W_BUFFER_DIR = Path("/var/lib/eclipticam-buffer/v3w")
 V3W_NIGHT_SERVICE = "eclipticam-v3w-night.service"
 
 
