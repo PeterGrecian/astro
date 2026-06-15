@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""sum-sweep — sliding-window SUM stack -> JPEG sequence -> mp4.
+
+Companion to window-stack-sweep (which max-stacks). Sum gives √N SNR
+boost on static signal (faint stars get deeper) but smears transients
+(plane trails / meteors fade into the noise instead of standing out).
+
+Single-process, streaming. Each FITS frame is read exactly ONCE and
+fanned out to every currently-open window accumulator (a ring of
+window_min/step_min buffers). When a window's end passes, its
+accumulator is asinh-stretched to JPEG and freed.
+
+For development: --synthetic produces fake frames (single bright pixel
+walking diagonally) instead of reading FITS. The output JPEGs show
+trail-of-length-window-frames at the expected position — easy to
+eyeball-verify the ring bookkeeping.
+"""
+import argparse
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.frames import list_night_frames
+from astro.process import bayer
+from astro.present.render import render_asinh_jpeg, render_asinh_jpeg_rgb
+
+TZ_BST = timezone(timedelta(hours=1))  # quick BST stamp; sweep already uses UTC
+
+
+def parse_hhmm_to_utc(night: str, hhmm: str) -> datetime:
+    nd = datetime.strptime(night, "%Y-%m-%d").date()
+    h, m = (int(x) for x in hhmm.split(":"))
+    day = nd if h >= 12 else nd + timedelta(days=1)
+    return datetime.combine(day, datetime.min.time(),
+                            tzinfo=timezone.utc).replace(hour=h, minute=m)
+
+
+def list_windows(sweep_start: datetime, sweep_end: datetime,
+                 window: timedelta, step: timedelta):
+    """List of (idx, w_start, w_end) windows fully inside [sweep_start, sweep_end)."""
+    out = []
+    t = sweep_start
+    i = 0
+    while t + window <= sweep_end:
+        out.append((i, t, t + window))
+        i += 1
+        t += step
+    return out
+
+
+def synthetic_frames(n_frames: int, H: int, W: int, cadence_s: float):
+    """Generate (t, ndarray) pairs. A single bright pixel walks diagonally
+    across the frame, starting at (0,0), reaching (H-1, W-1) by the
+    last frame. Background = uniform 100; pixel = 60000."""
+    t0 = datetime(2026, 6, 10, 22, 0, 0, tzinfo=timezone.utc)
+    for i in range(n_frames):
+        f = np.full((H, W), 100, dtype=np.uint16)
+        y = int(round((H - 1) * i / max(n_frames - 1, 1)))
+        x = int(round((W - 1) * i / max(n_frames - 1, 1)))
+        f[y, x] = 60000
+        t = t0 + timedelta(seconds=i * cadence_s)
+        yield t, f
+
+
+def load_fits_binned(path: Path, rgb_pattern):
+    from astropy.io import fits
+    with fits.open(path) as h:
+        d = h[1].data
+    if rgb_pattern is not None:
+        return bayer.bin2x2_rgb(d, rgb_pattern)
+    return bayer.bin2x2(d)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--subcam", default=None)
+    ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
+    ap.add_argument("--sweep-start", required=True, metavar="HH:MM",
+                    help="UTC")
+    ap.add_argument("--sweep-end", required=True, metavar="HH:MM",
+                    help="UTC")
+    ap.add_argument("--window-min", type=int, default=10)
+    ap.add_argument("--step-min", type=int, default=1)
+    ap.add_argument("--out-dir", required=True, type=Path)
+    ap.add_argument("--rgb", action="store_true")
+    ap.add_argument("--fps", type=int, default=60)
+    ap.add_argument("--no-mp4", action="store_true")
+    ap.add_argument("--synthetic", type=int, default=0, metavar="N",
+                    help="generate N synthetic 200x200 frames instead of "
+                         "reading FITS; for ring-buffer debugging")
+    args = ap.parse_args()
+
+    window = timedelta(minutes=args.window_min)
+    step = timedelta(minutes=args.step_min)
+    sweep_start = parse_hhmm_to_utc(args.night, args.sweep_start)
+    sweep_end = parse_hhmm_to_utc(args.night, args.sweep_end)
+
+    if args.synthetic:
+        # Synthetic: ignore camera, generate frames, set sweep_start to t0.
+        H, W = 200, 200
+        cadence_s = (sweep_end - sweep_start).total_seconds() / args.synthetic
+        windows = list_windows(sweep_start, sweep_end, window, step)
+        frames_iter = synthetic_frames(args.synthetic, H, W, cadence_s)
+        rgb_pattern = None
+        shape = (H, W)
+    else:
+        cfg = CameraConfig.load(args.camera)
+        if args.subcam:
+            cfg = cfg.subcam(args.subcam)
+        rgb_pattern = None
+        if args.rgb:
+            rgb_pattern = bayer.pattern(cfg.get("bayer") or "")
+        rotate_180 = bool(cfg.get("rotate_180"))
+        windows = list_windows(sweep_start, sweep_end, window, step)
+        all_frames = list_night_frames(cfg, args.night, subcam=args.subcam)
+        all_frames = [(t, f) for (t, f) in all_frames
+                      if sweep_start <= t < sweep_end + window]
+        # discover shape from the first frame
+        if not all_frames:
+            print("no frames in sweep range", file=sys.stderr)
+            return 1
+        first = load_fits_binned(all_frames[0][1], rgb_pattern)
+        shape = first.shape
+
+        def gen():
+            yield all_frames[0][0], first
+            for t, p in all_frames[1:]:
+                yield t, load_fits_binned(p, rgb_pattern)
+        frames_iter = gen()
+
+    if not args.synthetic:
+        cfg_rot = bool(CameraConfig.load(args.camera)
+                       .subcam(args.subcam).get("rotate_180") if args.subcam
+                       else CameraConfig.load(args.camera).get("rotate_180"))
+    else:
+        cfg_rot = False
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    frames_dir = args.out_dir / "frames"
+    frames_dir.mkdir(exist_ok=True)
+
+    accum_dtype = np.uint32
+
+    # Active accumulators: dict idx -> ndarray
+    active = {}
+    pending = list(windows)  # not yet opened (sorted by w_start)
+    finished = []            # idx ready to close (sorted)
+
+    def open_due(t):
+        # Open any window whose w_start <= t.
+        while pending and pending[0][1] <= t:
+            idx, ws, we = pending.pop(0)
+            active[idx] = np.zeros(shape, dtype=accum_dtype)
+
+    # Pre-build (idx -> (ws, we)) so close_due can look up cheaply.
+    win_by_idx = {i: (ws, we) for (i, ws, we) in windows}
+
+    def close_due(t):
+        done = [idx for idx in active if win_by_idx[idx][1] <= t]
+        for idx in done:
+            acc = active.pop(idx)
+            out_path = frames_dir / f"frame_{idx:05d}.jpg"
+            if rgb_pattern is not None:
+                render_asinh_jpeg_rgb(acc, out_path, rotate_180=cfg_rot)
+            else:
+                render_asinh_jpeg(acc, out_path, rotate_180=cfg_rot)
+            print(f"  closed window {idx:05d}")
+
+    n = 0
+    for t, frame in frames_iter:
+        open_due(t)
+        close_due(t)
+        for idx in active:
+            active[idx] += frame
+        n += 1
+        if n % 100 == 0:
+            print(f"  frame {n}  active windows: {len(active)}")
+
+    # Drain: any windows still open get closed using their declared end.
+    for idx in list(active.keys()):
+        acc = active.pop(idx)
+        out_path = frames_dir / f"frame_{idx:05d}.jpg"
+        if rgb_pattern is not None:
+            render_asinh_jpeg_rgb(acc, out_path, rotate_180=cfg_rot)
+        else:
+            render_asinh_jpeg(acc, out_path, rotate_180=cfg_rot)
+        print(f"  closed window {idx:05d} (drain)")
+
+    print(f"sum-sweep: {n} frames in, {len(windows)} JPEGs written")
+
+    if not args.no_mp4:
+        import subprocess
+        out_mp4 = args.out_dir / "sweep.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                        "-framerate", str(args.fps),
+                        "-i", str(frames_dir / "frame_%05d.jpg"),
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-crf", "20", "-preset", "medium",
+                        str(out_mp4)],
+                       check=False)
+        print(f"wrote {out_mp4}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
