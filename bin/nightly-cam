@@ -67,8 +67,7 @@ def make_render(cfg, subcam):
 
     def render(img, dst_path, **kw):
         out = privacy_mod.crop_for_publication(img, spec)
-        if rotate_180:
-            out = np.rot90(out, 2)
+        kw.setdefault("rotate_180", rotate_180)
         result = render_asinh_jpeg(out, dst_path, **kw)
         if has_policy:
             privacy_mod.mark_ok(dst_path)

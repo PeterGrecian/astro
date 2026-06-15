@@ -145,10 +145,11 @@ def main() -> int:
     out_img = privacy_mod.crop_for_publication(max_img, spec)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    rotate_180 = bool(cfg.get("rotate_180"))
     if args.rgb:
-        render_asinh_jpeg_rgb(out_img, args.out)
+        render_asinh_jpeg_rgb(out_img, args.out, rotate_180=rotate_180)
     else:
-        render_asinh_jpeg(out_img, args.out)
+        render_asinh_jpeg(out_img, args.out, rotate_180=rotate_180)
     if args.label:
         _burn_label(args.out, args.label)
     if cfg.get("privacy_file"):

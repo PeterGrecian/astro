@@ -12,7 +12,7 @@ JPEG_ASINH = 20.0
 
 
 def render_asinh_jpeg_rgb(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
-                          asinh=JPEG_ASINH, quality=88):
+                          asinh=JPEG_ASINH, quality=88, rotate_180=False):
     """Asinh-stretched RGB JPEG. img is (H, W, 3) with channel order R,G,B.
     Each channel stretched against ITS OWN percentiles — auto-WB style,
     so dawn pinks pop without manual gain ratios."""
@@ -28,11 +28,14 @@ def render_asinh_jpeg_rgb(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
         s = np.clip((c - lo) / (hi - lo), 0, 1)
         s = np.arcsinh(s * asinh) / np.arcsinh(asinh)
         out[..., ch] = (s * 255).astype(np.uint8)
+    if rotate_180:
+        out = np.rot90(out, 2)
     _Image.fromarray(out, mode="RGB").save(dst_path, quality=quality)
 
 
 def render_asinh_jpeg(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
-                      asinh=JPEG_ASINH, quality=88, ignore_zero=False):
+                      asinh=JPEG_ASINH, quality=88, ignore_zero=False,
+                      rotate_180=False):
     """Asinh-stretched grayscale JPEG. Returns (lo, hi) clip values.
 
     ignore_zero: compute the stretch percentiles over non-zero pixels
@@ -49,5 +52,7 @@ def render_asinh_jpeg(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
     s = np.clip((f - lo) / (hi - lo), 0, 1)
     s = np.arcsinh(s * asinh) / np.arcsinh(asinh)
     u8 = (s * 255).astype(np.uint8)
+    if rotate_180:
+        u8 = np.rot90(u8, 2)
     Image.fromarray(u8).save(dst_path, quality=quality)
     return lo, hi
