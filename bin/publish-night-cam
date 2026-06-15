@@ -102,6 +102,30 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             echo "window-stack-sweep (${mode}) FAILED; continuing without it"
         fi
     done
+    # --- diff-sweep: max(frame - window_mean) mono mp4 -------------
+    # Subtracts the window mean per pixel so the pedestal, hot pixels,
+    # and cloud-glow all cancel; trails and transients stand free of
+    # the sky background. Re-uses the autodetect window cut chosen by
+    # the colour sweep above so the three videos line up.
+    diff_dir="${night_dir}/${stem}sweep-diff"
+    mkdir -p "$diff_dir"
+    diff_args=(
+        --camera "$CAMERA" --night "$NIGHT"
+        --sweep-start 22:00 --sweep-end 04:00
+        --window-min "$WINDOW_MIN" --step-min "$STEP_MIN"
+        --fps "$FPS"
+        --out-dir "$diff_dir"
+    )
+    [[ -n "$SUBCAM" ]] && diff_args+=(--subcam "$SUBCAM")
+    echo "--- diff-sweep (mono, window-mean subtracted)"
+    if "$PY" "$HERE/diff-sweep" "${diff_args[@]}"; then
+        out="${night_dir}/${stem}sweep-diff.mp4"
+        cp "$diff_dir/sweep.mp4" "$out"
+        echo "wrote $out"
+    else
+        echo "diff-sweep FAILED; continuing without it"
+    fi
+
     # Calendar thumbnail: middle frame of the colour sweep — a single
     # 10-min stack from the heart of the autodetected dark window.
     # Truer-to-night than the all-night max.jpg (which is dominated by
@@ -142,6 +166,7 @@ names = [
     f"${stem}thumb.jpg",
     f"${stem}sweep-mono.mp4",
     f"${stem}sweep-colour.mp4",
+    f"${stem}sweep-diff.mp4",
 ]
 files = [nd/n for n in names if (nd/n).exists()]
 missing = [n for n in names if not (nd/n).exists()]
@@ -149,7 +174,7 @@ missing = [n for n in names if not (nd/n).exists()]
 # OK so publish's privacy guard doesn't refuse them.
 if getattr(cfg, "privacy", None):
     for n in (f"${stem}sweep-mono.mp4", f"${stem}sweep-colour.mp4",
-              f"${stem}thumb.jpg"):
+              f"${stem}sweep-diff.mp4", f"${stem}thumb.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
