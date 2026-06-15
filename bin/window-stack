@@ -76,24 +76,36 @@ def _burn_label(jpeg_path: Path, label: str):
     img.save(jpeg_path, quality=88)
 
 
-def stack_window(frames, raw_shape, rgb_pattern=None):
-    """Stream the frames into a 2x2-binned uint32 max image.
-    rgb_pattern: if given, bin into 3-channel RGB (per-plane). Output
-    shape (H/2, W/2, 3); else greyscale (H/2, W/2)."""
+def stack_window(frames, raw_shape, rgb_pattern=None, subtract_bg=False):
+    """Stream the frames into a 2x2-binned int32 max image.
+
+    subtract_bg: per-frame, subtract the global median (per channel for
+    RGB) before maxing. Pulls out anything brighter than the local sky
+    floor — kills hot pixels and light-pollution drift, keeps stars and
+    transients."""
     H, W = raw_shape[0] // 2, raw_shape[1] // 2
+    dtype = np.int32 if subtract_bg else np.uint32
     if rgb_pattern:
-        max_img = np.zeros((H, W, 3), dtype=np.uint32)
+        max_img = np.zeros((H, W, 3), dtype=dtype)
         for _, f in frames:
             with fits.open(f) as h:
                 d = h[1].data
-            np.maximum(max_img, bayer.bin2x2_rgb(d, rgb_pattern),
-                       out=max_img)
+            b = bayer.bin2x2_rgb(d, rgb_pattern).astype(dtype)
+            if subtract_bg:
+                for ch in range(3):
+                    b[..., ch] -= int(np.median(b[..., ch]))
+            np.maximum(max_img, b, out=max_img)
     else:
-        max_img = np.zeros((H, W), dtype=np.uint32)
+        max_img = np.zeros((H, W), dtype=dtype)
         for _, f in frames:
             with fits.open(f) as h:
                 d = h[1].data
-            np.maximum(max_img, bayer.bin2x2(d), out=max_img)
+            b = bayer.bin2x2(d).astype(dtype)
+            if subtract_bg:
+                b -= int(np.median(b))
+            np.maximum(max_img, b, out=max_img)
+    if subtract_bg:
+        np.maximum(max_img, 0, out=max_img)
     return max_img
 
 
@@ -116,6 +128,10 @@ def main() -> int:
                     help="text to burn into the bottom strip of the JPEG "
                          "(e.g. '01:36 BST  +2.1 stops'). Left blank: no "
                          "overlay.")
+    ap.add_argument("--subtract-bg", action="store_true",
+                    help="subtract per-frame global median before max-stacking "
+                         "(suppresses hot pixels + light-pollution floor; "
+                         "keeps stars and transients)")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -139,7 +155,8 @@ def main() -> int:
     if args.rgb:
         sensor_raw = cfg.get("bayer") or ""
         rgb_pattern = bayer.pattern(sensor_raw)
-    max_img = stack_window(frames, raw_shape, rgb_pattern=rgb_pattern)
+    max_img = stack_window(frames, raw_shape, rgb_pattern=rgb_pattern,
+                           subtract_bg=args.subtract_bg)
 
     spec = privacy_mod.entry_for(cfg, args.subcam)
     out_img = privacy_mod.crop_for_publication(max_img, spec)
