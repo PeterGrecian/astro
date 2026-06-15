@@ -329,6 +329,10 @@ def main() -> int:
         brightness.plot_night(rows, night, cfg.name,
                               out_dir / f"{stem}brightness.png",
                               pedestal=cfg.get("pedestal"))
+        # Privacy-safe by construction (plot has no camera pixels) —
+        # mark so publish doesn't refuse to upload on cloudy nights.
+        if getattr(cfg, "privacy", None):
+            privacy_mod.mark_ok(out_dir / f"{stem}brightness.png")
         s = summary_mod.build(cfg.name, night, rows,
                               badpix=None, derot=None,
                               outputs={"brightness_png": f"{stem}brightness.png",
