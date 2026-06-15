@@ -35,6 +35,10 @@ from astropy.stats import sigma_clipped_stats
 from astropy.utils.exceptions import AstropyUserWarning
 from photutils.centroids import centroid_2dg
 from photutils.detection import DAOStarFinder
+
+# Shared noon-rollover helper used by all cameras.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.nightdir import night_of  # noqa: E402
 from picamera2 import Picamera2
 
 # Gaussian fits on non-star noise candidates produce a flood of these.
@@ -311,7 +315,10 @@ def main():
                     coadd_count += 1
 
                 if coadd_count >= COADD_N:
-                    out_dir = (FRAMES / now.strftime("%Y-%m-%d")
+                    # Noon-rollover night-of date: (utc - 12h).date().
+                    # Keeps one observing session (evening + morning hours)
+                    # under a single date dir — matches eclipticam.
+                    out_dir = (FRAMES / night_of(now)
                                / now.strftime("%H"))
                     out_dir.mkdir(parents=True, exist_ok=True)
                     mmss = now.strftime("%M%S")
@@ -325,7 +332,12 @@ def main():
                         cands = starfind_tiles(
                             coadd_buf, sky_tiles, n_cols, n_rows
                         )
-                        cand_path = out_dir / f"{mmss}.cands.json"
+                        # Sidecar cands JSON in a sibling cands/ dir so
+                        # HH/ listings stay clean. Filename matches the
+                        # FITS basename (no .cands.json suffix needed).
+                        cands_dir = out_dir / "cands"
+                        cands_dir.mkdir(parents=True, exist_ok=True)
+                        cand_path = cands_dir / f"{mmss}.json"
                         cand_path.write_text(json.dumps({
                             "frame": fits_path.name,
                             "utc": now.isoformat(),

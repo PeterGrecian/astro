@@ -97,14 +97,28 @@ def scan_window(end_utc, window_s=WINDOW_S):
         for hour_dir in sorted(day_dir.iterdir()):
             if not hour_dir.is_dir() or not hour_dir.name.isdigit():
                 continue
-            for cands_path in sorted(hour_dir.glob("*.cands.json")):
+            # New layout: cands JSONs under HH/cands/. Fall through to
+            # the old (HH/*.cands.json) layout for data captured before
+            # the relocation.
+            cands_subdir = hour_dir / "cands"
+            if cands_subdir.is_dir():
+                cands_paths = sorted(cands_subdir.glob("*.json"))
+            else:
+                cands_paths = sorted(hour_dir.glob("*.cands.json"))
+            for cands_path in cands_paths:
                 try:
                     meta = json.loads(cands_path.read_text())
                     t = datetime.fromisoformat(meta["utc"])
                 except (OSError, KeyError, ValueError):
                     continue
                 if start_utc <= t <= end_utc:
-                    fits_path = cands_path.with_suffix("").with_suffix(".fits.fz")
+                    # FITS lives in HH/ regardless of layout — derive
+                    # the basename from the cands filename.
+                    base = cands_path.stem
+                    # Old layout stem still carries ".cands"; strip it
+                    if base.endswith(".cands"):
+                        base = base[:-len(".cands")]
+                    fits_path = hour_dir / f"{base}.fits.fz"
                     found.append((cands_path, fits_path, t, meta))
     found.sort(key=lambda x: x[2])
     return found
@@ -521,7 +535,11 @@ def latest_finished_co_add():
         for hour_dir in sorted(day_dir.iterdir(), reverse=True):
             if not hour_dir.is_dir() or not hour_dir.name.isdigit():
                 continue
-            files = sorted(hour_dir.glob("*.cands.json"), reverse=True)
+            cands_subdir = hour_dir / "cands"
+            if cands_subdir.is_dir():
+                files = sorted(cands_subdir.glob("*.json"), reverse=True)
+            else:
+                files = sorted(hour_dir.glob("*.cands.json"), reverse=True)
             if files:
                 meta = json.loads(files[0].read_text())
                 latest_t = datetime.fromisoformat(meta["utc"])
