@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""diff-sweep — sliding-window max(frame - window_mean) -> JPEG sequence.
+
+Third deliverable alongside window-stack-sweep (max) and sum-sweep (sum):
+
+    pixel_out = max over window of (frame[i] - mean_over_window)
+
+Window-mean subtraction kills:
+- The sensor pedestal (constant in every frame)
+- Hot pixels (same value in every frame -> 0 residual)
+- The window's average sky brightness (so cloudy *late* frames don't
+  raise the floor for the early clear ones; the mean blends them)
+
+What survives:
+- Star trails (each pixel sees a star for ~6 of ~60 frames -> +residual)
+- Transients (planes, meteors -> single-frame high residual)
+- Anything BRIGHTER than the window average at the pixel position
+
+Single-process streaming: each FITS frame is decoded ONCE and stashed
+in a deque of recent binned frames. When a window closes we look back
+over the deque, compute the mean over that window, then max the
+deviations. The deque is pruned of frames older than the oldest
+still-open window.
+
+--synthetic mode: a single bright pixel walking diagonally on a
+constant background. Bg subtracts to zero; trail survives.
+"""
+import argparse
+import sys
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.frames import list_night_frames
+from astro.process import bayer
+from astro.present.render import render_asinh_jpeg, render_asinh_jpeg_rgb
+
+
+def parse_hhmm_to_utc(night: str, hhmm: str) -> datetime:
+    nd = datetime.strptime(night, "%Y-%m-%d").date()
+    h, m = (int(x) for x in hhmm.split(":"))
+    day = nd if h >= 12 else nd + timedelta(days=1)
+    return datetime.combine(day, datetime.min.time(),
+                            tzinfo=timezone.utc).replace(hour=h, minute=m)
+
+
+def list_windows(sweep_start, sweep_end, window, step):
+    out, t, i = [], sweep_start, 0
+    while t + window <= sweep_end:
+        out.append((i, t, t + window))
+        i += 1
+        t += step
+    return out
+
+
+def synthetic_frames(n_frames, H, W, cadence_s, sweep_start):
+    for i in range(n_frames):
+        f = np.full((H, W), 100, dtype=np.uint16)
+        y = int(round((H - 1) * i / max(n_frames - 1, 1)))
+        x = int(round((W - 1) * i / max(n_frames - 1, 1)))
+        f[y, x] = 60000
+        yield sweep_start + timedelta(seconds=i * cadence_s), f
+
+
+def load_fits_binned(path, rgb_pattern):
+    from astropy.io import fits
+    with fits.open(path) as h:
+        d = h[1].data
+    if rgb_pattern is not None:
+        return bayer.bin2x2_rgb(d, rgb_pattern)
+    return bayer.bin2x2(d)
+
+
+def close_window(idx, w_start, w_end, recent, rgb_pattern,
+                 frames_dir, rotate_180):
+    """Find the frames in [w_start, w_end), compute mean, max deviation,
+    render."""
+    in_win = [(t, f) for (t, f) in recent if w_start <= t < w_end]
+    if not in_win:
+        print(f"  skip window {idx:05d}: no frames in deque "
+              f"(possible drain edge)")
+        return
+    stack = np.stack([f for (_, f) in in_win]).astype(np.int32)
+    mean = stack.mean(axis=0)
+    dev = stack - mean
+    max_dev = dev.max(axis=0)
+    np.maximum(max_dev, 0, out=max_dev)
+    out_path = frames_dir / f"frame_{idx:05d}.jpg"
+    if rgb_pattern is not None:
+        render_asinh_jpeg_rgb(max_dev, out_path, rotate_180=rotate_180)
+    else:
+        render_asinh_jpeg(max_dev, out_path, rotate_180=rotate_180)
+    print(f"  closed window {idx:05d}  ({len(in_win)} frames)")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--subcam", default=None)
+    ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
+    ap.add_argument("--sweep-start", required=True, metavar="HH:MM")
+    ap.add_argument("--sweep-end", required=True, metavar="HH:MM")
+    ap.add_argument("--window-min", type=int, default=10)
+    ap.add_argument("--step-min", type=int, default=1)
+    ap.add_argument("--out-dir", required=True, type=Path)
+    ap.add_argument("--rgb", action="store_true")
+    ap.add_argument("--fps", type=int, default=60)
+    ap.add_argument("--no-mp4", action="store_true")
+    ap.add_argument("--synthetic", type=int, default=0, metavar="N")
+    args = ap.parse_args()
+
+    window = timedelta(minutes=args.window_min)
+    step = timedelta(minutes=args.step_min)
+    sweep_start = parse_hhmm_to_utc(args.night, args.sweep_start)
+    sweep_end = parse_hhmm_to_utc(args.night, args.sweep_end)
+    windows = list_windows(sweep_start, sweep_end, window, step)
+
+    rotate_180 = False
+    if args.synthetic:
+        H, W = 200, 200
+        cadence_s = (sweep_end - sweep_start).total_seconds() / args.synthetic
+        frames_iter = synthetic_frames(args.synthetic, H, W,
+                                       cadence_s, sweep_start)
+        rgb_pattern = None
+    else:
+        cfg = CameraConfig.load(args.camera)
+        if args.subcam:
+            cfg = cfg.subcam(args.subcam)
+        rgb_pattern = None
+        if args.rgb:
+            rgb_pattern = bayer.pattern(cfg.get("bayer") or "")
+        rotate_180 = bool(cfg.get("rotate_180"))
+        all_frames = list_night_frames(cfg, args.night, subcam=args.subcam)
+        all_frames = [(t, f) for (t, f) in all_frames
+                      if sweep_start <= t < sweep_end + window]
+        if not all_frames:
+            print("no frames in sweep range", file=sys.stderr)
+            return 1
+
+        def gen():
+            for t, p in all_frames:
+                yield t, load_fits_binned(p, rgb_pattern)
+        frames_iter = gen()
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    frames_dir = args.out_dir / "frames"
+    frames_dir.mkdir(exist_ok=True)
+
+    pending = list(windows)
+    recent = deque()  # (t, binned_frame)
+
+    n = 0
+    for t, frame in frames_iter:
+        recent.append((t, frame))
+        n += 1
+
+        # Close every window whose end has passed.
+        while pending and pending[0][2] <= t:
+            idx, ws, we = pending.pop(0)
+            close_window(idx, ws, we, recent, rgb_pattern,
+                         frames_dir, rotate_180)
+
+        # Prune deque: drop frames older than the oldest still-open
+        # window's start.
+        oldest_needed = pending[0][1] if pending else None
+        while recent and oldest_needed is not None \
+                and recent[0][0] < oldest_needed:
+            recent.popleft()
+
+        if n % 100 == 0:
+            print(f"  frame {n}  pending={len(pending)} deque={len(recent)}")
+
+    # Drain remaining windows whose end didn't quite arrive.
+    while pending:
+        idx, ws, we = pending.pop(0)
+        close_window(idx, ws, we, recent, rgb_pattern,
+                     frames_dir, rotate_180)
+
+    print(f"diff-sweep: {n} frames in, {len(windows)} JPEGs written")
+
+    if not args.no_mp4:
+        import subprocess
+        out_mp4 = args.out_dir / "sweep.mp4"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                        "-framerate", str(args.fps),
+                        "-i", str(frames_dir / "frame_%05d.jpg"),
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-crf", "20", "-preset", "medium",
+                        str(out_mp4)], check=False)
+        print(f"wrote {out_mp4}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
