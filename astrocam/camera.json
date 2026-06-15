@@ -8,6 +8,8 @@
   "plate_scale_notes": "Nominal: Camera Module v2 stock lens, 62.2 deg horizontal / 3280 px. Not yet measured from a solve.",
   "pole_prior_xy": [1945, 1823],
   "pole_prior_notes": "Full-res Bayer pixel coords; see occlusion.json pole_prior_notes for provenance.",
+  "rotate_180": true,
+  "rotate_180_notes": "Astrocam is mounted with the sensor inverted relative to the published frame; rotate before stretching to JPEG.",
   "pedestal": 519,
   "pedestal_notes": "Sensor floor of the IMX219 raw output. Measured 2026-06-15 from sampled deep-night (00-02 UTC) frames across nights 2026-06-10..12: global min 519, p1 519, median 539. Astrocam stores raw 10-bit counts (no 16-bit bit-shift), so the pedestal is order-of-magnitude smaller than v3w's 4380.",
   "frames_root": "~/astrocam-frames",

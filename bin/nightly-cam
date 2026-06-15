@@ -63,9 +63,12 @@ def make_render(cfg, subcam):
     the marker records that the policy was consciously applied)."""
     spec = privacy_mod.entry_for(cfg, subcam)
     has_policy = bool(getattr(cfg, "privacy", None))
+    rotate_180 = bool(cfg.get("rotate_180"))
 
     def render(img, dst_path, **kw):
         out = privacy_mod.crop_for_publication(img, spec)
+        if rotate_180:
+            out = np.rot90(out, 2)
         result = render_asinh_jpeg(out, dst_path, **kw)
         if has_policy:
             privacy_mod.mark_ok(dst_path)
