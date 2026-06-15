@@ -95,8 +95,12 @@ def gather_tile_detections(cfg, subcam, night, tile, window_start, window_end):
         root = cfg.frames_root / night
     else:
         raise ValueError(f"unsupported layout {cfg.night_layout!r}")
+    # New layout: HH/cands/MMSS.json. Old layout: HH/MMSS.cands.json.
+    # Glob both so we don't care which one is on disk.
     dets = []
-    for f in sorted(root.glob("[0-9][0-9]/*.cands.json")):
+    cands_files = list(root.glob("[0-9][0-9]/cands/*.json"))
+    cands_files += list(root.glob("[0-9][0-9]/*.cands.json"))
+    for f in sorted(cands_files):
         d = json.loads(f.read_text())
         if d["utc"] < window_start.isoformat():
             continue

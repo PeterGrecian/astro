@@ -60,18 +60,31 @@ def detect_one(arr, grid, fwhm=FWHM_DEFAULT, threshold_sigma=THRESHOLD_SIGMA,
 
 
 def cands_path_for(fits_path: Path) -> Path:
-    """Sidecar path: foo.fits.fz -> foo.cands.json"""
-    return fits_path.with_suffix("").with_suffix(".cands.json")
+    """Sidecar path: <HH>/foo.fits.fz -> <HH>/cands/foo.json
+
+    cands JSONs live in a sibling `cands/` subdir so listings of the
+    frame dir stay clean. Filename keeps the FITS basename, with the
+    suffix collapsed (foo.fits.fz -> foo.json), since the dir already
+    names it as cands.
+    """
+    base = fits_path.name
+    # foo.fits.fz -> foo  (strip both .fz and .fits)
+    for s in (".fz", ".fits"):
+        if base.endswith(s):
+            base = base[:-len(s)]
+    return fits_path.parent / "cands" / f"{base}.json"
 
 
 def write_cands(fits_path: Path, utc_iso: str, stars: list):
-    """Write the cands.json sidecar next to the source FITS."""
+    """Write the cands JSON sidecar in the sibling cands/ subdir."""
     cands = {
         "utc": utc_iso,
         "frame": fits_path.name,
         "stars": stars,
     }
-    cands_path_for(fits_path).write_text(json.dumps(cands))
+    out = cands_path_for(fits_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(cands))
 
 
 def load_grid(occlusion_path: Path) -> dict:
