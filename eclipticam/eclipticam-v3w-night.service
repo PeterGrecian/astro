@@ -1,0 +1,21 @@
+[Unit]
+Description=eclipticam v3w night capture (Picamera2 streaming, /dev/shm buffer)
+After=network-online.target home-peter-eclipticam\x2dframes.mount
+Wants=home-peter-eclipticam\x2dframes.mount
+# Stop cleanly when eclipticam-capture flips to day; the per-tick
+# capture script controls start/stop via systemctl.
+StopWhenUnneeded=no
+
+[Service]
+Type=simple
+User=peter
+WorkingDirectory=/home/peter
+ExecStart=/usr/bin/python3 /home/peter/astro/eclipticam/v3w_night_daemon.py
+Nice=5
+Restart=on-failure
+RestartSec=10
+# Streaming daemon exits cleanly on SIGTERM. Give it long enough to
+# finish the in-flight compression of the last frame.
+TimeoutStopSec=90
+StandardOutput=journal
+StandardError=journal

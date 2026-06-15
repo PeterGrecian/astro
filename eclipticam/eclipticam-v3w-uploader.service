@@ -1,0 +1,18 @@
+[Unit]
+Description=eclipticam v3w uploader (drain /dev/shm fits.fz to NFS night tree)
+After=network-online.target home-peter-eclipticam\x2dframes.mount
+Wants=home-peter-eclipticam\x2dframes.mount
+
+[Service]
+Type=simple
+User=peter
+WorkingDirectory=/home/peter
+ExecStart=/usr/bin/python3 /home/peter/astro/eclipticam/v3w_uploader.py
+Nice=10
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

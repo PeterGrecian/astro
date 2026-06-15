@@ -106,6 +106,56 @@ def scene_luminance_from_fits(path):
     return mean / (shutter_us * gain)
 
 
+
+# --- v3w streaming daemon coordination -------------------------------
+# The v3w night capture is owned by eclipticam-v3w-night.service
+# (Picamera2 streaming, see astro/capture/streaming.py). This script
+# is invoked every minute by eclipticam-capture.timer; on each tick it
+# only ensures the streaming service is in the right state for the
+# current mode. v3w night frames themselves are written by the
+# streaming daemon, not here.
+V3W_BUFFER_DIR = Path("/dev/shm/eclipticam-v3w")
+V3W_NIGHT_SERVICE = "eclipticam-v3w-night.service"
+
+
+def _systemctl(*args):
+    """Best-effort systemctl invocation; never raises."""
+    try:
+        return subprocess.run(["systemctl", *args],
+                              capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        print(f"systemctl {' '.join(args)}: {e}", file=sys.stderr)
+        return None
+
+
+def ensure_v3w_streaming_running():
+    r = _systemctl("is-active", "--quiet", V3W_NIGHT_SERVICE)
+    if r is None or r.returncode != 0:
+        _systemctl("start", V3W_NIGHT_SERVICE)
+
+
+def ensure_v3w_streaming_stopped():
+    r = _systemctl("is-active", "--quiet", V3W_NIGHT_SERVICE)
+    if r is not None and r.returncode == 0:
+        _systemctl("stop", V3W_NIGHT_SERVICE)
+
+
+def streaming_v3w_lum():
+    """Read the most-recent per_s from the streaming daemon's
+    brightness.csv (in tmpfs). Returns None if no streaming output
+    is available — caller should fall back to previous state."""
+    bf = V3W_BUFFER_DIR / "brightness.csv"
+    if not bf.exists() or bf.stat().st_size == 0:
+        return None
+    try:
+        lines = [ln for ln in bf.read_text().splitlines()
+                 if ln and not ln.startswith("epoch_ms")]
+        if not lines:
+            return None
+        return float(lines[-1].split(",")[4])
+    except Exception:
+        return None
+
 def shoot_day(camera_idx, out_path, lens_position=None, timeout_ms=1500):
     cmd = ["rpicam-still", "--camera", str(camera_idx),
            "--rotation", "180", "-o", str(out_path),
@@ -296,26 +346,37 @@ def capture_tick():
     # when v1 gets its own role (e.g. solar imaging during the day).
     state = load_state()
     new_state = {}
-    for cam_label, cam_idx, lp, night_capable in [
-            ("v3w", CAM_V3W, LENS_POSITION_V3W, True),
-            ("v1",  CAM_V1,  None,              False)]:
-        prev = state.get(cam_label, {})
-        mode, hold = decide_mode(prev, prev.get("lum"))
-        if mode == "night" and night_capable:
-            hour_dir = FRAMES / "night" / night_date / cam_label / hh
-            brightness_path = shoot_night(cam_idx, hour_dir, lens_position=lp)
-            lum = scene_luminance_from_fits(brightness_path) if brightness_path else None
-        elif mode == "day" or not night_capable:
-            # Day-only cameras still capture (and update lum) even when
-            # the scene is dark — operator can find them and check.
-            hour_dir = FRAMES / "day" / utc_date / cam_label / hh
-            out_path = next_frame_path(hour_dir, "jpg")
-            shoot_day(cam_idx, out_path, lens_position=lp)
-            lum = scene_luminance_from_jpeg(out_path) if out_path.exists() else None
-        else:
-            lum = None
-        new_state[cam_label] = {"mode": mode, "hold": hold,
-                                "lum": lum if lum is not None else prev.get("lum")}
+    # v3w first: its mode gates whether v1 even bothers shooting.
+    v3w_prev = state.get("v3w", {})
+    v3w_mode, v3w_hold = decide_mode(v3w_prev, v3w_prev.get("lum"))
+    if v3w_mode == "night":
+        # Streaming daemon owns the camera. Don't touch cam0 here.
+        ensure_v3w_streaming_running()
+        lum = streaming_v3w_lum()
+    else:
+        ensure_v3w_streaming_stopped()
+        hour_dir = FRAMES / "day" / utc_date / "v3w" / hh
+        out_path = next_frame_path(hour_dir, "jpg")
+        shoot_day(CAM_V3W, out_path, lens_position=LENS_POSITION_V3W)
+        lum = scene_luminance_from_jpeg(out_path) if out_path.exists() else None
+    new_state["v3w"] = {"mode": v3w_mode, "hold": v3w_hold,
+                        "lum": lum if lum is not None else v3w_prev.get("lum")}
+
+    # v1 is day-only hardware; only shoot when v3w confirms it's day.
+    # In v3w-night the scene is dark, so a v1 day-mode JPG is just
+    # noise — skip it. v1 state freezes so its hysteresis resumes
+    # cleanly when day returns.
+    v1_prev = state.get("v1", {})
+    v1_mode, v1_hold = decide_mode(v1_prev, v1_prev.get("lum"))
+    if v3w_mode == "day":
+        hour_dir = FRAMES / "day" / utc_date / "v1" / hh
+        out_path = next_frame_path(hour_dir, "jpg")
+        shoot_day(CAM_V1, out_path, lens_position=None)
+        v1_lum = scene_luminance_from_jpeg(out_path) if out_path.exists() else None
+    else:
+        v1_lum = None
+    new_state["v1"] = {"mode": v1_mode, "hold": v1_hold,
+                       "lum": v1_lum if v1_lum is not None else v1_prev.get("lum")}
     save_state(new_state)
 
 
