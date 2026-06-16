@@ -6,13 +6,13 @@
 # 3. publish: upload everything to s3://<bucket>/<camera>/nights/<night>/
 #
 # Usage:
-#   publish-night-cam --camera eclipticam --subcam v3w --night 2026-06-09
-#   publish-night-cam --camera eclipticam --subcam v3w --night 2026-06-09 \
+#   publish-night-cam --camera eclipticam-v3w --night 2026-06-09
+#   publish-night-cam --camera eclipticam-v3w --night 2026-06-09 \
 #                     --no-sweep         # skip the (slow) sweep render
 #                     --no-publish       # leave artefacts on local disk only
 set -euo pipefail
 
-CAMERA=""; SUBCAM=""; NIGHT=""
+CAMERA=""; NIGHT=""
 NO_SWEEP=0; NO_PUBLISH=0
 WINDOW_MIN=10; STEP_MIN=1; FPS=60; JOBS=8
 AUTO_START_STOPS=12; AUTO_END_STOPS=13
@@ -20,7 +20,6 @@ AUTO_START_STOPS=12; AUTO_END_STOPS=13
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --camera)        CAMERA="$2";        shift 2;;
-        --subcam)        SUBCAM="$2";        shift 2;;
         --night)         NIGHT="$2";         shift 2;;
         --no-sweep)      NO_SWEEP=1;         shift;;
         --no-publish)    NO_PUBLISH=1;       shift;;
@@ -43,15 +42,12 @@ REPO="$(cd "$HERE/.." && pwd)"
 PY="${ASTRO_VENV_PY:-$REPO/.venv/bin/python}"
 [[ -x "$PY" ]] || PY="$HOME/astro/.venv/bin/python"
 
-stem=""; [[ -n "$SUBCAM" ]] && stem="${SUBCAM}_"
-echo "=== publish-night-cam ${CAMERA}${SUBCAM:+/$SUBCAM} ${NIGHT} ==="
+echo "=== publish-night-cam ${CAMERA} ${NIGHT} ==="
 
 # --- 1. nightly-cam: stacks + brightness + summary -------------------
-nc_args=(--camera "$CAMERA" --night "$NIGHT" --no-derot)
-[[ -n "$SUBCAM" ]] && nc_args+=(--subcam "$SUBCAM")
 echo "--- nightly-cam"
-if ! "$PY" "$HERE/nightly-cam" "${nc_args[@]}"; then
-    echo "nightly-cam produced nothing for ${CAMERA}${SUBCAM:+/$SUBCAM} $NIGHT; skipping sweep + publish"
+if ! "$PY" "$HERE/nightly-cam" --camera "$CAMERA" --night "$NIGHT" --no-derot; then
+    echo "nightly-cam produced nothing for ${CAMERA} $NIGHT; skipping sweep + publish"
     exit 0
 fi
 
@@ -65,7 +61,7 @@ cfg = CameraConfig.load("$CAMERA")
 print(night_output_dir(cfg, "$NIGHT"))
 PYEOF
 )
-brightness_csv="${night_dir}/${stem}brightness.csv"
+brightness_csv="${night_dir}/brightness.csv"
 
 # --- 2. window-stack-sweep: RGB video -------------------------------
 if [[ "$NO_SWEEP" -eq 0 ]]; then
@@ -79,35 +75,29 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         --auto-end-stops   "$AUTO_END_STOPS"
         --force
     )
-    [[ -n "$SUBCAM" ]] && common_args+=(--subcam "$SUBCAM")
 
     # Two sweeps share the same auto-start/end window: colour for the
     # pretty side, mono for the science-leaning side. Both get the
     # BST/stops burn-in. Filename suffixes distinguish them.
     for mode in mono colour; do
-        sweep_dir="${night_dir}/${stem}sweep-${mode}"
+        sweep_dir="${night_dir}/sweep-${mode}"
         mkdir -p "$sweep_dir"
         mode_args=("${common_args[@]}" --out-dir "$sweep_dir")
-        # Mono = science view: keep the BST clock + stops burn-in.
-        # Colour = pretty view: drop the burn-in for a clean image.
         if [[ "$mode" == "colour" ]]; then
             mode_args+=(--rgb --no-label)
         fi
         echo "--- window-stack-sweep (${mode})"
         if "$HERE/window-stack-sweep" "${mode_args[@]}"; then
-            out="${night_dir}/${stem}sweep-${mode}.mp4"
+            out="${night_dir}/sweep-${mode}.mp4"
             cp "$sweep_dir/sweep.mp4" "$out"
             echo "wrote $out"
         else
             echo "window-stack-sweep (${mode}) FAILED; continuing without it"
         fi
     done
+
     # --- diff-sweep: max(frame - window_mean) mono mp4 -------------
-    # Subtracts the window mean per pixel so the pedestal, hot pixels,
-    # and cloud-glow all cancel; trails and transients stand free of
-    # the sky background. Re-uses the autodetect window cut chosen by
-    # the colour sweep above so the three videos line up.
-    diff_dir="${night_dir}/${stem}sweep-diff"
+    diff_dir="${night_dir}/sweep-diff"
     mkdir -p "$diff_dir"
     diff_args=(
         --camera "$CAMERA" --night "$NIGHT"
@@ -116,22 +106,18 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         --fps "$FPS"
         --out-dir "$diff_dir"
     )
-    [[ -n "$SUBCAM" ]] && diff_args+=(--subcam "$SUBCAM")
     echo "--- diff-sweep (mono, window-mean subtracted)"
     if "$PY" "$HERE/diff-sweep" "${diff_args[@]}"; then
-        out="${night_dir}/${stem}sweep-diff.mp4"
+        out="${night_dir}/sweep-diff.mp4"
         cp "$diff_dir/sweep.mp4" "$out"
         echo "wrote $out"
     else
         echo "diff-sweep FAILED; continuing without it"
     fi
 
-    # Calendar thumbnail: middle frame of the colour sweep — a single
-    # 10-min stack from the heart of the autodetected dark window.
-    # Truer-to-night than the all-night max.jpg (which is dominated by
-    # whichever moment was brightest).
-    colour_mp4="${night_dir}/${stem}sweep-colour.mp4"
-    thumb="${night_dir}/${stem}thumb.jpg"
+    # Calendar thumbnail: middle frame of the colour sweep.
+    colour_mp4="${night_dir}/sweep-colour.mp4"
+    thumb="${night_dir}/thumb.jpg"
     if [[ -s "$colour_mp4" ]]; then
         mid_n=$(ffprobe -v error -count_packets -select_streams v:0 \
                 -show_entries stream=nb_read_packets -of csv=p=0 \
@@ -156,30 +142,28 @@ from astro.config import CameraConfig
 from astro.present import privacy as P
 from astro.present.publish import publish_night
 cfg = CameraConfig.load("$CAMERA")
-if "$SUBCAM": cfg = cfg.subcam("$SUBCAM")
 nd = Path("$night_dir")
 names = [
-    f"${stem}summary.json",
-    f"${stem}brightness.png",
-    f"${stem}max.jpg",
-    f"${stem}derot.jpg",
-    f"${stem}thumb.jpg",
-    f"${stem}sweep-mono.mp4",
-    f"${stem}sweep-colour.mp4",
-    f"${stem}sweep-diff.mp4",
+    "summary.json",
+    "brightness.png",
+    "max.jpg",
+    "derot.jpg",
+    "thumb.jpg",
+    "sweep-mono.mp4",
+    "sweep-colour.mp4",
+    "sweep-diff.mp4",
 ]
 files = [nd/n for n in names if (nd/n).exists()]
 missing = [n for n in names if not (nd/n).exists()]
 # Videos and the thumb come out of privacy-cropped frames; mark them
 # OK so publish's privacy guard doesn't refuse them.
 if getattr(cfg, "privacy", None):
-    for n in (f"${stem}sweep-mono.mp4", f"${stem}sweep-colour.mp4",
-              f"${stem}sweep-diff.mp4", f"${stem}thumb.jpg"):
+    for n in ("sweep-mono.mp4", "sweep-colour.mp4",
+              "sweep-diff.mp4", "thumb.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
-# Sweep stale S3 keys for deliverables that no longer exist locally
-# (e.g. a previously-clear night that re-ran as cloudy with no stack).
+# Sweep stale S3 keys for deliverables that no longer exist locally.
 if missing:
     import boto3
     s3 = boto3.client("s3")
@@ -195,11 +179,7 @@ if missing:
         print(f"deleted stale s3://{bucket}/{key}")
 PYEOF
 
-# Refresh the multi-night combined brightness plot at the camera
-# prefix (one fixed key, regenerated every night so the website is
-# always current).
+# Refresh the multi-night combined brightness plot at the camera prefix.
 echo "--- combined brightness (multi-night)"
-cb_args=(--camera "$CAMERA" --publish)
-[[ -n "$SUBCAM" ]] && cb_args+=(--subcam "$SUBCAM")
-"$HERE/combined-brightness" "${cb_args[@]}" || true
+"$HERE/combined-brightness" --camera "$CAMERA" --publish || true
 echo "=== done ==="

@@ -78,7 +78,6 @@ def load_fits_binned(path: Path, rgb_pattern):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
-    ap.add_argument("--subcam", default=None)
     ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
     ap.add_argument("--sweep-start", required=True, metavar="HH:MM",
                     help="UTC")
@@ -110,14 +109,12 @@ def main() -> int:
         shape = (H, W)
     else:
         cfg = CameraConfig.load(args.camera)
-        if args.subcam:
-            cfg = cfg.subcam(args.subcam)
         rgb_pattern = None
         if args.rgb:
             rgb_pattern = bayer.pattern(cfg.get("bayer") or "")
         rotate_180 = bool(cfg.get("rotate_180"))
         windows = list_windows(sweep_start, sweep_end, window, step)
-        all_frames = list_night_frames(cfg, args.night, subcam=args.subcam)
+        all_frames = list_night_frames(cfg, args.night)
         all_frames = [(t, f) for (t, f) in all_frames
                       if sweep_start <= t < sweep_end + window]
         # discover shape from the first frame
@@ -134,9 +131,7 @@ def main() -> int:
         frames_iter = gen()
 
     if not args.synthetic:
-        cfg_rot = bool(CameraConfig.load(args.camera)
-                       .subcam(args.subcam).get("rotate_180") if args.subcam
-                       else CameraConfig.load(args.camera).get("rotate_180"))
+        cfg_rot = bool(CameraConfig.load(args.camera).get("rotate_180"))
     else:
         cfg_rot = False
 

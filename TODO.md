@@ -1,433 +1,213 @@
 # astro — TODO
 
-## Storage budget (2026-06-12)
-
-Deliverables to AWS — few MBy per day, negligible.
-
-Local capacity:
-- muppet 200G, 56G left
-- puppy 450G, 85G left
-- pip 50G emergency only
-- total 700G used / 180G left of ~900
-
-Per-night raw consumption:
-- starcam frames: 40G per night × 10 nights
-- v1 unimportant
-- v2 ~3 h per June night
-- v3w currently sampling 30s of 60s → 7G per night
-
-Easy wins: trash or sum the raw bayer images (75% of storage, ~200G saved).
-Binned-only is 200MB/h for v1 and v3w → ~4G per night.
-
-With binned-only we have storage headroom for ~100 days, then rolling
-retention: extract artifacts, delete frames.
-
-see TODO_fit.MD for matching to catalog (parked 2026-06-07; orientation
-not yet confirmed by visual side-by-side).
-
-rain detector.  suggested that 10k pull up from GPIO and tinned veroboard.  
-
-periodically review the relationship between these repos:
-astro - image processing for astronomy
-Berrylands/gardencam - raspberry pi camera routines.  might need rehoming
-super/services - asynchronous file transfer using local ramfs
-Berrylands shoud have servo sg90.  maybe generic servo stuff is super?
-generic camera super? 
-Berrylands is sprawling and I could have a focused pi repo pilib or piservices
-
-the temporal resolution of 3 second frames is probably overkill.  There's probably an order of magnetude saving in bandwidth which can be achieved.  
-there are still some breakthroughs to be had.   think how scruffy the skycam videos were for ages.  maybe a month to get smooth reliable output.  I have 1/4 TBy of data and have many stars I can pull from it.  still quite a way to go on the clouds.
-
-some more stereo video?  stereo video with one camera.
-
-
-
-info in journal for pipeline-night is better than pipeline.log
-pipeline-night could be renamed starfinder-daily or something  starcatcher
-
-
-Live work list. Move items to DECISIONS.md once they crystallise
-into a load-bearing choice; delete done items.
-
-## Roadmap (2026-06-07)
-
-Six steps from "we can detect stars" to "deliverable pipeline."
-Each item is small enough to scope on its own; the order is the
-intended dependency chain — earlier items unblock later ones.
-
-### 1. Catalog comparison vs. a third-party catalog
-
-  Compare our per-tile detection lists (detect-stars output) to a
-  real star catalog (Gaia DR3 via astroquery, or local Tycho-2 for
-  bright end). Need an approximate WCS first:
-
-  - Anchor on Vega — RA 18h36m56.336s, Dec +38°47'01.28" (J2000).
-    Vega lands at A5 centroid (15.5, 683.2) under our current pole.
-    Pick a second known bright star anywhere in the frame; the two
-    anchors give a 2-point fit for plate scale + orientation.
-  - Cross-match our centroids to Gaia entries within a few px radius.
-  - Output: per-detection (ra, dec) + cross-match to Gaia source ID.
-  - First validation: median (us − catalog) magnitude offset gives
-    photometric zeropoint; spread gives photometric error.
-
-  New tools wanted:
-    bin/wcs-from-anchors    — quick 2-anchor RA/Dec/scale/PA fit
-    bin/cross-match-gaia    — query Gaia, attach source_id + Gmag
-
-### 2. Quality measurements
-
-  Pull from each detection's already-recorded columns
-  (fwhm, ecc, tangent_sharpness, snr) and aggregate them:
-
-  - Per-tile: median FWHM, dispersion in FWHM, fraction of
-    detections passing the streak filter (ecc < threshold).
-  - Per-night: typical seeing (median FWHM across tiles), sky
-    quality (median sky_local, sky_sigma).
-  - Per-pole-fit: residuals of (detection - predicted-by-pole),
-    decomposed into tangent vs radial directions (the latter
-    indicates pole accuracy).
-
-  New tool wanted:
-    bin/quality-report      — reads detections.csv (or many), emits
-                              JSON + markdown summary
-
-### 3. Patch-based local-pole speedup
-
-  The tangent-pole fitter currently full-frame warps × 600 frames
-  per pole evaluation (~3 min per tile). Per-tile work only needs
-  small patches around the K candidate stars. Cost should drop
-  ~500× to seconds per tile.
-
-  Architecture in [[zonal-derot-strategy]] and
-  [[tracking-is-iterated-derot]]. Implementation steps:
-
-  - For each candidate, identify a small patch (40-60 px square)
-    around its predicted position under the trial pole.
-  - cv2.warpAffine on that patch only; accumulate per-candidate.
-  - Compute tangent sharpness within each patch.
-  - Sum across candidates as before.
-
-  Speed win unlocks: full-frame sweep in seconds, multi-night
-  sweeps in minutes, Pi4 viability.
-
-  New tool wanted:
-    bin/fit-tile-pole-tangent-patches  (or replace the existing
-                                         tool's inner loop)
-
-### 4. k1 compensation for whole-frame web deliverable
-
-  Apply the fitted (k1, k2) distortion model to undistort frames
-  before derot. Produces a single-pole-everywhere-works image:
-  the website-friendly "whole sky" view.
-
-  Tested against the per-tile poles → if a single-pole derot of
-  the undistorted frame matches the previous per-tile-pole stacks
-  within ~1px everywhere, the model is good.
-
-  New tools wanted:
-    bin/undistort-frame       — applies k1, k2 inversely
-    bin/render-whole-sky      — undistort → derot → JPG for the web
-
-### 5. Multi-night catalog aggregation
-
-  Once a night's detection catalog is good, aggregate across
-  multiple nights. Cross-match by (ra, dec) once WCS is in place.
-  Outputs:
-
-  - Per-star magnitude time series (variability)
-  - Per-star astrometric residuals (proper motion at low precision)
-  - Catalog completeness over nights (which stars detected when)
-
-  Storage: detections.csv per (night, tile) as raw; a SQLite
-  index at ~/astro/catalog/index.db for cross-night queries.
-
-  3 nights of starcam data already on muppet (2026-05-20,
-  2026-05-22, 2026-05-30) — first multi-night dataset.
-
-### 6. Pi 4 port
-
-  Astrocam is a Pi 4. The pipeline needs to run on-host (no
-  shipping raw frames to puppy). Required:
-
-  - Capture → derot-accumulate per tile on the Pi.
-  - Patch-based pole-fit (item 3) is the enabler — full-frame
-    warps are too slow for Pi 4 sustained rate.
-  - Local detection (detect-stars) per tile.
-  - Periodic upload of detections.csv to puppy/S3.
-
-  The cam-bench/derot-bench results already confirm Pi 4
-  CPU is sufficient for capture + bin2 + fits.fz at any sane
-  cadence. The remaining blocker is item 3.
-
----
-
-storage comments:
-moved 2026-05-20 to muppet
-moving 2026-05-22 
-still 100G free there, will need to do the experiment: can we derive stars from 6s fits - or 12s?  can we finish a pipeline and get just the deliverables?  
-pip has 100G.  we are, with care going to make it to the break in the weather Thursday night lasting at least 1 week.  just 2 more nights.  going to make it!
-
-**WATCH ~/.trash — it warps the free-space picture.** Trashed data
-still occupies disk until the GC sweeps it; `df` "Avail" only tells
-the truth once trash is accounted for. I emptied ~/.trash recently,
-so the current reading is real: pip 121G free, trash empty (2026-05-28).
-Always check `du -sh ~/.trash` alongside `df -h ~` before judging headroom.
-
-need the real catalog to do magnetude estimates.
-
-fitz 5G per hour 30G per night, bin2 1.4G/10G 6 or 7 hours currently  total 40G.  bin2 is derived.
-100 avalible - 100 on muppet too  100 on pip.  the old desktop
-fitz thinning 3s -> 6s
-delete fitz for every other night - ones which are "done".  I have a week to sort it all.  2 weeks at 6s and so on.
-
-## Foundations
-aliases    cdd - chdir to day dir - part of astro/activate.  splay is broken by latter.  maybe $CDD=that dir
-
-dashboard - camera state, brightness trend, storage, stars found
-
-brightness.csv generated for wrong hour on hourly trigger - revise whole real time analysis pipeline
-bin-frames should be part of the same pipeline .  step by step automate it all until its all stars
-oiiotool looks interesting.  siril is hidious.  splay is capable of doing it better.
-- [ ] `notes/tooling.md` — install commands + cheat-sheet for solve-field, oiiotool, djv. (Siril dropped — splay is better.)
-- [ ] `notes/pi4-feasibility.md` — can a £35 Pi4 do FITS + plate solve + derot? RAM/CPU budget. Estimate vs £45 model.
-
-## Utilities (bin/, no astro- prefix)
-
-- [ ] `platesolve` — wraps `solve-field` with our defaults; writes SIP into header. (Decision pending — Peter prefers parametric fit over catalog; revisit if we want magnitudes.)
-
-## Pipeline
-
-- [ ] Hot-pixel mask v2 from derot stack — real stars are points, hot pixels trace arcs. Far more selective than thresholding the raw sum (which currently misclassifies bright stars).
-- [ ] Dark master per (gain, exposure) — capture procedure documented; subtraction step in `to-fits` or a separate `subtract-dark`?
-- [ ] Cloud / sky-quality flag per frame — `notes/sky-quality.md`. Std-dev signal, mean/median ratio, centre-vs-edge. (Partial: scan-brightness mean already used for sky-threshold gating in pipeline-night.)
-- [ ] Compress retention plan — keep raws for N days, FITS for M, accumulators forever.
-
-## Aspirational (cameras)
-
-- [ ] Decide camera identifier convention (`back`, `front`, `sky`, `experimental`). Reflect in path layout: `~/<cam>-frames/night/<night-dir>/HH/`.
-- [ ] Per-camera config: gain, exposure, lens, sensor, Bayer pattern.
-
-## Accurate per-frame timing
-
-**Current state (2026-05-25):** filename epoch_ms is **noisier than
-the actual sensor cadence** because the daemon stamps with
-`time.time_ns()` *after* the Python loop receives the frame — that
-stamp jitters ±100 ms (measured stddev 103 ms over 1199 intervals).
-Sensor itself is rock-steady at the requested cadence. So:
-
-- Fitters (fit-pole, fit-geometry) keep using `frame_index × 3 s` —
-  that's *more* accurate than the recorded timestamps.
-- derot-night uses `(epoch_ms - epoch_0)` from filenames; affects
-  it less because the jitter is unbiased and we're summing many
-  frames at each pixel.
-
-**Fix in flight (2026-05-25):** changed
-`Berrylands/gardencam/starcam_night_daemon.py` to use libcamera's
-`SensorTimestamp` (CLOCK_BOOTTIME ns, set at exposure end) instead
-of wall-clock `time.time_ns()`. Converted to wall-clock epoch via
-one-time offset captured at process start. Frames captured AFTER
-this fix is deployed should have ms-accurate, jitter-free
-filenames.
-
-**Verified 2026-05-31:** measured on 2026-05-30/01 (1025 intervals,
-1008 within ±50 ms after trimming sat-skip gaps): mean 2999.6 ms,
-**std 0.49 ms** — down from 103 ms pre-fix. Min 2999, max 3000.
-
-- [ ] Switch fitters to use real epoch_ms (cumulative drift
-      ~0.14 px at 300 frames would vanish).
-
-**Rolling shutter:** OV5647 readout time is 66.7 ms top-to-bottom,
-NOT exposure time. So row-to-row sample-time difference is half
-that — ~33 ms. At sidereal rate, sub-pixel even at corners of our
-binned image. Skip the per-row correction; it's below INTER_LINEAR
-precision.
-
-## Day-mode sky-mask process (deferred until rain sensor + 2nd camera)
-
-A daily noon cycle on each camera that derives a fresh sky mask
-from blue-sky daytime frames. NOT interleaved with night capture
-— a standalone day-mode process.
-
-Cycle (oneshot wrapper, e.g. `sky-mask-cycle.sh` on starcam):
-  1. Check rain sensor. **Abort if wet** (don't expose the lens).
-  2. Stop day-mode capture (whatever's running for skycam etc.).
-  3. Cover OPEN (servo to +60°).
-  4. Grab N daytime frames at low exposure/gain.
-  5. Process with chromakey (against blue-sky colour) AND
-     brightness key (dark = foreground). Combine: anything failing
-     either test is masked.
-  6. Cover CLOSED (back to -60°, weather-safe).
-  7. Restart day-mode capture.
-  8. Output: ~/astro/calib/sky-mask-<camera>-<YYYY-MM-DD>.fits.fz
-
-Cadence: daily noon if dry. Catches slow foreground changes
-(tree growth) and camera-position drift without manual
-intervention. Mask filename is dated so pipeline-night's
-auto-pick logic uses the most-recent-≤-night.
-
-Round-trip with existing cover timers:
-- 07:00  cover-close.timer → cover closed all morning
-- 12:00  sky-mask-cycle (if dry) → briefly open, mask, close
-- 12:00..20:30  cover closed (weather + sun protection)
-- 20:30  cover-open.timer → open for night capture
-- 21:00  starcam-capture night window begins
-
-Pre-reqs:
-- Rain sensor on starcam (GPIO input).
-- bin/auto-sky-mask (exists) needs chromakey added; currently
-  only does brightness threshold (mean − k·std). Blue-sky
-  chromakey would catch white house bricks that brightness
-  thresholding alone misses.
-- Per-camera: 2nd camera (south-facing, arriving soon) gets its
-  own sky-mask-cycle on its own host with its own --camera id.
-
-## Seasonal note (2026-05-25)
-
-- 4 weeks to summer solstice (2026-06-21).
-- At 51.4°N, **astronomical twilight doesn't end** around the
-  solstice — the sun stays within 18° of the horizon all night.
-- Effect on this pipeline:
-  - Mean per-hour sky brightness rises through June.
-  - sky-threshold gate (default 100 ADU) will skip more hours
-    each night, eventually skipping the whole night by mid-June.
-  - Cumulative stars detected per night will fall, then recover
-    after solstice.
-- Don't read "we're losing stars" as a regression — it's the sun.
-- Maybe expose `--sky-threshold` more prominently or vary it
-  seasonally if we want to keep pulling whatever signal we can.
-
-## Transparent/diffuse cover → starcam self-sufficient for brightness (idea, 2026-05-28)
-
-**Goal: make starcam independent of skycam for brightness
-measurement while the cover is closed.** Today the cover is opaque
-white, so with it closed starcam is blind and we must lean on skycam
-for the dusk/darkness brightness signal. Replace the opaque cover
-with a **transparent (possibly diffuse) cover** so that closed
-starcam still reads total downwelling sky flux — an integrated
-brightness measure of its own, no skycam dependency.
-
-A diffuse-transparent cover acts as a white screen that passes light:
-starcam sees the integrated sky flux that bounces/transmits through
-the cover. That removes the [[project-cover-brightness-calibration]]
-coupling where the close/open decision relies on skycam — starcam
-can drive its own cover from its own closed-cover reading.
-
-Value of the diffuse path isn't sharper discrimination — diffuse
-transmission smears out the spatial cloud structure the open view
-shows directly — but it's a robust, structureless integrated-flux
-baseline: no saturation from a bright star/moon/streetlight in
-frame, no AE chasing a hot spot. Still useful to difference against
-the open/skycam views for **cloudy vs. clear** at dusk (cloudy dusk
-is brighter and decays slower than clear at the same solar
-depression).
-
-First sample (2026-05-28, daytime): AE pinned shutter to 1/100 s,
-ISO 155, mean 223/255 (near saturation). So the raw mean is useless
-while AE is running — need either fixed exposure/gain capture, or
-back out AE via `mean / (exposure × gain)`.
-
-Open questions / risks:
-- **Transparency vs. how much light to let in.** A transparent cover
-  reads dusk well but admits more daylight — pick the diffuse/tint
-  level so closed starcam stays unsaturated by day yet sees enough at
-  low sky brightness. The angle-dependent-opacity idea below is the
-  refinement that squares this circle.
-- **Direct-sunlight concern is cumulative degradation, not
-  burnout.** No focusing optics: the wide OV5647 lens (53.5°×41.4°,
-  f=3.6 mm) spreads the 0.5° solar disc over a few pixels, not a
-  focused point, so catastrophic sensor death is unlikely. The real,
-  documented OV5647 failure mode is **thermal**: repeated direct sun
-  raises dark current and burns in hot pixels / a faint spot where
-  the sun tracks — exactly what hurts an astronomy sensor's dark
-  frames. Mitigation: never leave the cover open across the sun's
-  daytime arc (existing timers already keep it closed 07:00–20:30).
-  The **angle-dependent-opacity cover** idea targets this directly:
-  opaque toward the daytime solar arc, more translucent toward the
-  zenith / low-sun dusk directions — lets dusk light in without
-  exposing the sensor to midday sun, so the closed window can relax.
-- Empirical test still owed: log AE-corrected closed-cover flux
-  through one clear and one cloudy dusk and see if the curves
-  separate. Check what `cover-watch` already logs first.
-
-**Today's coupling (to be removed by the transparent cover).** The
-brightness *decision* already runs on starcam (cover-controller,
-cover-watch, cover-open-when-dark all live and execute there), so the
-*logic* is in the right place. But the *data* it reads —
-`~/skycam-frames/` — is an NFS mount from puppy, so starcam still
-depends on puppy + the network path for every brightness read. That's
-the coupling that broke on 2026-05-27 when puppy's IP changed (see
-[[project-puppy-starcam-ethernet-migration]]). With a transparent
-cover, starcam reads downwelling flux through its own closed cover
-and the skycam-NFS dependency drops entirely — logic AND data become
-local to starcam, and the cross-host fragility goes away.
-
-## Wandering-star (planet) discriminator — Tombaugh blink
-
-After two nights have a sharp per-night `final/derot.fits.fz` at
-identical pole + distortion, **subtract** them. Stars cancel
-(same pixel). Planets, asteroids, comets leave a `+star` at
-tonight's pixel and a `-star` at last night's pixel: classic
-blink-comparator signature.
-
-Implementation sketch:
-- `derot-diff <night-A> <night-B>` → writes
-  `<B>/diff-vs-<A>.fits.fz` (signed int32 = B - A).
-- Optional `--abs` for absolute-value variant where moving
-  objects appear as paired-bright-blob signatures.
-- `find-candidates` on the abs-diff stack with high threshold:
-  the only pixels above sky-noise floor are planet
-  positions (or hot pixels we didn't catch, or cosmic rays).
-- For Neptune/Uranus specifically: compute predicted nightly
-  motion from JPL Horizons ephemeris, derotate-stack the diff
-  along that motion vector across many nights — moving-object
-  SNR √N improvement, all sky cancels.
-
-Uranus (mag +5.6, Nov opposition 2026-11-21): per-night derot
-should already show it; diff-vs-yesterday should make it
-unmistakable. Neptune (mag +7.8) needs both stacking AND diff.
-
-## Neptune in November (target)
-
-- Neptune opposition: late Sep / early Oct 2026; observable through
-  Nov with peak brightness ~mag +7.8 (point source for our pixel
-  scale ~70 arcsec/binned-px).
-- Estimated SNR budget: ~28 hours of derotated stacking (~4
-  good nights × ~7 dark hours) gets us 5–6× our current single-
-  hour SNR — enough to pull mag +7.8 from sky background.
-- Requirements:
-  1. Per-night `final/derot.fits.fz` must be sharp (good pole +
-     distortion fit). Residual smear squared compounds across
-     nights.
-  2. Multi-night derot stacker (`derot-week`-style) that derotates
-     using `omega × (epoch_ms - epoch_0)` across nights.
-  3. Planet-aware motion model: Neptune drifts ~1 arcmin/day
-     against the star background. After sidereal derotation the
-     planet smears. Either compute its ephemeris (real
-     ra/dec known from JPL Horizons) and apply per-night
-     position correction, or detect the moving spot directly.
-  4. Camera survives the winter (warm + dry; cover working).
-
-## Multi-night stacking (deferred — let the per-night pipeline mature first)
-
-- [ ] `derot-week` — extension of `derot-night` that walks multiple
-      night dirs, derotates by `omega × (epoch_ms - epoch_0) / 3000`
-      so frames from different nights stack onto a common rotated
-      reference. Stars near the pole stack perfectly; stars away
-      from the pole accumulate only when above the horizon.
-- [ ] **Lens distortion dominates atmospheric refraction** — when
-      we start pulling refraction signal out of multi-night stacks
-      it'll be a big deal, but first the per-frame distortion model
-      (k1, k2 from `fit-geometry`) needs to be solidly fitting. The
-      residual after a good distortion fit will be where we look
-      for refraction effects.
-- [ ] **Camera position drifts sometimes, possibly with
-      temperature.** Within one night the pole moves <30 binned px
-      (see pipeline-poles.csv across hours). Between nights it can
-      jump (we've seen ~50 px shifts after physical repositioning).
-      Multi-night stacks need a per-night pole, not a global one.
-      A `fit-pole-multinight` would estimate per-night pole + a
-      single shared distortion (k1, k2 are sensor properties).
-
-## Disposable scratch
-
-- Old per-`/tmp/` scripts (streak_window.py, streak_clean.py, streak_lum.py, run_streaks.sh) — port the useful patterns into `bin/` if needed, don't ressurrect the originals. They were /tmp violations; lesson logged.
+Live work list. Move items to DECISIONS.md once they crystallise into
+load-bearing choices; delete done items. The four `TODO_*.md` fragments
+were folded in here on 2026-06-16.
+
+## Now
+
+- [ ] **Merge `unify-cameras` → `main`** and delete the branch (per
+      DECISIONS.md 2026-06-16). Tag the merge commit.
+- [x] **Split eclipticam into `eclipticam-v1` and `eclipticam-v3w`**
+      (2026-06-16). `--subcam` flag removed from all 10 CLIs;
+      `subcam()` removed from `astro.config`; `list_night_frames`
+      no longer takes `subcam=`; `entry_for(cfg)` one-arg;
+      `services/publish-eclipticam-run.sh` iterates the two new
+      camera names. `night_layout: "percam"` on both new configs
+      is **transitional** — see next item.
+- [ ] **Migrate eclipticam capture writers to canonical layout.**
+      Today `eclipticam/capture.py` (v1) and `eclipticam/v3w_uploader.py`
+      (v3w) still write `~/eclipticam-frames/night/<date>/<v1|v3w>/HH/...`
+      with `<epoch_ms>.fits.fz` / `NNNN.jpg` basenames. Target is
+      `~/eclipticam-frames/YYYY/MM/DD/eclipticam-<v1|v3w>/{day,night}/HH/HH-MM-SS.fits.fz`.
+      Once migrated, flip both `eclipticam-v{1,3w}/camera.json` to
+      `night_layout: "canonical"` and rsync legacy data into the
+      new tree (or accept legacy paths via the `percam` reader for
+      the backlog).
+- [ ] **Retire v3w uploader's brightness-CSV drain.** Streaming
+      already writes canonical brightness.csv direct to NFS;
+      `_drain_brightness()` accumulates a redundant legacy copy.
+- [ ] **Delete legacy starcam pipeline** (per DECISIONS.md 2026-06-16).
+- [ ] **Re-derive astrocam pole/orientation from a clear night** — the
+      camera fell during a previous night and was refit by hand
+      (2026-06-14). Pointing may have shifted.
+
+## Four-stage migration (per DECISIONS.md 2026-06-16)
+
+The migration is incremental — each stage ships on its own. Suggested
+order, easiest dependency-wise first:
+
+1. [ ] **Define the state-record schema** and ship `astro.state` as a
+      module (read/write API only, no daemon yet). One JSON file at
+      `~/.local/state/astro/state.json` per host. Schema:
+      `{cameras: {<name>: {mode, last_transition_utc, current_night,
+      pending_process_for}}, hosts: {<name>: {disk_free, ...}}}`.
+2. [ ] **`bin/astro-state` daemon.** Reads `location.json` per camera,
+      computes sun altitude, writes mode transitions. Replaces the
+      day/night logic currently inline in `eclipticam/capture.py` and
+      `astrocam/capture.py`.
+3. [ ] **`bin/astro-process` daemon.** Watches the state record;
+      runs the existing `nightly-cam` + `publish-night-cam` flow on
+      dusk-end / dawn-end transitions. Old timers retired
+      camera-by-camera as each migrates. `nightly-cam` and
+      `publish-night-cam` become thin shims into `astro.process`.
+4. [ ] **`bin/astro-capture` daemon.** Generic `picamera2` loop driven
+      by `camera.json` modes (see `notes/capture-unification.md`).
+      Migrate astrocam first (no production publish to disturb), then
+      eclipticam v3w, then v1. Each camera's existing daemon stays
+      running until the new one shows a clean week.
+5. [ ] **`bin/astro-storage` timer.** Weekly squash / cold-archive /
+      retention. Inputs: state record (disk pressure flag), per-night
+      age. Outputs: state-record updates + log of what moved.
+
+Cross-cutting:
+- [ ] **`host.json` per Pi/NFS host** — cameras on this host,
+      cross-camera rules. Schema in `notes/capture-unification.md`.
+      Today the per-host camera lists are duplicated in env files at
+      `services/astro-<stage>.env.<hostname>`; host.json will replace
+      them.
+- [ ] **Deploy `astro-state.service` and `astro-process.service`** on
+      eclipticam, astrocam, and (for any camera with
+      `processing.host != "self"`) puppy/muppet. Copy the matching
+      `services/astro-<stage>.env.<hostname>` to
+      `/etc/default/astro-<stage>`. Disable the old
+      `publish-{astrocam,eclipticam}.timer` on the same hosts at
+      enable-time (stage 3 supersedes them).
+- [ ] **Retire `publish-{astrocam,eclipticam}.{timer,service}` and
+      their `-run.sh` wrappers** once stage 3 has run cleanly for a
+      week. Today's deliverables flow doesn't change — stage 3
+      shells the same `bin/publish-night-cam` — only the trigger
+      moves from cron-like to event-driven.
+- [ ] **Migrate to canonical storage layout** (per DECISIONS.md
+      2026-06-16; full plan in `notes/storage-layout.md`). Per night,
+      per camera: rsync from `~/<camera>-frames/{day,night}/<date>/...`
+      into `~/astro-frames/YYYY/MM/DD/<camera>/{day,night}/HH/...`.
+      Backfill `brightness.csv` from frame headers where missing.
+      `astro.frames` keeps a legacy reader until migration completes.
+- [ ] **`astro.frames.sort_hours_for_night(hours)`** helper —
+      one place every reader sorts hour dirs by `(hour - 12) % 24`.
+- [ ] **Split eclipticam `subcams` into two camera dirs**:
+      `eclipticam-v1/`, `eclipticam-v3w/`. Drop `--subcam` flag from
+      `bin/{nightly-cam,publish-night-cam,window-stack,window-stack-sweep,
+      sum-sweep,diff-sweep,cands,fit-k1,fit-tile-pole-fast,
+      combined-brightness}`. Drop `subcam()` from `astro.config`;
+      simplify `astro.frames.list_night_frames` (percam no longer needs
+      a subcam arg); update `astro.present.privacy` lookup.
+- [ ] **Delete legacy starcam pipeline** (per DECISIONS.md 2026-06-16).
+      One commit; checklist in that decision.
+- [ ] **Re-derive astrocam pole/orientation from a clear night** — the
+      camera fell during a previous night and was refit by hand
+      (2026-06-14). Pointing may have shifted.
+
+## Capture-side improvements
+
+- [ ] **astrocam → ramdisk + async workers.** Measured 11.73 s mean
+      cadence (8 × 1.2 s coadd + 2.1 s FITS write + starfind) at 82%
+      duty cycle. Move writes to `/dev/shm`, push bin / starfind /
+      FITS encode / badpix off the capture loop. Target <200 ms
+      per-frame overhead so we hit the camera's natural ~9.6 s cadence.
+      Use the `super/bin/` async-file-transfer queue pattern.
+- [ ] **astrocam → `astro.capture.streaming`.** First user of the
+      shared module beyond eclipticam v3w. Template:
+      `eclipticam/v3w_night_daemon.py`. Will reveal what's accidentally
+      specific to v3w. Plan: `notes/capture-unification.md`.
+- [ ] **Move processing to the eclipticam Pi** as much as possible
+      (brightness, binning, 10-min window accumulation) so puppy only
+      stores derived products.
+- [ ] **eclipticam-v1 as a dedicated sun camera** — fixed filter, day
+      mode only. Capture schema in `notes/capture-unification.md`
+      already covers a `sun` mode.
+
+## Deliverables (website)
+
+- [ ] **Per-day calendar view for eclipticam** on the website, mirroring
+      the starcam calendar. Each day shows the colour sweep MP4 (story
+      of the night) and the brightness curve.
+- [ ] **Backfill existing eclipticam nights** through the unified
+      pipeline so the calendar has history.
+- [ ] **Dawn-to-dusk derot animation** — start with a 10-min window
+      derot stack centred on the darkest part of the night; feather
+      the window width smoothly out to full-night and back; move the
+      window start from dusk to dawn. ~60 s video at 60 fps. Probably
+      needs barrel-distortion correction more than precise pole
+      finding.
+- [ ] **`.cands.json` sidecar layout** — done (commit 867e610: moved
+      from `HH/*.cands.json` siblings to `HH/cands/*.json`). Keep
+      backwards-compat reader for old nights for now; remove when
+      no live consumer relies on it.
+
+## Pipeline foundations
+
+- [ ] **Barrel-distortion correction** as a published `bin/undistort-frame`
+      step before derot for the whole-frame deliverable. `bin/fit-k1`
+      already sweeps k1 and scores derot peakiness; productionise.
+- [ ] **Hot-pixel mask v2** from the derot stack — real stars are
+      points, hot pixels trace arcs. More selective than thresholding
+      the raw sum.
+- [ ] **Dark master per (sensor, gain, exposure)** — capture procedure
+      + apply step. Hook into `astro.process.badpix` or a new
+      `astro.process.dark`.
+- [ ] **Cloud / sky-quality flag per frame** beyond the existing
+      darkest-band gating. Std-dev signal, mean/median ratio,
+      centre-vs-edge.
+- [ ] **Day-mode sky-mask process** (deferred until rain sensor is
+      installed). Daily noon cycle: rain check → cover open → grab
+      frames → chromakey + brightness key → cover closed → mask
+      written to `~/astro/calib/sky-mask-<camera>-<YYYY-MM-DD>.fits.fz`.
+      Pre-reqs: rain sensor on the camera Pi; `bin/auto-sky-mask`
+      needs chromakey added (currently brightness-threshold only).
+
+## Cold archive (starcam)
+
+- [ ] **Squashed-vs-raw scientific equivalence experiment** — three
+      ground-truth nights identified in `COLD_STORAGE.md`
+      (2026-05-23 darkest, 2026-05-24 bright reference, 2026-06-04).
+      Define acceptance delta for derot stacks, brightness curves,
+      detection counts. Not on the critical path; do when there's
+      slack.
+- [ ] **Finish per-night cold archival** — see `whereisallthedata.csv`
+      for the inventory across hosts and tiers.
+
+## Multi-night / catalog (parked)
+
+The Gaia catalog-match exploration is parked — full design and what
+worked / didn't is in `TODO_fit.MD` (deleted on 2026-06-16; available
+in git history at commit before the legacy-pipeline deletion). Resume
+points if revived:
+
+1. Multi-anchor WCS fit (Polaris + 3–4 Big Dipper stars) to constrain
+   (pole_x, pole_y, plate_scale, rotation, k1, k2) jointly.
+2. Per-tile WCS instead of global — local distortion is small.
+3. Visual side-by-side confirmation of identifications before
+   committing to a model.
+
+Multi-night stacking (`derot-week`) deferred until per-night pipeline
+matures. Notes: `notes/per-tile-effective-pole.md`,
+`notes/tracking-is-iterated-derot.md`, `notes/zonal-derot-strategy.md`.
+
+## Targets
+
+- **Neptune (mag +7.8), Nov 2026.** Late Sep / early Oct opposition;
+  observable through November. Estimated ~28 h of derotated stacking
+  (~4 dark nights × ~7 h) for 5–6× current single-hour SNR. Needs
+  sharp per-night `final/derot.fits.fz` and a planet-aware motion
+  model (Neptune drifts ~1 arcmin/day vs. sidereal). Camera also
+  needs to survive winter (warm + dry; cover working).
+- **Uranus (mag +5.6), Nov 2026 opposition.** Should appear in
+  per-night derot already; blink-comparator diff vs. previous night
+  should be unmistakable.
+- **Wandering-star (planet) blink discriminator** — subtract two
+  per-night derot.fits.fz at identical pole + distortion. Stars
+  cancel; planets / asteroids / comets leave a ±star signature at
+  tonight's and yesterday's pixel. Sketch: `derot-diff <A> <B>` →
+  `<B>/diff-vs-<A>.fits.fz`.
+
+## Repo housekeeping
+
+- [ ] Periodically review the boundary between this repo,
+      `Berrylands/gardencam` (Pi capture, gradually emptying as
+      `astro.capture` absorbs daemons), and `super/services`
+      (async file transfer queue). The `pilib` / `piservices`
+      focused-Pi repo idea is still open.
+- [ ] Decide whether `astrocam-capture.service` moves out of `astro/`
+      into ansible once `astro.capture` takes over.

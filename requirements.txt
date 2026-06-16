@@ -10,3 +10,4 @@ watchdog
 rawpy
 photutils
 gpiozero
+ephem

@@ -10,7 +10,7 @@ Designed for sliding-window video sweeps where the same window
 machinery runs hundreds of times and only the JPEG output matters.
 
 Usage:
-    window-stack --camera eclipticam --subcam v3w \\
+    window-stack --camera eclipticam-v3w \\
                  --night 2026-06-09 \\
                  --window-start 23:00 --window-end 23:10 \\
                  --out ~/tmp/v3w-video/frames/frame_0000.jpg
@@ -112,7 +112,6 @@ def stack_window(frames, raw_shape, rgb_pattern=None, subtract_bg=False):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
-    ap.add_argument("--subcam", default=None)
     ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
     ap.add_argument("--window-start", required=True, metavar="HH:MM",
                     help="UTC, inclusive")
@@ -136,13 +135,11 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = CameraConfig.load(args.camera)
-    if args.subcam:
-        cfg = cfg.subcam(args.subcam)
 
     w_start = parse_hhmm_to_utc(args.night, args.window_start)
     w_end = parse_hhmm_to_utc(args.night, args.window_end)
 
-    all_frames = list_night_frames(cfg, args.night, subcam=args.subcam)
+    all_frames = list_night_frames(cfg, args.night)
     frames = [(t, f) for (t, f) in all_frames if w_start <= t < w_end]
     if not frames:
         print(f"no frames in [{w_start}, {w_end})", file=sys.stderr)
@@ -158,7 +155,7 @@ def main() -> int:
     max_img = stack_window(frames, raw_shape, rgb_pattern=rgb_pattern,
                            subtract_bg=args.subtract_bg)
 
-    spec = privacy_mod.entry_for(cfg, args.subcam)
+    spec = privacy_mod.entry_for(cfg)
     out_img = privacy_mod.crop_for_publication(max_img, spec)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

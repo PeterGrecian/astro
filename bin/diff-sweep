@@ -100,7 +100,6 @@ def close_window(idx, w_start, w_end, recent, rgb_pattern,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
-    ap.add_argument("--subcam", default=None)
     ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
     ap.add_argument("--sweep-start", required=True, metavar="HH:MM")
     ap.add_argument("--sweep-end", required=True, metavar="HH:MM")
@@ -128,13 +127,11 @@ def main() -> int:
         rgb_pattern = None
     else:
         cfg = CameraConfig.load(args.camera)
-        if args.subcam:
-            cfg = cfg.subcam(args.subcam)
         rgb_pattern = None
         if args.rgb:
             rgb_pattern = bayer.pattern(cfg.get("bayer") or "")
         rotate_180 = bool(cfg.get("rotate_180"))
-        all_frames = list_night_frames(cfg, args.night, subcam=args.subcam)
+        all_frames = list_night_frames(cfg, args.night)
         all_frames = [(t, f) for (t, f) in all_frames
                       if sweep_start <= t < sweep_end + window]
         if not all_frames:

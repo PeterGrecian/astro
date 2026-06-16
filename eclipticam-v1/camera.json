@@ -1,0 +1,22 @@
+{
+  "name": "eclipticam-v1",
+  "host": "eclipticam",
+  "sensor": "OV5647",
+  "bayer": "SGBRG10",
+  "resolution": [2592, 1944],
+  "pedestal": 10180,
+  "pedestal_notes": "Sensor black level in libcamera's 16-bit container — measured 2026-06-12 as the minimum mean of all deep-night (00:00-03:00 UTC) frames across 1 night of v1 data. Use as fixed zero point so 'stops above pedestal' is comparable across nights.",
+  "plate_scale_deg_px": 0.0206,
+  "plate_scale_notes": "OV5647 stock lens, 53.50 deg horizontal / 2592 px (official RPi figure).",
+  "max_single_exposure_us": 3066985,
+  "max_single_exposure_notes": "picamera2 video-config ceiling ~3.07 s; longer integrations must use the streaming coadd path.",
+  "frames_root": "~/eclipticam-frames",
+  "night_layout": "percam",
+  "night_layout_notes": "TRANSITIONAL: live eclipticam/capture.py still writes to night/<night>/v1/HH/NNNN.fits.fz and day/<date>/v1/HH/NNNN.jpg. The post-split camera name 'eclipticam-v1' resolves the legacy 'v1' subcam via the percam reader. Once capture is migrated, flip to 'canonical' (per DECISIONS.md 2026-06-16).",
+  "processing": {"host": "self"},
+  "s3": {"bucket": "astro-berrylands-eu-west-1", "prefix": "eclipticam-v1/nights"},
+  "quality_file": null,
+  "location_file": "location.json",
+  "privacy_file": null,
+  "occlusion_file": null
+}

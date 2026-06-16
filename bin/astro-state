@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""astro-state — stage 1 daemon.
+
+Continuous loop that re-decides each camera's mode every tick from
+brightness.csv + sun altitude, writing state.json under the night dir.
+
+Production: runs as `astro-state.service` per host, no CLI args needed
+beyond what the host's config provides. The flags below are dev/test
+overrides.
+
+Config sources, in precedence order:
+  1. CLI flags (dev/test only)
+  2. host.json on the running host (future — not yet wired)
+  3. Each camera's camera.json["state"] block
+  4. astro.state.DEFAULTS
+
+Hysteresis: a candidate mode different from the committed mode must
+persist for `hold_ticks` consecutive ticks before being committed.
+"""
+from __future__ import annotations
+
+import argparse
+import signal
+import socket
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from astro.config import CameraConfig
+from astro.state import decide, load_state, write_state, DEFAULTS
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", action="append", required=True,
+                    help="Camera name (repeatable). Each gets its own state.json.")
+    ap.add_argument("--tick", type=float, default=30.0,
+                    help="Seconds between decisions (default 30).")
+    ap.add_argument("--once", action="store_true",
+                    help="Decide once and exit (testing).")
+    ap.add_argument("--host", default=socket.gethostname(),
+                    help="Host name to record in state.json (default: this host).")
+    return ap.parse_args()
+
+
+class CameraLoop:
+    """Per-camera hysteresis state, kept in memory."""
+    def __init__(self, name: str, host: str):
+        self.name = name
+        self.host = host
+        self.cfg = CameraConfig.load(name)
+        self.cfg_state = self.cfg.get("state")  # optional override block
+        self.location = self.cfg.location       # may be None
+        self.frames_root = self.cfg.frames_root
+        self.candidate_mode: str | None = None
+        self.candidate_streak = 0
+        self.committed: object | None = load_state(self.frames_root, name)
+        self.hold_ticks = (self.cfg_state or {}).get(
+            "hold_ticks", DEFAULTS["hold_ticks"])
+
+    def tick(self):
+        candidate = decide(
+            camera=self.name, host=self.host,
+            cfg_state=self.cfg_state, location=self.location,
+            frames_root=self.frames_root, previous=self.committed)
+        committed_mode = self.committed.mode if self.committed else None
+
+        if candidate.mode == committed_mode:
+            # No change; just refresh written_at_utc and degraded_reasons.
+            self.candidate_mode = None
+            self.candidate_streak = 0
+            self.committed = candidate
+            write_state(self.frames_root, candidate)
+            return
+
+        # Mode disagrees with committed.
+        if candidate.mode == self.candidate_mode:
+            self.candidate_streak += 1
+        else:
+            self.candidate_mode = candidate.mode
+            self.candidate_streak = 1
+
+        if self.candidate_streak >= self.hold_ticks or committed_mode is None:
+            # Commit the transition.
+            self.committed = candidate
+            self.candidate_mode = None
+            self.candidate_streak = 0
+            write_state(self.frames_root, candidate)
+            print(f"[{self.name}] transition -> {candidate.mode} "
+                  f"(source={candidate.decision_source})", flush=True)
+        else:
+            # Don't commit yet; keep the previous state on disk untouched.
+            print(f"[{self.name}] candidate={candidate.mode} "
+                  f"streak={self.candidate_streak}/{self.hold_ticks}", flush=True)
+
+
+def main():
+    args = parse_args()
+    loops = [CameraLoop(name, args.host) for name in args.camera]
+
+    stop = False
+    def handle(signum, _frame):
+        nonlocal stop
+        stop = True
+        print(f"signal {signum}: shutting down", flush=True)
+    signal.signal(signal.SIGTERM, handle)
+    signal.signal(signal.SIGINT, handle)
+
+    while not stop:
+        for loop in loops:
+            try:
+                loop.tick()
+            except Exception as e:
+                print(f"[{loop.name}] ERROR: {e}", flush=True)
+        if args.once:
+            return
+        time.sleep(args.tick)
+
+
+if __name__ == "__main__":
+    main()

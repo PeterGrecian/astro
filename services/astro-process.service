@@ -1,0 +1,25 @@
+[Unit]
+Description=astro stage 3 — twice-daily deliverables dispatcher
+# astro-process watches state.json on NFS and shells publish-night-cam
+# when stage 1 flips pending_process flags. NFS dependency is hard:
+# the deliverables pipeline reads frames from NFS too.
+After=network-online.target astro-state.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+WorkingDirectory=/home/peter
+# Per-host config: cameras this host is responsible for processing.
+# Drop a one-line file at /etc/default/astro-process with e.g.
+#     CAMERAS="--camera eclipticam-v1 --camera eclipticam-v3w"
+EnvironmentFile=-/etc/default/astro-process
+ExecStart=/home/peter/astro/.venv/bin/python /home/peter/astro/bin/astro-process $CAMERAS --tick 60
+Restart=always
+RestartSec=10
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

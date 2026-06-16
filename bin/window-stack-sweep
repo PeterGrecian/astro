@@ -7,7 +7,7 @@
 # 60fps mp4 with ffmpeg.
 #
 # Usage:
-#     window-stack-sweep --camera eclipticam --subcam v3w \
+#     window-stack-sweep --camera eclipticam-v3w \
 #         --night 2026-06-09 \
 #         --sweep-start 23:00 --sweep-end 04:00 \
 #         --window-min 10 --step-min 1 \
@@ -18,7 +18,7 @@
 # Already-rendered frames are skipped unless --force is given.
 set -euo pipefail
 
-CAMERA=""; SUBCAM=""; NIGHT=""; SWEEP_START=""; SWEEP_END=""
+CAMERA=""; NIGHT=""; SWEEP_START=""; SWEEP_END=""
 WINDOW_MIN=10; STEP_MIN=1; OUT_DIR=""; FPS=60; JOBS=8
 NO_MP4=0; FORCE=0; BRIGHTNESS_CSV=""; STAGGER_S=0
 LABEL_TZ="Europe/London"; RGB=0
@@ -27,7 +27,6 @@ AUTO_START_STOPS=""; AUTO_END_STOPS=""; NO_LABEL=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --camera)       CAMERA="$2";       shift 2;;
-        --subcam)       SUBCAM="$2";       shift 2;;
         --night)        NIGHT="$2";        shift 2;;
         --sweep-start)  SWEEP_START="$2";  shift 2;;
         --sweep-end)    SWEEP_END="$2";    shift 2;;
@@ -95,8 +94,6 @@ import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath("$0"))))
 from astro.config import CameraConfig as _CC
 _cfg = _CC.load("$CAMERA")
-if "$SUBCAM":
-    _cfg = _cfg.subcam("$SUBCAM")
 fixed_pedestal = _cfg.get("pedestal")
 
 # Load brightness CSV if given, build sorted (utc_dt, per_s) arrays.
@@ -275,7 +272,7 @@ echo "frames: $N_FRAMES  (concurrent: $JOBS, stagger=${STAGGER_S}s)"
 
 # Run window-stack per row, 8-way concurrent. xargs -P with -n3 -I gives
 # us up to JOBS workers each chewing one (idx, start, end) triple.
-export CAMERA SUBCAM NIGHT OUT_DIR PY HERE FORCE STAGGER_S RGB
+export CAMERA NIGHT OUT_DIR PY HERE FORCE STAGGER_S RGB
 worker() {
     local idx="$1" w_start="$2" w_end="$3" label="$4"
     local out="$OUT_DIR/frames/frame_${idx}.jpg"
@@ -285,7 +282,6 @@ worker() {
     local args=(--camera "$CAMERA" --night "$NIGHT"
                 --window-start "$w_start" --window-end "$w_end"
                 --out "$out" --quiet)
-    [[ -n "$SUBCAM" ]] && args+=(--subcam "$SUBCAM")
     [[ -n "$label" ]] && args+=(--label "$label")
     [[ "$RGB" -eq 1 ]] && args+=(--rgb)
     "$PY" "$HERE/window-stack" "${args[@]}"

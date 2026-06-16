@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""astro-process — stage 3 daemon.
+
+Watches state.json across all assigned cameras; when stage 1 flips a
+pending_process flag (dusk/dawn window complete) for a camera, invokes
+the deliverables pipeline (`bin/publish-night-cam --camera <name>
+--night <YYYY-MM-DD>`) and resets the flag.
+
+Production: runs as `astro-process.service` on the NFS / CPU host
+(puppy, muppet, or the camera's own Pi when `processing.host == "self"`
+— see camera.json). One daemon per host, watching every camera
+assigned to it.
+
+Cadence: polls state.json files every --tick seconds. Cheap (just a
+JSON read per camera). The deliverables run itself takes minutes;
+poll interval can be coarse (30-60 s is fine).
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import signal
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from astro.dispatch import tick_once
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", action="append", required=True,
+                    help="Camera name (repeatable). Each camera's state.json "
+                         "is polled; pending flags trigger the deliverables "
+                         "pipeline.")
+    ap.add_argument("--tick", type=float, default=60.0,
+                    help="Seconds between polls (default 60).")
+    ap.add_argument("--once", action="store_true",
+                    help="Tick once and exit (testing).")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Log what would be run; don't invoke publish-night-cam.")
+    return ap.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    log = logging.getLogger("astro-process")
+    log.info(f"watching cameras: {args.camera}  tick={args.tick}s "
+             f"dry_run={args.dry_run}")
+
+    stop = False
+
+    def handle(signum, _frame):
+        nonlocal stop
+        stop = True
+        log.info(f"signal {signum}: shutting down")
+
+    signal.signal(signal.SIGTERM, handle)
+    signal.signal(signal.SIGINT, handle)
+
+    while not stop:
+        try:
+            fired = tick_once(args.camera, REPO, log, dry_run=args.dry_run)
+            for camera, night, rc in fired:
+                log.info(f"fired: camera={camera} night={night} rc={rc}")
+        except Exception as e:
+            log.error(f"tick: {e}")
+        if args.once:
+            return 0
+        # Sleep in short chunks so SIGTERM is responsive.
+        slept = 0.0
+        while slept < args.tick and not stop:
+            time.sleep(min(0.5, args.tick - slept))
+            slept += 0.5
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

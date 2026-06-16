@@ -4,6 +4,6 @@ Description=astro: publish yesterday astrocam deliverables to S3
 [Service]
 Type=oneshot
 User=peter
-ExecStart=/home/peter/astro-unify/services/publish-astrocam-run.sh
+ExecStart=/home/peter/astro/services/publish-astrocam-run.sh
 StandardOutput=journal
 StandardError=journal

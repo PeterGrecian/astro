@@ -14,8 +14,8 @@ Two metrics output for each k1:
     background)
 
 Usage:
-  fit-k1 --camera eclipticam --subcam v3w --night 2026-06-10 \\
-         --occlusion ~/astro/eclipticam/occlusion-v3w.json \\
+  fit-k1 --camera eclipticam-v3w --night 2026-06-10 \\
+         --occlusion ~/astro/eclipticam-v3w/occlusion.json \\
          --tile D3 --pole 1520,-176 \\
          --window-start 00:00 --window-end 01:30 \\
          --out ~/tmp/v3w-k1-sweep \\
@@ -117,7 +117,6 @@ def score_stack(stacked):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
-    ap.add_argument("--subcam", default=None)
     ap.add_argument("--night", required=True)
     ap.add_argument("--occlusion", type=Path, required=True)
     ap.add_argument("--tile", required=True)
@@ -135,8 +134,6 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
 
     cfg = CameraConfig.load(args.camera)
-    if args.subcam:
-        cfg = cfg.subcam(args.subcam)
     grid = json.loads(args.occlusion.read_text())["grid"]
     pole = tuple(float(v) for v in args.pole.split(","))
     w_start = parse_hhmm_utc(args.night, args.window_start)
@@ -144,8 +141,7 @@ def main() -> int:
     k1_lo, k1_hi = (float(v) for v in args.k1_range.split(","))
     k1_values = np.linspace(k1_lo, k1_hi, args.k1_steps)
 
-    frames = [(t, f) for (t, f) in list_night_frames(cfg, args.night,
-                                                    subcam=args.subcam)
+    frames = [(t, f) for (t, f) in list_night_frames(cfg, args.night)
               if w_start <= t < w_end]
     if not frames:
         print("no frames in window", file=sys.stderr)

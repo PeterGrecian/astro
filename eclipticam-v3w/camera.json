@@ -1,0 +1,20 @@
+{
+  "name": "eclipticam-v3w",
+  "host": "eclipticam",
+  "sensor": "IMX708",
+  "bayer": "SRGGB10",
+  "resolution": [2304, 1296],
+  "pedestal": 4380,
+  "pedestal_notes": "Sensor black level in libcamera's 16-bit container — measured 2026-06-12 as the minimum mean across deep-night (00:00-03:00 UTC) frames from 3 nights of v3w data. Slightly above the documented IMX708 black level (~4096) due to dark current. Use as fixed zero point so 'stops above pedestal' is comparable across nights.",
+  "plate_scale_deg_px": 0.0443,
+  "plate_scale_notes": "Module 3 Wide, 102 deg horizontal / 2304 px at the half-res capture mode in use (native 4608x2592).",
+  "frames_root": "~/eclipticam-frames",
+  "night_layout": "percam",
+  "night_layout_notes": "TRANSITIONAL: live v3w_uploader.py still writes to night/<night>/v3w/HH/<epoch_ms>.fits.fz. The post-split camera name 'eclipticam-v3w' resolves the legacy 'v3w' subcam via the percam reader. Once the uploader is migrated, flip to 'canonical' (per DECISIONS.md 2026-06-16): <frames_root>/YYYY/MM/DD/eclipticam-v3w/night/HH/HH-MM-SS.fits.fz. brightness.csv already lands at the canonical path (astro.brightness_log.append writes there directly).",
+  "processing": {"host": "self"},
+  "s3": {"bucket": "astro-berrylands-eu-west-1", "prefix": "eclipticam-v3w/nights"},
+  "quality_file": "quality.json",
+  "location_file": "location.json",
+  "privacy_file": "privacy.json",
+  "occlusion_file": "occlusion.json"
+}

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 NIGHT=$(TZ=Europe/London date -d "yesterday" +%F)
-REPO="$HOME/astro-unify"
+REPO="$HOME/astro"
 LOG_TAG="publish-astrocam[$NIGHT]"
 
 echo "$LOG_TAG starting"

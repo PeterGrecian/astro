@@ -28,7 +28,7 @@ Outputs:
   - <out>/D3_pole.json        — pole + metadata for downstream code
 
 Usage:
-  fit-tile-pole-fast --camera eclipticam --subcam v3w --night 2026-06-10 \\
+  fit-tile-pole-fast --camera eclipticam-v3w --night 2026-06-10 \\
                      --occlusion ~/astro/eclipticam/occlusion-v3w.json \\
                      --tile D3 \\
                      --window-start 00:00 --window-end 01:30 \\
@@ -86,10 +86,16 @@ def tile_bounds(tile_label, grid, W, H):
             int(round(row_idx * th)), int(round((row_idx + 1) * th)))
 
 
-def gather_tile_detections(cfg, subcam, night, tile, window_start, window_end):
+def gather_tile_detections(cfg, night, tile, window_start, window_end):
     """Walk cands.json sidecars and collect (t, x, y, flux) for one tile."""
-    if cfg.night_layout == "percam":
-        root = cfg.frames_root / "night" / night / (subcam or "")
+    from astro.frames import night_output_dir
+    if cfg.night_layout == "canonical":
+        # canonical: <root>/YYYY/MM/DD/<camera>/night/HH/cands/...
+        root = night_output_dir(cfg, night) / "night"
+    elif cfg.night_layout == "percam":
+        # legacy eclipticam pre-split: <root>/night/<night>/<subcam>/HH/...
+        subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
+        root = cfg.frames_root / "night" / night / subcam
     elif cfg.night_layout == "flat":
         # astrocam: cands sit next to per-hour FITS in <root>/<date>/<HH>/
         root = cfg.frames_root / night
@@ -251,7 +257,6 @@ def find_detections(stacked, threshold_sigma=3.0, fwhm=3.0):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
-    ap.add_argument("--subcam", default=None)
     ap.add_argument("--night", required=True)
     ap.add_argument("--occlusion", type=Path, required=True)
     ap.add_argument("--tile", required=True,
@@ -268,8 +273,6 @@ def main() -> int:
 
     args.out.mkdir(parents=True, exist_ok=True)
     cfg = CameraConfig.load(args.camera)
-    if args.subcam:
-        cfg = cfg.subcam(args.subcam)
     grid = json.loads(args.occlusion.read_text())["grid"]
     grid["cols"] = int(grid["cols"]); grid["rows"] = int(grid["rows"])
 
@@ -279,7 +282,7 @@ def main() -> int:
     print(f"=== {args.tile}  window {args.window_start}-{args.window_end} UTC ===")
 
     # 1. Per-tile detections (already in cands.json sidecars)
-    dets = gather_tile_detections(cfg, args.subcam, args.night, args.tile,
+    dets = gather_tile_detections(cfg, args.night, args.tile,
                                   w_start, w_end)
     print(f"detections: {len(dets)}")
     if not dets:
@@ -293,7 +296,7 @@ def main() -> int:
 
     # 3. Pole from trail vector at tile centre
     sample_frame_t, sample_frame_path = None, None
-    for t, f in list_night_frames(cfg, args.night, subcam=args.subcam):
+    for t, f in list_night_frames(cfg, args.night):
         if w_start <= t < w_end:
             sample_frame_t, sample_frame_path = t, f
             break
@@ -314,8 +317,7 @@ def main() -> int:
           f"radius from tile: {math.hypot(pole_x - tile_centre[0], pole_y - tile_centre[1]):.0f} px")
 
     # 4. Derot stack of the tile, all frames in window
-    frames = [(t, f) for (t, f) in list_night_frames(cfg, args.night,
-                                                    subcam=args.subcam)
+    frames = [(t, f) for (t, f) in list_night_frames(cfg, args.night)
               if w_start <= t < w_end]
     print(f"stacking {len(frames)} frames...")
     stacked, t_ref, padded_bb = derot_stack_tile(frames, bb, (pole_x, pole_y))

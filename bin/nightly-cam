@@ -14,7 +14,7 @@ then optionally publish the web set to S3 (see astro/present/publish.py).
 Usage:
     nightly-cam --camera astrocam                     # last completed night
     nightly-cam --camera astrocam --night 2026-06-09
-    nightly-cam --camera eclipticam --subcam v3w --night 2026-06-09
+    nightly-cam --camera eclipticam-v3w --night 2026-06-09
     nightly-cam --camera astrocam --night ... --publish --dry-run
 """
 import argparse
@@ -56,12 +56,11 @@ def grid_from_occlusion(occ_json):
             "trees": set()}
 
 
-def make_render(cfg, subcam):
+def make_render(cfg):
     """Privacy-aware JPEG renderer: applies the publication crop for
-    restricted subcams and writes the privacy-ok sidecar whenever the
-    camera has a privacy policy (unlisted subcams are unrestricted, but
-    the marker records that the policy was consciously applied)."""
-    spec = privacy_mod.entry_for(cfg, subcam)
+    restricted cameras and writes the privacy-ok sidecar whenever the
+    camera has a privacy policy."""
+    spec = privacy_mod.entry_for(cfg)
     has_policy = bool(getattr(cfg, "privacy", None))
     rotate_180 = bool(cfg.get("rotate_180"))
 
@@ -234,7 +233,6 @@ def write_fits(arr, path, dtype):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
-    ap.add_argument("--subcam", default=None)
     ap.add_argument("--night", default=None)
     ap.add_argument("--pole", default=None, metavar="X,Y",
                     help="override pole (default: camera.json pole_prior_xy)")
@@ -256,12 +254,10 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = CameraConfig.load(args.camera)
-    if args.subcam:
-        cfg = cfg.subcam(args.subcam)
     night = args.night or last_completed_night()
     print(f"camera: {cfg.name}  night: {night}")
 
-    frames = list_night_frames(cfg, night, subcam=args.subcam)
+    frames = list_night_frames(cfg, night)
     if not frames:
         print("no frames found for that night", file=sys.stderr)
         return 1
@@ -297,11 +293,10 @@ def main() -> int:
     print(f"frames: {len(frames)}  first={frames[0][0].isoformat()}  "
           f"last={frames[-1][0].isoformat()}")
 
-    # Whole-night derivations live at the night root (subcam outputs are
-    # distinguished by filename stem, not nested dirs — project convention).
+    # Whole-night derivations live at the night root.
     out_dir = night_output_dir(cfg, night)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{args.subcam}_" if args.subcam else ""
+    stem = ""
 
     t0 = time.monotonic()
     # Explicit window means the user has chosen the frames; skip the
@@ -362,7 +357,7 @@ def main() -> int:
                                     / hot.size, 4)}
     print(f"badpix: hot={badpix_info['n_hot']} cold={badpix_info['n_cold']}")
 
-    render = make_render(cfg, args.subcam)
+    render = make_render(cfg)
     render(max_img, out_dir / f"{stem}max.jpg")
 
     brightness.write_csv(rows, out_dir / f"{stem}brightness.csv")

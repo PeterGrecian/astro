@@ -2,16 +2,16 @@
 """combined-brightness — overlay per-night brightness curves on a
 shared 22:00 BST → 05:00 BST axis.
 
-Reads every per-night brightness CSV for a (camera, subcam) under the
-camera's frames_root, computes stops above the per-night pedestal, and
-plots one line per night onto a single PNG.
+Reads every per-night brightness CSV for a camera under the camera's
+frames_root, computes stops above the per-night pedestal, and plots
+one line per night onto a single PNG.
 
 Designed to be called once per `publish-night-cam` run so the combined
 view is always current. Lands as a single fixed-key S3 object — no per-
 night keys, no presigning lifetime concerns for the website.
 
 Usage:
-    combined-brightness --camera eclipticam --subcam v3w \\
+    combined-brightness --camera eclipticam-v3w \\
         [--out PATH] [--publish]
 """
 import argparse
@@ -35,19 +35,30 @@ from astro.config import CameraConfig
 LONDON = ZoneInfo("Europe/London")
 
 
-def find_nights(cfg, subcam: str | None):
+def find_nights(cfg):
     """Yield (night_str, csv_path) for every per-night brightness CSV."""
-    stem = f"{subcam}_" if subcam else ""
+    name = "brightness.csv"
+    # Canonical layout: <root>/YYYY/MM/DD/<camera>/brightness.csv
+    if cfg.night_layout == "canonical":
+        root = cfg.frames_root
+        if root.exists():
+            for y in sorted(p for p in root.iterdir() if p.name.isdigit()):
+                for m in sorted(p for p in y.iterdir() if p.name.isdigit()):
+                    for d in sorted(p for p in m.iterdir() if p.name.isdigit()):
+                        csv_p = d / cfg.name / name
+                        if csv_p.exists():
+                            yield f"{y.name}-{m.name}-{d.name}", csv_p
+        return
     nights_root = cfg.frames_root / "night"
     if not nights_root.exists():
         # astrocam-style flat layout: look directly under frames_root
         for d in sorted(cfg.frames_root.iterdir()):
-            csv_p = d / f"{stem}brightness.csv"
+            csv_p = d / name
             if csv_p.exists() and d.name[:4].isdigit():
                 yield d.name, csv_p
         return
     for d in sorted(nights_root.iterdir()):
-        csv_p = d / f"{stem}brightness.csv"
+        csv_p = d / name
         if csv_p.exists():
             yield d.name, csv_p
 
@@ -94,10 +105,9 @@ def to_anchor_axis(times, night_str: str):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
-    ap.add_argument("--subcam", default=None)
     ap.add_argument("--out", type=Path, default=None,
                     help="output PNG path (default: <frames-root>/"
-                         "<stem>brightness-combined.png)")
+                         "brightness-combined.png)")
     ap.add_argument("--publish", action="store_true",
                     help="upload to S3 as <camera>/brightness-combined.png "
                          "(no per-night prefix; one key)")
@@ -106,13 +116,9 @@ def main():
     args = ap.parse_args()
 
     cfg = CameraConfig.load(args.camera)
-    if args.subcam:
-        cfg = cfg.subcam(args.subcam)
-    stem = f"{args.subcam}_" if args.subcam else ""
-    out_path = args.out or (cfg.frames_root
-                            / f"{stem}brightness-combined.png")
+    out_path = args.out or (cfg.frames_root / "brightness-combined.png")
 
-    nights = list(find_nights(cfg, args.subcam))
+    nights = list(find_nights(cfg))
     # Most recent N by date string (yyyy-mm-dd sorts lexically)
     nights = sorted(nights, key=lambda nc: nc[0])[-args.limit:]
     if not nights:

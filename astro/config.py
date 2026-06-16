@@ -9,7 +9,6 @@ Usage:
     cam = CameraConfig.load("astrocam")
     cam.bayer, cam.frames_root, cam.s3["bucket"]
     cam.occlusion          # dict or None
-    ecl = CameraConfig.load("eclipticam").subcam("v3w")
 """
 import json
 import os
@@ -66,11 +65,3 @@ class CameraConfig:
             return q.get("stack_brightness_max_per_s")
         return None
 
-    def subcam(self, sub: str) -> "CameraConfig":
-        """A view of one sub-camera: subcams[sub] fields override the parent's."""
-        subs = self._data.get("subcams") or {}
-        if sub not in subs:
-            raise KeyError(f"{self._data['name']}: no subcam '{sub}' (have {sorted(subs)})")
-        merged = {**self._data, **subs[sub], "name": f"{self._data['name']}-{sub}",
-                  "subcams": None}
-        return CameraConfig(merged, self.camera_dir)

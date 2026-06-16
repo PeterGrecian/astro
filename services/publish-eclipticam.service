@@ -4,6 +4,6 @@ Description=astro: publish yesterday eclipticam deliverables (v1 + v3w) to S3
 [Service]
 Type=oneshot
 User=peter
-ExecStart=/home/peter/astro-unify/services/publish-eclipticam-run.sh
+ExecStart=/home/peter/astro/services/publish-eclipticam-run.sh
 StandardOutput=journal
 StandardError=journal

@@ -30,6 +30,37 @@ The cosmetic/scientific axis collapses to **one config flag** in
 or let AE drive it (cosmetic). The capture mechanism is otherwise the
 same.
 
+## Streaming + AE coexist (2026-06-16)
+
+picamera2 streaming mode and auto-exposure are independent — `AeEnable`
+is a per-tick control on the held-open camera, not a session-level
+choice. So one streaming session can run AE-on by day and AE-off with
+a locked 55 s exposure by night, switching at dusk/dawn transitions
+without reopening the camera.
+
+Implication for `camera.json` modes:
+```jsonc
+"day":   { "ae": true,  "exposure_us": "auto",          "gain": "auto" }
+"night": { "ae": false, "exposure_us": "cadence - readout",
+                        "gain": 1.0 }
+```
+
+Per-frame brightness stays comparable across modes because
+`per_s = mean / (exposure_s × gain)` already normalises out whatever
+AE chose — this is what brightness.csv records and what stage 1 reads.
+
+Two operational notes:
+- **AE settling at dawn**: re-enabling AE after a 55 s locked night
+  exposure takes a few frames to converge. Either accept the bad
+  frames or bound AE with `ExposureTimeRange` / `AnalogueGainRange`
+  so the first day frame is already in the ballpark.
+- **24h streaming is opt-in per camera, not the default.** Astrocam
+  is fine (transparent cover, shaded, no dark-current concern).
+  Eclipticam v3w may show elevated dark current at night if kept
+  warm all day — needs measurement before committing. A
+  `camera.json["stream_24h"]: false` flag lets a camera return to
+  start-of-night / stop-at-dawn while everything else stays unified.
+
 ## Target shape
 
 ```

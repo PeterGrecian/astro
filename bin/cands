@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """cands — DAOStarFinder per frame, writes cands JSON sidecars.
 
-Walks one night's binned-FITS frames for a camera (optionally one
-subcam, optionally restricted to a UTC window) and writes a JSON
-sidecar under HH/cands/MMSS.json (mirroring the frame's basename).
-Sidecars feed the per-tile pole fit downstream.
+Walks one night's binned-FITS frames for a camera (optionally
+restricted to a UTC window) and writes a JSON sidecar under
+HH/cands/MMSS.json (mirroring the frame's basename). Sidecars feed
+the per-tile pole fit downstream.
 
 Distinct from bin/detect-stars which runs on per-tile derot STACKS
 and produces a detections.csv. This one runs on RAW per-frame FITS
@@ -12,11 +12,11 @@ and writes one JSON sidecar per frame (the format astrocam/derot.py
 already consumes).
 
 Usage:
-    cands --camera eclipticam --subcam v3w --night 2026-06-10 \\
-          --occlusion ~/astro/eclipticam/occlusion-v3w.json
-    cands --camera eclipticam --subcam v3w --night 2026-06-10 \\
+    cands --camera eclipticam-v3w --night 2026-06-10 \\
+          --occlusion ~/astro/eclipticam-v3w/occlusion.json
+    cands --camera eclipticam-v3w --night 2026-06-10 \\
           --window-start 23:00 --window-end 02:00 \\
-          --occlusion ~/astro/eclipticam/occlusion-v3w.json
+          --occlusion ~/astro/eclipticam-v3w/occlusion.json
     cands --camera astrocam --night 2026-06-09 --fwhm 2.5 \\
           --occlusion ~/astro/astrocam/occlusion.json
 
@@ -54,7 +54,6 @@ def parse_hhmm_utc(night: str, hhmm: str) -> datetime:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
-    ap.add_argument("--subcam", default=None)
     ap.add_argument("--night", required=True)
     ap.add_argument("--window-start", default=None, metavar="HH:MM")
     ap.add_argument("--window-end", default=None, metavar="HH:MM")
@@ -68,11 +67,9 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = CameraConfig.load(args.camera)
-    if args.subcam:
-        cfg = cfg.subcam(args.subcam)
     grid = load_grid(args.occlusion)
 
-    frames = list_night_frames(cfg, args.night, subcam=args.subcam)
+    frames = list_night_frames(cfg, args.night)
     if args.window_start or args.window_end:
         w_start = parse_hhmm_utc(args.night, args.window_start) if args.window_start else None
         w_end = parse_hhmm_utc(args.night, args.window_end) if args.window_end else None

@@ -35,8 +35,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import math
+
 import numpy as np
 from astropy.io import fits
+
+from astro.brightness_log import BrightnessRow, append as append_brightness
 
 
 @dataclass
@@ -50,8 +54,12 @@ class StreamingConfig:
     lens_position: Optional[float]         # None = autofocus / no VCM
     rotation_180: bool                     # match rpicam-still --rotation 180
     camera_name: str                       # FITS CAMERA header
-    buffer_dir: Path                       # tmpfs scratch for raw .npy
+    buffer_dir: Path                       # tmpfs scratch for .fits.fz
     pedestal: int                          # sensor black level (camera.json)
+    # Stage-1 inputs: brightness.csv lands at <frames_root>/YYYY/MM/DD/<camera>/.
+    camera: str = ""                       # canonical camera name for brightness.csv path
+    frames_root: Optional[Path] = None     # NFS root; if None, brightness.csv stays in buffer_dir
+    mode: str = "night"                    # recorded per-row in brightness.csv
     saturation_stops: float = 13.0         # exit streaming when frame mean >= 2^stops × pedestal
 
 
@@ -82,11 +90,15 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
     the in-flight .npy (none yet — we go straight to .fits.fz here
     because the queue itself is the tmpfs buffer)."""
     cfg.buffer_dir.mkdir(parents=True, exist_ok=True)
-    bright_csv = cfg.buffer_dir / "brightness.csv"
-    is_new_csv = not bright_csv.exists()
-    bright_fh = bright_csv.open("a", buffering=1)
-    if is_new_csv:
-        bright_fh.write("epoch_ms,mean,exposure_us,gain,per_s\n")
+    # Local sidecar in buffer dir kept for back-compat with uploader sweeps;
+    # the canonical brightness.csv goes to NFS at <frames_root>/<night>/<cam>/.
+    legacy_csv = cfg.buffer_dir / "brightness.csv"
+    is_new_legacy = not legacy_csv.exists()
+    legacy_fh = legacy_csv.open("a", buffering=1)
+    if is_new_legacy:
+        legacy_fh.write("epoch_ms,mean,exposure_us,gain,per_s\n")
+
+    exposure_s = cfg.exposure_us / 1e6
 
     while not (stop.is_set() and q.empty()):
         try:
@@ -96,8 +108,28 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         # Saturation guard: if the frame is bright enough to be daylight
         # we stop streaming and let the per-tick controller take over.
         mean = float(np.mean(bayer))
-        per_s = mean / (cfg.exposure_us * cfg.gain) if cfg.exposure_us * cfg.gain else 0.0
-        bright_fh.write(f"{epoch_ms},{mean:.3f},{cfg.exposure_us},{cfg.gain},{per_s:.6e}\n")
+        per_s = mean / (exposure_s * cfg.gain) if exposure_s * cfg.gain else 0.0
+        legacy_fh.write(f"{epoch_ms},{mean:.3f},{cfg.exposure_us},{cfg.gain},{per_s:.6e}\n")
+        # Canonical brightness row for stage 1.
+        if cfg.frames_root is not None and cfg.camera:
+            stops = (math.log2(mean / cfg.pedestal)
+                     if mean > 0 and cfg.pedestal > 0 else float("nan"))
+            utc = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
+            try:
+                append_brightness(cfg.frames_root, cfg.camera, BrightnessRow(
+                    utc_iso=utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    epoch_ms=epoch_ms,
+                    mode=cfg.mode,
+                    exptime_s=exposure_s,
+                    gain=cfg.gain,
+                    mean=mean,
+                    per_s=per_s,
+                    stops_above_pedestal=stops,
+                ))
+            except OSError as e:
+                # NFS hiccup — keep capturing; stage 1 will fall back to
+                # sun_altitude until brightness rows resume.
+                log.warning(f"brightness.csv append failed: {e}")
         threshold = cfg.pedestal * (2 ** cfg.saturation_stops)
         if mean >= threshold:
             log.info(f"saturation: frame mean {mean:.0f} >= {threshold:.0f} "
@@ -121,7 +153,7 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         h["PER_S"] = per_s
         fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp_path, overwrite=True)
         tmp_path.rename(out_path)
-    bright_fh.close()
+    legacy_fh.close()
 
 
 def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:

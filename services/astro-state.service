@@ -1,0 +1,25 @@
+[Unit]
+Description=astro stage 1 — day/night state controller
+# astro-state writes <frames_root>/<night>/<camera>/state.json which is on
+# NFS for every camera assigned to this host. Wait for the mount.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+WorkingDirectory=/home/peter
+# Per-host config: cameras assigned to this host's state daemon.
+# Drop a one-line file at /etc/default/astro-state with e.g.
+#     CAMERAS="--camera eclipticam-v1 --camera eclipticam-v3w"
+# (Use the venv python so ephem/numpy/astropy are on the path.)
+EnvironmentFile=-/etc/default/astro-state
+ExecStart=/home/peter/astro/.venv/bin/python /home/peter/astro/bin/astro-state $CAMERAS --tick 30
+Restart=always
+RestartSec=10
+Nice=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

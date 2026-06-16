@@ -1,0 +1,7 @@
+{
+  "camera": "imx708",
+  "exposure_s": 30.0,
+  "gain": 1.0,
+  "stack_brightness_max_per_s": 700.0,
+  "stack_brightness_max_notes": "Brightness metric = mean / (EXPTIME * GAIN). For eclipticam v3w night frames (30s, gain 1), dark-sky was ~590 and twilight reached ~17500. 700 separates dark observations from twilight pollution. v1 stream (3s anchor + 10x stacks at OV5647) has different sensor characteristics — re-tune separately if applied to v1 frames."
+}
