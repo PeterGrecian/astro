@@ -60,7 +60,14 @@ class StreamingConfig:
     camera: str = ""                       # canonical camera name for brightness.csv path
     frames_root: Optional[Path] = None     # NFS root; if None, brightness.csv stays in buffer_dir
     mode: str = "night"                    # recorded per-row in brightness.csv
-    saturation_stops: float = 13.0         # exit streaming when frame mean >= 2^stops × pedestal
+    # Exit streaming when frame mean reaches this fraction of the
+    # uint16 container's max (65535). Expressed as a fraction, not as
+    # "stops above pedestal", because saturated raw means CANNOT
+    # exceed the dtype ceiling — the previous "13 stops above
+    # pedestal" guard wanted mean >= 35.9M, unreachable in uint16, so
+    # it never fired (stayed in night mode through full daylight on
+    # 2026-06-16, 21 h of pegged frames).
+    saturation_dtype_fraction: float = 0.95
 
 
 def _capture_thread(picam2, q: queue.Queue, stop: threading.Event,
@@ -130,10 +137,12 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
                 # NFS hiccup — keep capturing; stage 1 will fall back to
                 # sun_altitude until brightness rows resume.
                 log.warning(f"brightness.csv append failed: {e}")
-        threshold = cfg.pedestal * (2 ** cfg.saturation_stops)
+        dtype_max = float(np.iinfo(bayer.dtype).max)
+        threshold = cfg.saturation_dtype_fraction * dtype_max
         if mean >= threshold:
             log.info(f"saturation: frame mean {mean:.0f} >= {threshold:.0f} "
-                     f"({cfg.saturation_stops} stops above pedestal); exiting")
+                     f"({cfg.saturation_dtype_fraction*100:.0f}% of "
+                     f"{bayer.dtype} ceiling {dtype_max:.0f}); exiting")
             saturated.set()
             stop.set()
             break

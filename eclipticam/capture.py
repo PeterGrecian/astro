@@ -143,7 +143,16 @@ def ensure_v3w_streaming_stopped():
 def streaming_v3w_lum():
     """Read the most-recent per_s from the streaming daemon's
     brightness.csv (in tmpfs). Returns None if no streaming output
-    is available — caller should fall back to previous state."""
+    is available — caller should fall back to previous state.
+
+    Saturation guard: if the latest frame's mean is at/near the uint16
+    ceiling, per_s collapses to a tiny number and falsely reads as
+    deep night. Force a huge lum so decide_mode trips night→day
+    immediately, matching scene_luminance_from_fits's behaviour for
+    FITS. Without this guard the daemon stayed in night mode for 21+
+    hours of broad-daylight saturation on 2026-06-16.
+    CSV columns: epoch_ms,mean,exposure_us,gain,per_s.
+    """
     bf = V3W_BUFFER_DIR / "brightness.csv"
     if not bf.exists() or bf.stat().st_size == 0:
         return None
@@ -152,7 +161,11 @@ def streaming_v3w_lum():
                  if ln and not ln.startswith("epoch_ms")]
         if not lines:
             return None
-        return float(lines[-1].split(",")[4])
+        parts = lines[-1].split(",")
+        mean = float(parts[1])
+        if mean >= 64000:
+            return 1.0  # forces above any LUMINANCE_NIGHT_EXIT
+        return float(parts[4])
     except Exception:
         return None
 
