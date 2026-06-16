@@ -49,6 +49,16 @@ BRIGHTNESS_SHUTTER_US = 55_000_000  # same frame drives both stack + brightness
 LUMINANCE_NIGHT_ENTER = 0.0005
 LUMINANCE_NIGHT_EXIT = 0.005
 MODE_HOLD_TICKS = 3  # min ticks (30 min) before mode can switch back
+# Day→night requires BOTH lum < LUMINANCE_NIGHT_ENTER *and* sun
+# altitude below this threshold. Without the second condition the
+# short-exposure JPEG used in day mode reads "dark" at twilight, we
+# flip to night, the 55s IMX708 exposure pegs (the sky is bright on
+# that timescale), the saturation guard fires back to day, and we
+# flap every ~5 minutes until the sun actually drops. -10° was
+# observed empirically on 2026-06-16 to be just below the saturation
+# knee for v3w at 55s gain 1; -12° (nautical twilight) is a more
+# conservative default if lower noise matters.
+SUN_ALT_NIGHT_ENTER_DEG = -10.0
 _EXIF_EXPOSURE = 33434
 _EXIF_ISO = 34855
 
@@ -319,7 +329,35 @@ def shoot_night(camera_idx, hour_dir, lens_position=None):
     return brightness_path or fallback_path
 
 
-def decide_mode(prev, last_lum):
+_LOCATION = None  # lazily loaded; sun_altitude_deg reuses it across ticks
+
+
+def sun_altitude_deg(when=None):
+    """Sun altitude in degrees at the camera's location at UTC `when`
+    (default now). Returns None if location.json or ephem are missing —
+    decide_mode then ignores the gate (degrades to lum-only)."""
+    global _LOCATION
+    if _LOCATION is None:
+        try:
+            _LOCATION = json.loads(LOCATION_FILE.read_text())
+        except Exception:
+            _LOCATION = {}
+    if "lat_deg" not in _LOCATION or "lon_deg" not in _LOCATION:
+        return None
+    try:
+        import ephem
+    except ImportError:
+        return None
+    obs = ephem.Observer()
+    obs.lat = str(_LOCATION["lat_deg"])
+    obs.lon = str(_LOCATION["lon_deg"])
+    obs.date = (when or datetime.now(timezone.utc)).strftime(
+        "%Y/%m/%d %H:%M:%S")
+    obs.pressure = 0  # no refraction
+    return float(ephem.Sun(obs).alt) * 180.0 / 3.141592653589793
+
+
+def decide_mode(prev, last_lum, sun_alt_deg=None):
     """Apply hysteresis + min-hold. prev = {'mode': 'day'|'night', 'hold': int, 'lum': float}.
 
     Returns new mode + new hold counter. Day is the default if no prev state.
@@ -328,6 +366,14 @@ def decide_mode(prev, last_lum):
     frame in scene_luminance_from_fits) means we're definitively in
     daylight — no point waiting MODE_HOLD_TICKS more 30s captures of
     pure white. Same shape but with no hold delay.
+
+    sun_alt_deg gates the day→night transition: even if lum says it's
+    dark, refuse to enter night until the sun is below
+    SUN_ALT_NIGHT_ENTER_DEG. Without this gate, the day-mode short
+    JPEG reads "dark" at twilight, we flip to night, the 55s exposure
+    saturates, the saturation guard flips back to day, repeat every
+    ~5 min until the sun actually drops. If sun_alt_deg is None
+    (no location / no ephem), the gate is skipped — old behaviour.
     """
     SATURATED_EXIT = 0.5  # any lum above this is an unambiguous "day"
     mode = prev.get("mode", "day")
@@ -339,6 +385,8 @@ def decide_mode(prev, last_lum):
     if hold < MODE_HOLD_TICKS:
         return mode, hold + 1
     if mode == "day" and last_lum < LUMINANCE_NIGHT_ENTER:
+        if sun_alt_deg is not None and sun_alt_deg > SUN_ALT_NIGHT_ENTER_DEG:
+            return mode, hold + 1  # stay in day; sun too high
         return "night", 0
     if mode == "night" and last_lum > LUMINANCE_NIGHT_EXIT:
         return "day", 0
@@ -359,9 +407,13 @@ def capture_tick():
     # when v1 gets its own role (e.g. solar imaging during the day).
     state = load_state()
     new_state = {}
+    # Sun altitude is the day→night gate (see decide_mode). Compute once
+    # per tick; both cameras share the same observer location.
+    sun_alt = sun_altitude_deg(now)
     # v3w first: its mode gates whether v1 even bothers shooting.
     v3w_prev = state.get("v3w", {})
-    v3w_mode, v3w_hold = decide_mode(v3w_prev, v3w_prev.get("lum"))
+    v3w_mode, v3w_hold = decide_mode(v3w_prev, v3w_prev.get("lum"),
+                                     sun_alt_deg=sun_alt)
     if v3w_mode == "night":
         # Streaming daemon owns the camera. Don't touch cam0 here.
         ensure_v3w_streaming_running()
@@ -380,7 +432,8 @@ def capture_tick():
     # noise — skip it. v1 state freezes so its hysteresis resumes
     # cleanly when day returns.
     v1_prev = state.get("v1", {})
-    v1_mode, v1_hold = decide_mode(v1_prev, v1_prev.get("lum"))
+    v1_mode, v1_hold = decide_mode(v1_prev, v1_prev.get("lum"),
+                                   sun_alt_deg=sun_alt)
     if v3w_mode == "day":
         hour_dir = FRAMES / "day" / utc_date / "v1" / hh
         out_path = next_frame_path(hour_dir, "jpg")
