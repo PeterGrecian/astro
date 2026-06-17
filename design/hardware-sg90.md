@@ -1,4 +1,16 @@
-# SG90 servo on starcam
+# SG90 servo on Pi 1B — reference
+
+Originally written for the starcam Pi (now decommissioned). The
+starcam hardware is gone; this file survives because the
+**pigpio-vs-lgpio finding** below is general Pi-1B wisdom worth not
+relearning, and the smooth-motion pattern is a reusable recipe for
+any SG90 driven from a Pi (e.g. the K2 bus servo clock on deskpi
+referenced at the bottom).
+
+The IP, host name, and "GPIO18 is free" notes are historical —
+don't trust them for a current deployment.
+
+---
 
 Instructions for driving the SG90 micro-servo wired to **starcam** (Raspberry Pi B Rev 2, IP `192.168.4.28`).
 

@@ -93,9 +93,9 @@ Cross-cutting:
 
 - [ ] **Per-day calendar view for eclipticam** on the website, mirroring
       the starcam calendar. Each day shows the colour sweep MP4 (story
-      of the night) and the brightness curve. (Per
-      `TODO-other.md`: the skycam calendar is a candidate reusable
-      component.)
+      of the night) and the brightness curve. The skycam calendar is
+      the model — extract as a shared component
+      (`design/repo-boundaries-and-reuse.md`).
 - [ ] **Backfill existing eclipticam nights** through the unified
       pipeline so the calendar has history.
 - [ ] **Dawn-to-dusk derot animation** — start with a 10-min window
@@ -111,6 +111,12 @@ Cross-cutting:
       `s3://.../<camera>/nights/<night>/experiments/` so each
       experiment is browsable independently of the multi-source
       player. First experiment to run: `mci-colour` on a clean night.
+- [ ] **Web player bugs** (observed in skycam advanced player, applies
+      equally to astro since they share `render_skycam_player`):
+      - `H` for help doesn't seem to fire; help should be a HUD overlay.
+      - Image is too big; can't see the controls and the image at the
+        same time on smaller screens.
+      - Fullscreen should be a button, not only a keyboard shortcut.
 
 ## Pipeline foundations
 
@@ -191,6 +197,3 @@ matures. Notes: `design/per-tile-effective-pole.md`,
       focused-Pi repo idea is still open.
 - [ ] Decide whether `astrocam-capture.service` moves out of `astro/`
       into ansible once `astro.capture` takes over.
-- [ ] Items from `TODO-other.md` to fold in when their direction
-      crystallises: splay/web-player convergence, stereo-viewer
-      unification, skycam extract from Berrylands.

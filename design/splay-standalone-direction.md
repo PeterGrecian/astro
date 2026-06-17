@@ -102,6 +102,43 @@ RTX 3050 or used 2060 / 4060 would all be overkill for the imagery
 and useful for general work. Integrated Intel/AMD probably fine
 too but with less headroom for stereo or multi-stream.
 
+## Prototyping on a feeble GPU (pip and similar)
+
+The proper Splay needs a discrete GPU, but pip's integrated
+graphics (system RAM shared as VRAM, no discrete card) can still
+support **idea-prototyping**. Knowing which shader experiments give
+honest feedback vs which are misleading saves the Christmas project
+from solving the wrong problem.
+
+Honest on integrated graphics:
+- **asinh stretch + LUT slider** — fully bandwidth-bound at this
+  resolution, but the responsiveness *feels right* and the visual
+  difference is real. The single best thing to prototype.
+- **Stereo (anaglyph or SBS)** — two texture lookups + a colour
+  combine. Fast even on integrated.
+- **Single-stream playback with a couple of effects** — fine at
+  2304×1296 / 30-60 fps if you only have one buffer in flight.
+- **Per-pixel `(max - K·mean - M·σ·√(2 ln N))` rendered at display
+  time** — small uniform inputs, single texture pass, also fine.
+  Lets the operator drag K and M sliders and see the diff-sweep
+  variants instantly, even on pip.
+
+Misleading on integrated graphics (will feel slow here, fast on a
+real GPU — don't conclude "this is too expensive"):
+- **Multi-stream side-by-side** at native resolution — memory
+  bandwidth crushes integrated.
+- **Live MCI** (frame interpolation in shader) — needs both source
+  frames in flight + a flow field; bandwidth-bound on integrated,
+  trivial on discrete.
+- **Real-time max-stack across many frames** — N texture reads per
+  pixel per frame; the cost is N×bandwidth, painful on integrated.
+
+So the pip prototype should be a **single-stream interactive
+asinh/stretch/diff-sweep slider**. That's a one-screen tool that
+exercises the data layer (FITS reads, time-stepping) and the shader
+hot loop (stretch + LUT) without hitting limits the Christmas
+machine won't have.
+
 ## Action now
 
 - Capture this and `design/meta-conventions.md` so the Christmas
@@ -110,4 +147,6 @@ too but with less headroom for stereo or multi-stream.
   — they're load-bearing for the experiments machinery *today*,
   not just for Splay.
 - Don't start any Splay code yet. The natural pull is to play with
-  shaders; resist until the data layer is solid.
+  shaders; resist until the data layer is solid. (When you do
+  prototype, see "Prototyping on a feeble GPU" above for which
+  experiments give honest signal on pip.)
