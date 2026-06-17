@@ -116,6 +116,55 @@ the JSON layer.
 The principle: **JSON is the API.** Either runtime can be rewritten
 without touching the other if the contract holds.
 
+## Resolving paths from `(camera, night, kind)` — `astro.locator`
+
+Two natural storage zones, each with its own access pattern:
+
+| Tier | Where | Who reads | Access |
+|---|---|---|---|
+| **Public deliverables + experiments** | S3 (`astro-berrylands-eu-west-1`) | Web visitors; Splay when remote | URL / presigned |
+| **Working stills + FITS frames** | local disk / NFS (`~/astro-frames/...`) | Operator at workstation, on-host CLIs | Filesystem path |
+
+This split is natural — videos are produced for sharing and live
+where shareable things go; frames are bulky and intermediate and
+live where bulky working data goes. **No new URI scheme is needed**;
+`s3://` is already canonical for one tier and filesystem paths for
+the other.
+
+The cheap unification is one small module that codifies the lookup
+(sketch — to land when a second consumer beyond the website Lambda
+appears):
+
+```python
+from astro import locator
+
+# Working data — returns local Path objects (via NFS or local disk).
+paths = locator.frames("eclipticam-v3w", "2026-06-16")
+# → [Path("/home/peter/astro-frames/2026/06/16/eclipticam-v3w/night/22/22-00-05.fits.fz"), ...]
+
+brightness_csv = locator.brightness("eclipticam-v3w", "2026-06-16")
+state_json     = locator.state("eclipticam-v3w", "2026-06-16")
+
+# Public artefacts — returns S3 URLs (callers presign as needed).
+sweep_url = locator.deliverable("eclipticam-v3w", "2026-06-16",
+                                "sweep-colour.mp4")
+# → "s3://astro-berrylands-eu-west-1/eclipticam-v3w/nights/2026/06/16/sweep-colour.mp4"
+
+# Experiments — list of (meta_dict, mp4_url) pairs.
+exps = locator.experiments("eclipticam-v3w", "2026-06-16")
+```
+
+Today the lookup logic exists in two places: `astro.frames.list_night_frames`
+(working data only) and the per-night camera page in
+`mywebsite/lambda/mywebsite.py` (S3 listing inline). When Splay or a
+second tool needs both halves, factor into `astro.locator` and have
+both callers go through it. Not now — wait for the second consumer.
+
+Why this is small: pip has 8 GB RAM, working stills/FITS at binned
+resolution fit comfortably in cache (one night = ~6 GB at float32,
+fits with mmap). No invented caching layer needed — the kernel
+page cache holds it.
+
 ## Versioning
 
 If a schema needs an incompatible change:
