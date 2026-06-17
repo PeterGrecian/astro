@@ -1,113 +1,65 @@
-#!/usr/bin/env bash
-# window-stack-sweep — generate a sliding-window JPEG sequence + mp4.
-#
-# Drives bin/window-stack across a span like 23:00 → 04:00 UTC with a
-# fixed window length (default 10 min) sliding by a fixed step (default
-# 1 min). 8-way concurrent via xargs -P. Stitches the JPEGs into a
-# 60fps mp4 with ffmpeg.
-#
-# Usage:
-#     window-stack-sweep --camera eclipticam-v3w \
-#         --night 2026-06-09 \
-#         --sweep-start 23:00 --sweep-end 04:00 \
-#         --window-min 10 --step-min 1 \
-#         --out-dir ~/tmp/v3w-video \
-#         [--fps 60] [--jobs 8] [--no-mp4] [--force]
-#
-# Frames land at <out-dir>/frames/frame_NNNN.jpg, video at <out-dir>/sweep.mp4.
-# Already-rendered frames are skipped unless --force is given.
-set -euo pipefail
+#!/usr/bin/env python3
+"""window-stack-sweep — sliding-window max-stack JPEG sequence + mp4.
 
-CAMERA=""; NIGHT=""; SWEEP_START=""; SWEEP_END=""
-WINDOW_MIN=10; STEP_MIN=1; OUT_DIR=""; FPS=60; JOBS=8
-NO_MP4=0; FORCE=0; BRIGHTNESS_CSV=""; STAGGER_S=0
-LABEL_TZ="Europe/London"; RGB=0
-AUTO_START_STOPS=""; AUTO_END_STOPS=""; NO_LABEL=0
+Drives bin/window-stack across a span like 23:00 → 04:00 UTC with a
+fixed window length (default 10 min) sliding by a fixed step (default
+1 min). Concurrent rendering via multiprocessing. Stitches the JPEGs
+into a 60fps mp4 with ffmpeg.
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --camera)       CAMERA="$2";       shift 2;;
-        --night)        NIGHT="$2";        shift 2;;
-        --sweep-start)  SWEEP_START="$2";  shift 2;;
-        --sweep-end)    SWEEP_END="$2";    shift 2;;
-        --window-min)   WINDOW_MIN="$2";   shift 2;;
-        --step-min)     STEP_MIN="$2";     shift 2;;
-        --out-dir)      OUT_DIR="$2";      shift 2;;
-        --fps)          FPS="$2";          shift 2;;
-        --jobs)         JOBS="$2";         shift 2;;
-        --no-mp4)       NO_MP4=1;          shift;;
-        --force)        FORCE=1;           shift;;
-        --brightness-csv) BRIGHTNESS_CSV="$2"; shift 2;;
-        --stagger-s)    STAGGER_S="$2";    shift 2;;
-        --rgb)          RGB=1;             shift;;
-        --no-label)     NO_LABEL=1;        shift;;
-        --auto-start-stops) AUTO_START_STOPS="$2"; shift 2;;
-        --auto-end-stops)   AUTO_END_STOPS="$2";   shift 2;;
-        -h|--help)      sed -n '1,/^set -euo/p' "$0" | head -n -1; exit 0;;
-        *)              echo "unknown arg: $1" >&2; exit 2;;
-    esac
-done
+Was a bash script with embedded Python heredocs. The heredocs broke
+in subtle bash-y ways (silent failures, line-number mis-reporting on
+errors) and the structure made the autostart/autoend logic hard to
+test. Rewritten as straight Python — same CLI surface.
 
-for arg in CAMERA NIGHT SWEEP_START SWEEP_END OUT_DIR; do
-    [[ -n "${!arg}" ]] || { echo "--${arg,,} required" >&2; exit 2; }
-done
+Usage:
+    window-stack-sweep --camera eclipticam-v3w \\
+        --night 2026-06-09 \\
+        --sweep-start 23:00 --sweep-end 04:00 \\
+        --window-min 10 --step-min 1 \\
+        --out-dir ~/tmp/v3w-video \\
+        [--fps 60] [--jobs 8] [--no-mp4] [--force]
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-REPO="$(cd "$HERE/.." && pwd)"
-PY="${ASTRO_VENV_PY:-$REPO/.venv/bin/python}"
-[[ -x "$PY" ]] || PY="$HOME/astro/.venv/bin/python"  # puppy convention
+Frames land at <out-dir>/frames/frame_NNNNN.jpg, video at <out-dir>/sweep.mp4.
+Already-rendered frames are skipped unless --force is given.
+"""
+from __future__ import annotations
 
-mkdir -p "$OUT_DIR/frames"
-
-# Build the job list with python (cross-midnight, noon-rollover math).
-JOBS_LIST=$(mktemp)
-trap "rm -f '$JOBS_LIST'" EXIT
-"$PY" - <<PYEOF > "$JOBS_LIST"
-import csv, os
+import argparse
+import os
+import subprocess
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
 import numpy as np
 
-night_d = datetime.strptime("$NIGHT", "%Y-%m-%d").date()
-TZ = ZoneInfo("$LABEL_TZ")
+from astro.config import CameraConfig
 
-def hhmm_to_utc(hhmm):
+
+def hhmm_to_utc(hhmm: str, night: datetime.date) -> datetime:
+    """Resolve HH:MM UTC inside the noon-rollover night-of date."""
     h, m = (int(x) for x in hhmm.split(":"))
-    day = night_d if h >= 12 else night_d + timedelta(days=1)
+    day = night if h >= 12 else night + timedelta(days=1)
     return datetime.combine(day, datetime.min.time(),
                             tzinfo=timezone.utc).replace(hour=h, minute=m)
 
-start = hhmm_to_utc("$SWEEP_START")
-end   = hhmm_to_utc("$SWEEP_END")
-window = timedelta(minutes=$WINDOW_MIN)
-step   = timedelta(minutes=$STEP_MIN)
 
-# AUTO_START_STOPS: bash empty string -> no autodetect.
-auto_start_stops = "$AUTO_START_STOPS"
-auto_start_stops = float(auto_start_stops) if auto_start_stops else None
-auto_end_stops = "$AUTO_END_STOPS"
-auto_end_stops = float(auto_end_stops) if auto_end_stops else None
-
-# Sensor pedestal — fixed calibration constant from camera.json.
-# Falls back to per-night 1st percentile only if camera.json lacks it.
-import sys as _sys
-_sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath("$0"))))
-from astro.config import CameraConfig as _CC
-_cfg = _CC.load("$CAMERA")
-fixed_pedestal = _cfg.get("pedestal")
-
-# Load brightness CSV if given, build sorted (utc_dt, per_s) arrays.
-csv_path = "$BRIGHTNESS_CSV"
-times_arr = vals_per_s = pedestal = None
-if csv_path:
-    rows_t, rows_per_s, means = [], [], []
-    # Need EXPTIME/GAIN per row — pull from FITS header lazily; if all
-    # frames share the same exposure (the eclipticam case) one peek is
-    # enough. Fall back to mean if exposure unknown.
+def load_brightness_csv(csv_path: Path):
+    """Returns (times: list[datetime], means: np.ndarray, per_s_or_None).
+    None if the file is missing / unreadable."""
+    import csv as _csv
     from astropy.io import fits as _fits
+    if not csv_path.exists():
+        return None, None, None
+    rows_t, means, per_s = [], [], []
     seen_exp_gain = None
     with open(csv_path) as fh:
-        for row in csv.DictReader(fh):
+        for row in _csv.DictReader(fh):
             try:
                 t = datetime.fromisoformat(row["iso_utc"])
                 if t.tzinfo is None:
@@ -119,210 +71,261 @@ if csv_path:
                 try:
                     with _fits.open(row["filename"]) as h:
                         hdr = h[1].header
-                    seen_exp_gain = (float(hdr.get("EXPTIME", 1.0) or 1.0),
-                                     float(hdr.get("GAIN", 1.0) or 1.0))
+                    seen_exp_gain = (
+                        float(hdr.get("EXPTIME", 1.0) or 1.0),
+                        float(hdr.get("GAIN", 1.0) or 1.0))
                 except (OSError, KeyError, ValueError):
                     seen_exp_gain = (1.0, 1.0)
             exp, gain = seen_exp_gain
             rows_t.append(t)
             means.append(m)
-            rows_per_s.append(m / (exp * gain) if exp * gain > 0 else m)
-    if rows_t:
-        order = sorted(range(len(rows_t)), key=lambda i: rows_t[i])
-        times_arr = [rows_t[i] for i in order]
-        vals_per_s = np.array([rows_per_s[i] for i in order])
-        means_arr = np.array([means[i] for i in order])
-        # Prefer the fixed sensor pedestal; fall back to per-night p1
-        # for cameras not yet calibrated.
-        pedestal = float(fixed_pedestal) if fixed_pedestal is not None \
-            else float(np.percentile(means_arr, 1))
-
-def stops_at(t_query):
-    """Stops above pedestal for the single nearest CSV row, or None."""
-    if times_arr is None or pedestal is None:
-        return None
-    # nearest neighbour
-    best_i = min(range(len(times_arr)),
-                 key=lambda i: abs((times_arr[i] - t_query).total_seconds()))
-    signal = max(float(means_arr[best_i]) - pedestal, 0.5)
-    return float(np.log2(signal))
+            per_s.append(m / (exp * gain) if exp * gain > 0 else m)
+    if not rows_t:
+        return None, None, None
+    order = sorted(range(len(rows_t)), key=lambda i: rows_t[i])
+    times = [rows_t[i] for i in order]
+    return times, np.array([means[i] for i in order]), \
+        np.array([per_s[i] for i in order])
 
 
-def window_label(w_start, w_end):
-    centre = w_start + (w_end - w_start) / 2
-    hhmm_local = centre.astimezone(TZ).strftime("%H:%M")
-    if times_arr is None or pedestal is None:
-        return hhmm_local
-    in_win = [i for i, t in enumerate(times_arr) if w_start <= t < w_end]
-    if not in_win:
-        return hhmm_local
-    mean_count = float(means_arr[in_win].mean())
-    signal = max(mean_count - pedestal, 0.5)
-    stops = float(np.log2(signal))
-    return f"{hhmm_local}   {stops:+.1f} stops"
-
-
-# Autodetect: shift `start` later so the sweep begins after the LAST
-# pre-dark flap and after the brightness has dropped below the
-# threshold. Both conditions must hold; whichever happens later wins.
-# A flap is a frame below FLAP_STOPS (-2 stops = darker than pedestal).
-# We look across the whole night and find the last flap time before
-# the post-twilight dark stretch — that point in the data, plus a 5
-# min buffer, is when the cover stopped getting interfered with.
-if auto_start_stops is not None and times_arr is not None:
+def autostart(times, means, pedestal, start, end, window, step,
+              auto_start_stops):
+    """Shift start later: must be AFTER the last pre-dark flap (frames
+    below -2 stops) AND inside a 30-min stable dark stretch (mean per
+    window stays below auto_start_stops). Returns the chosen start."""
     FLAP_STOPS = -2.0
     BUFFER = timedelta(minutes=5)
-    per_frame_stops = np.log2(np.maximum(means_arr - pedestal, 0.5))
-    # All flap events; we want the last one inside the "twilight side"
-    # of the night (before the main dark window, defined as the first
-    # time the rolling mean is below auto_start_stops).
-    # Find the first window where the rolling mean stays below threshold
-    # FOR THE NEXT STABLE_MIN minutes — i.e. real darkness sets in,
-    # not a brief dip mid-twilight. The previous "first <threshold"
-    # rule fired the moment the mean grazed below 12, leaving +14
-    # spikes later in the sweep.
     STABLE_MIN = 30
+    per_frame_stops = np.log2(np.maximum(means - pedestal, 0.5))
+
     first_dark_t = None
     t = start
     while t + window <= end:
-        # Scan windows [t, t+window) ... [t + STABLE_MIN, t + STABLE_MIN + window).
         ok = True
         t_check = t
         while t_check <= t + timedelta(minutes=STABLE_MIN):
             w_end = t_check + window
-            in_win = [i for i, ti in enumerate(times_arr)
+            in_win = [i for i, ti in enumerate(times)
                       if t_check <= ti < w_end]
             if not in_win:
-                ok = False; break
-            mc = float(means_arr[in_win].mean())
+                ok = False
+                break
+            mc = float(means[in_win].mean())
             stops_w = float(np.log2(max(mc - pedestal, 0.5)))
             if stops_w >= auto_start_stops:
-                ok = False; break
+                ok = False
+                break
             t_check += step
         if ok:
             first_dark_t = t
             break
         t += step
-    # Last flap up to and including the first-dark moment.
-    flap_idx = [i for i, ti in enumerate(times_arr)
+
+    flap_idx = [i for i, ti in enumerate(times)
                 if per_frame_stops[i] < FLAP_STOPS
                 and (first_dark_t is None or ti <= first_dark_t + window)]
-    last_flap_t = times_arr[flap_idx[-1]] if flap_idx else None
-    import sys as _sys
-    _sys.stderr.write(
+    last_flap_t = times[flap_idx[-1]] if flap_idx else None
+
+    sys.stderr.write(
         f"auto-start: first window <{auto_start_stops:+.1f} stops = "
         f"{first_dark_t.strftime('%H:%M') if first_dark_t else 'never'} UTC; "
         f"last pre-dark flap = "
         f"{last_flap_t.strftime('%H:%M:%S') if last_flap_t else 'none'} UTC\n")
+
     candidates = [c for c in (first_dark_t,
                               last_flap_t + BUFFER if last_flap_t else None)
                   if c is not None]
     if candidates:
         chosen = max(candidates)
-        _sys.stderr.write(
+        sys.stderr.write(
             f"auto-start: shifted from {start.strftime('%H:%M')} to "
             f"{chosen.strftime('%H:%M')} UTC\n")
-        start = chosen
-    else:
-        _sys.stderr.write(
-            f"auto-start: no window matched, keeping {start.strftime('%H:%M')}\n")
+        return chosen
+    sys.stderr.write(
+        f"auto-start: no window matched, keeping {start.strftime('%H:%M')}\n")
+    return start
 
-# End-of-sweep autodetect: stop at the first window AFTER start whose
-# mean rises ABOVE auto_end_stops. Dawn is monotonic so a single-window
-# trigger is enough — no stability check needed.
-if auto_end_stops is not None and times_arr is not None:
-    import sys as _sys
+
+def autoend(times, means, pedestal, start, end, window, step,
+            auto_end_stops):
+    """Stop at the first window AFTER start whose mean rises above the
+    threshold. Dawn is monotonic so a single trigger is enough."""
     t = start + window
-    cut = None
     while t + window <= end:
         w_end = t + window
-        in_win = [i for i, ti in enumerate(times_arr) if t <= ti < w_end]
+        in_win = [i for i, ti in enumerate(times) if t <= ti < w_end]
         if in_win:
-            mc = float(means_arr[in_win].mean())
+            mc = float(means[in_win].mean())
             stops_w = float(np.log2(max(mc - pedestal, 0.5)))
             if stops_w > auto_end_stops:
-                cut = w_end
-                _sys.stderr.write(
-                    f"auto-end: stopping at {cut.strftime('%H:%M')} UTC "
+                sys.stderr.write(
+                    f"auto-end: stopping at {w_end.strftime('%H:%M')} UTC "
                     f"(first window above +{auto_end_stops:.1f} stops)\n")
-                break
+                return w_end
         t += step
-    if cut is not None and cut < end:
-        end = cut
+    return end
 
-no_label = bool(int("$NO_LABEL"))
-n = 0
-t = start
-while t + window <= end:
-    w_end = t + window
-    lbl = "" if no_label else window_label(t, w_end)
-    # NUL-separate fields AND rows so labels with spaces survive xargs.
-    import sys
-    sys.stdout.write(f"{n:05d}\0{t.strftime('%H:%M')}\0"
-                     f"{w_end.strftime('%H:%M')}\0{lbl}\0")
-    n += 1
-    t += step
-PYEOF
 
-# Job list is NUL-separated; row count = nulls / 4.
-N_NULLS=$(tr -cd '\0' < "$JOBS_LIST" | wc -c)
-N_FRAMES=$((N_NULLS / 4))
-echo "sweep: $SWEEP_START - $SWEEP_END  window=${WINDOW_MIN}min  step=${STEP_MIN}min"
-echo "frames: $N_FRAMES  (concurrent: $JOBS, stagger=${STAGGER_S}s)"
+def window_label(w_start, w_end, times, means, pedestal, tz):
+    centre = w_start + (w_end - w_start) / 2
+    hhmm_local = centre.astimezone(tz).strftime("%H:%M")
+    if times is None or pedestal is None:
+        return hhmm_local
+    in_win = [i for i, t in enumerate(times) if w_start <= t < w_end]
+    if not in_win:
+        return hhmm_local
+    mean_count = float(means[in_win].mean())
+    signal = max(mean_count - pedestal, 0.5)
+    stops = float(np.log2(signal))
+    return f"{hhmm_local}   {stops:+.1f} stops"
 
-# Run window-stack per row, 8-way concurrent. xargs -P with -n3 -I gives
-# us up to JOBS workers each chewing one (idx, start, end) triple.
-export CAMERA NIGHT OUT_DIR PY HERE FORCE STAGGER_S RGB
-worker() {
-    local idx="$1" w_start="$2" w_end="$3" label="$4"
-    local out="$OUT_DIR/frames/frame_${idx}.jpg"
-    if [[ "$FORCE" -eq 0 && -s "$out" ]]; then
+
+def render_one(args):
+    """Worker: render one window via bin/window-stack."""
+    (idx, camera, night, w_start_hhmm, w_end_hhmm, label, out_path,
+     rgb, force, here_py, here_bin) = args
+    if not force and out_path.exists() and out_path.stat().st_size > 0:
+        return idx, "skip"
+    cmd = [here_py, str(here_bin / "window-stack"),
+           "--camera", camera, "--night", night,
+           "--window-start", w_start_hhmm, "--window-end", w_end_hhmm,
+           "--out", str(out_path), "--quiet"]
+    if label:
+        cmd += ["--label", label]
+    if rgb:
+        cmd += ["--rgb"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return idx, "ok"
+        return idx, f"FAIL rc={result.returncode}: {result.stderr.strip()[-200:]}"
+    except OSError as e:
+        return idx, f"FAIL exec: {e}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
+    ap.add_argument("--sweep-start", required=True, metavar="HH:MM")
+    ap.add_argument("--sweep-end", required=True, metavar="HH:MM")
+    ap.add_argument("--window-min", type=int, default=10)
+    ap.add_argument("--step-min", type=int, default=1)
+    ap.add_argument("--out-dir", required=True, type=Path)
+    ap.add_argument("--fps", type=int, default=60)
+    ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--no-mp4", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--brightness-csv", default=None, type=Path,
+                    help="Per-frame brightness CSV. Used by auto-start/end "
+                         "and to burn a stops-above-pedestal value into "
+                         "each frame's label.")
+    ap.add_argument("--stagger-s", type=float, default=0.0,
+                    help="(unused, retained for shell-script CLI compat)")
+    ap.add_argument("--rgb", action="store_true")
+    ap.add_argument("--no-label", action="store_true")
+    ap.add_argument("--auto-start-stops", type=float, default=None)
+    ap.add_argument("--auto-end-stops", type=float, default=None)
+    ap.add_argument("--label-tz", default="Europe/London")
+    args = ap.parse_args()
+
+    out_dir = args.out_dir
+    frames_dir = out_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    night_d = datetime.strptime(args.night, "%Y-%m-%d").date()
+    tz = ZoneInfo(args.label_tz)
+    start = hhmm_to_utc(args.sweep_start, night_d)
+    end = hhmm_to_utc(args.sweep_end, night_d)
+    window = timedelta(minutes=args.window_min)
+    step = timedelta(minutes=args.step_min)
+
+    cfg = CameraConfig.load(args.camera)
+    fixed_pedestal = cfg.get("pedestal")
+
+    times = means = per_s = pedestal = None
+    if args.brightness_csv:
+        times, means, per_s = load_brightness_csv(args.brightness_csv)
+        if means is not None:
+            pedestal = (float(fixed_pedestal) if fixed_pedestal is not None
+                        else float(np.percentile(means, 1)))
+
+    if args.auto_start_stops is not None and times is not None:
+        start = autostart(times, means, pedestal, start, end, window, step,
+                          args.auto_start_stops)
+    if args.auto_end_stops is not None and times is not None:
+        end = autoend(times, means, pedestal, start, end, window, step,
+                      args.auto_end_stops)
+
+    # Build job list
+    jobs = []
+    here_bin = REPO / "bin"
+    here_py = sys.executable
+    n = 0
+    t = start
+    while t + window <= end:
+        w_end = t + window
+        label = ("" if args.no_label
+                 else window_label(t, w_end, times, means, pedestal, tz))
+        out_path = frames_dir / f"frame_{n:05d}.jpg"
+        jobs.append((n, args.camera, args.night,
+                     t.strftime("%H:%M"), w_end.strftime("%H:%M"),
+                     label, out_path, args.rgb, args.force,
+                     here_py, here_bin))
+        n += 1
+        t += step
+
+    if not jobs:
+        sys.stderr.write("no windows to render — sweep range yields zero jobs\n")
+        return 1
+
+    print(f"sweep: {args.sweep_start} - {args.sweep_end}  "
+          f"window={args.window_min}min  step={args.step_min}min")
+    print(f"frames: {len(jobs)}  jobs={args.jobs}")
+    if args.brightness_csv:
+        print(f"brightness CSV: {args.brightness_csv} "
+              f"({len(times) if times else 0} rows, "
+              f"pedestal={pedestal})")
+
+    t0 = datetime.now(timezone.utc)
+    n_ok = n_skip = n_fail = 0
+    failed = []
+    with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+        for idx, status in pool.map(render_one, jobs):
+            if status == "ok":
+                n_ok += 1
+            elif status == "skip":
+                n_skip += 1
+            else:
+                n_fail += 1
+                failed.append((idx, status))
+    dt = (datetime.now(timezone.utc) - t0).total_seconds()
+    print(f"rendered {n_ok} new, {n_skip} skipped, {n_fail} failed in {dt:.1f}s")
+    for idx, status in failed[:5]:
+        print(f"  frame {idx:05d}: {status}")
+    if n_fail and not (n_ok + n_skip):
+        return 1
+
+    if args.no_mp4:
         return 0
-    fi
-    local args=(--camera "$CAMERA" --night "$NIGHT"
-                --window-start "$w_start" --window-end "$w_end"
-                --out "$out" --quiet)
-    [[ -n "$label" ]] && args+=(--label "$label")
-    [[ "$RGB" -eq 1 ]] && args+=(--rgb)
-    "$PY" "$HERE/window-stack" "${args[@]}"
-}
-export -f worker
 
-# Stagger: each of the first $JOBS workers sleeps slot_index*STAGGER_S
-# at start, so Python/import I/O is spread out. After warm-up the pool
-# stays at JOBS-wide. xargs hands us process_slot 1..JOBS via
-# --process-slot-var; we sleep that-many seconds on first invocation.
-SLOT_STATE_DIR=$(mktemp -d)
-trap "rm -f '$JOBS_LIST'; rm -rf '$SLOT_STATE_DIR'" EXIT
-export SLOT_STATE_DIR
-worker_stagger() {
-    local slot="${XARGS_PROCESS_SLOT:-1}"
-    # Stagger only the first batch of workers: slot N waits (N-1) * STAGGER_S
-    # seconds on its first invocation, so 8 Python imports don't collide
-    # on cold cache. Subsequent invocations of the same slot run flat-out.
-    if [[ "$STAGGER_S" != "0" && ! -e "$SLOT_STATE_DIR/$slot" ]]; then
-        touch "$SLOT_STATE_DIR/$slot" 2>/dev/null || true
-        local delay
-        delay=$(awk -v s="$slot" -v g="$STAGGER_S" 'BEGIN { d = (s-1)*g; if (d<0) d=0; print d }')
-        [[ "$delay" != "0" ]] && sleep "$delay"
-    fi
-    worker "$@"
-}
-export -f worker_stagger
+    out_mp4 = out_dir / "sweep.mp4"
+    print(f"stitching {out_mp4} at {args.fps}fps...")
+    cmd = ["ffmpeg", "-y", "-loglevel", "error",
+           "-framerate", str(args.fps),
+           "-i", str(frames_dir / "frame_%05d.jpg"),
+           "-c:v", "libx264", "-pix_fmt", "yuv420p",
+           "-crf", "20", "-preset", "medium",
+           str(out_mp4)]
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        sys.stderr.write(f"ffmpeg failed rc={rc}\n")
+        return 1
+    print(f"wrote {out_mp4}  ({out_mp4.stat().st_size // 1024} KB)")
+    return 0
 
-t0=$(date +%s)
-< "$JOBS_LIST" xargs -0 -n4 -P "$JOBS" \
-    --process-slot-var=XARGS_PROCESS_SLOT \
-    bash -c 'worker_stagger "$@"' _
-t1=$(date +%s)
-echo "rendered $N_FRAMES frames in $((t1 - t0))s wall"
 
-if [[ "$NO_MP4" -eq 0 ]]; then
-    out_mp4="$OUT_DIR/sweep.mp4"
-    echo "stitching $out_mp4 at ${FPS}fps..."
-    ffmpeg -y -loglevel error -framerate "$FPS" \
-        -i "$OUT_DIR/frames/frame_%05d.jpg" \
-        -c:v libx264 -pix_fmt yuv420p -crf 20 -preset medium \
-        "$out_mp4"
-    echo "wrote $out_mp4  ($(du -h "$out_mp4" | cut -f1))"
-fi
+if __name__ == "__main__":
+    sys.exit(main())
