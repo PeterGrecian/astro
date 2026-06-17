@@ -1,20 +1,13 @@
 # astro — TODO
 
 Live work list. Move items to DECISIONS.md once they crystallise into
-load-bearing choices; delete done items. The four `TODO_*.md` fragments
-were folded in here on 2026-06-16.
+load-bearing choices; delete done items (per the
+[delete-done feedback memory](file:///home/peter/.claude/projects/-home-peter/memory/feedback_todos_delete_done.md)).
 
 ## Now
 
 - [ ] **Merge `unify-cameras` → `main`** and delete the branch (per
       DECISIONS.md 2026-06-16). Tag the merge commit.
-- [x] **Split eclipticam into `eclipticam-v1` and `eclipticam-v3w`**
-      (2026-06-16). `--subcam` flag removed from all 10 CLIs;
-      `subcam()` removed from `astro.config`; `list_night_frames`
-      no longer takes `subcam=`; `entry_for(cfg)` one-arg;
-      `services/publish-eclipticam-run.sh` iterates the two new
-      camera names. `night_layout: "percam"` on both new configs
-      is **transitional** — see next item.
 - [ ] **Migrate eclipticam capture writers to canonical layout.**
       Today `eclipticam/capture.py` (v1) and `eclipticam/v3w_uploader.py`
       (v3w) still write `~/eclipticam-frames/night/<date>/<v1|v3w>/HH/...`
@@ -31,38 +24,30 @@ were folded in here on 2026-06-16.
 - [ ] **Re-derive astrocam pole/orientation from a clear night** — the
       camera fell during a previous night and was refit by hand
       (2026-06-14). Pointing may have shifted.
+- [ ] **Migrate puppy to the new repo path.** Puppy still runs from
+      `/home/peter/astro-unify/`; the `services/publish-*.service` unit
+      paths and `bin/publish-night-cam`'s `REPO=` already point to
+      `/home/peter/astro/`. Either rename the puppy clone or update
+      the service files on puppy to point at `astro-unify/` while it
+      remains.
 
 ## Four-stage migration (per DECISIONS.md 2026-06-16)
 
-The migration is incremental — each stage ships on its own. Suggested
-order, easiest dependency-wise first:
+Stage 1 (`astro-state`) and stage 3 (`astro-process`) landed
+2026-06-16 — see CLAUDE.md status section. Remaining:
 
-1. [ ] **Define the state-record schema** and ship `astro.state` as a
-      module (read/write API only, no daemon yet). One JSON file at
-      `~/.local/state/astro/state.json` per host. Schema:
-      `{cameras: {<name>: {mode, last_transition_utc, current_night,
-      pending_process_for}}, hosts: {<name>: {disk_free, ...}}}`.
-2. [ ] **`bin/astro-state` daemon.** Reads `location.json` per camera,
-      computes sun altitude, writes mode transitions. Replaces the
-      day/night logic currently inline in `eclipticam/capture.py` and
-      `astrocam/capture.py`.
-3. [ ] **`bin/astro-process` daemon.** Watches the state record;
-      runs the existing `nightly-cam` + `publish-night-cam` flow on
-      dusk-end / dawn-end transitions. Old timers retired
-      camera-by-camera as each migrates. `nightly-cam` and
-      `publish-night-cam` become thin shims into `astro.process`.
-4. [ ] **`bin/astro-capture` daemon.** Generic `picamera2` loop driven
-      by `camera.json` modes (see `notes/capture-unification.md`).
+1. [ ] **`bin/astro-capture` daemon.** Generic `picamera2` loop driven
+      by `camera.json` modes (see `design/capture-unification.md`).
       Migrate astrocam first (no production publish to disturb), then
       eclipticam v3w, then v1. Each camera's existing daemon stays
       running until the new one shows a clean week.
-5. [ ] **`bin/astro-storage` timer.** Weekly squash / cold-archive /
+2. [ ] **`bin/astro-storage` timer.** Weekly squash / cold-archive /
       retention. Inputs: state record (disk pressure flag), per-night
       age. Outputs: state-record updates + log of what moved.
 
 Cross-cutting:
 - [ ] **`host.json` per Pi/NFS host** — cameras on this host,
-      cross-camera rules. Schema in `notes/capture-unification.md`.
+      cross-camera rules. Schema in `design/capture-unification.md`.
       Today the per-host camera lists are duplicated in env files at
       `services/astro-<stage>.env.<hostname>`; host.json will replace
       them.
@@ -79,25 +64,11 @@ Cross-cutting:
       shells the same `bin/publish-night-cam` — only the trigger
       moves from cron-like to event-driven.
 - [ ] **Migrate to canonical storage layout** (per DECISIONS.md
-      2026-06-16; full plan in `notes/storage-layout.md`). Per night,
+      2026-06-16; full plan in `design/storage-layout.md`). Per night,
       per camera: rsync from `~/<camera>-frames/{day,night}/<date>/...`
       into `~/astro-frames/YYYY/MM/DD/<camera>/{day,night}/HH/...`.
       Backfill `brightness.csv` from frame headers where missing.
       `astro.frames` keeps a legacy reader until migration completes.
-- [ ] **`astro.frames.sort_hours_for_night(hours)`** helper —
-      one place every reader sorts hour dirs by `(hour - 12) % 24`.
-- [ ] **Split eclipticam `subcams` into two camera dirs**:
-      `eclipticam-v1/`, `eclipticam-v3w/`. Drop `--subcam` flag from
-      `bin/{nightly-cam,publish-night-cam,window-stack,window-stack-sweep,
-      sum-sweep,diff-sweep,cands,fit-k1,fit-tile-pole-fast,
-      combined-brightness}`. Drop `subcam()` from `astro.config`;
-      simplify `astro.frames.list_night_frames` (percam no longer needs
-      a subcam arg); update `astro.present.privacy` lookup.
-- [ ] **Delete legacy starcam pipeline** (per DECISIONS.md 2026-06-16).
-      One commit; checklist in that decision.
-- [ ] **Re-derive astrocam pole/orientation from a clear night** — the
-      camera fell during a previous night and was refit by hand
-      (2026-06-14). Pointing may have shifted.
 
 ## Capture-side improvements
 
@@ -110,19 +81,21 @@ Cross-cutting:
 - [ ] **astrocam → `astro.capture.streaming`.** First user of the
       shared module beyond eclipticam v3w. Template:
       `eclipticam/v3w_night_daemon.py`. Will reveal what's accidentally
-      specific to v3w. Plan: `notes/capture-unification.md`.
+      specific to v3w. Plan: `design/capture-unification.md`.
 - [ ] **Move processing to the eclipticam Pi** as much as possible
       (brightness, binning, 10-min window accumulation) so puppy only
       stores derived products.
 - [ ] **eclipticam-v1 as a dedicated sun camera** — fixed filter, day
-      mode only. Capture schema in `notes/capture-unification.md`
+      mode only. Capture schema in `design/capture-unification.md`
       already covers a `sun` mode.
 
 ## Deliverables (website)
 
 - [ ] **Per-day calendar view for eclipticam** on the website, mirroring
       the starcam calendar. Each day shows the colour sweep MP4 (story
-      of the night) and the brightness curve.
+      of the night) and the brightness curve. (Per
+      `TODO-other.md`: the skycam calendar is a candidate reusable
+      component.)
 - [ ] **Backfill existing eclipticam nights** through the unified
       pipeline so the calendar has history.
 - [ ] **Dawn-to-dusk derot animation** — start with a 10-min window
@@ -131,10 +104,13 @@ Cross-cutting:
       window start from dusk to dawn. ~60 s video at 60 fps. Probably
       needs barrel-distortion correction more than precise pole
       finding.
-- [ ] **`.cands.json` sidecar layout** — done (commit 867e610: moved
-      from `HH/*.cands.json` siblings to `HH/cands/*.json`). Keep
-      backwards-compat reader for old nights for now; remove when
-      no live consumer relies on it.
+- [ ] **Combined-brightness curated-list** — currently overlays the
+      last N nights. Wanted: explicit `--nights 2026-06-10,2026-06-13`
+      plus `--recent N`, deduplicated. (User request 2026-06-17.)
+- [ ] **Astro experiments page** lists the menu under
+      `s3://.../<camera>/nights/<night>/experiments/` so each
+      experiment is browsable independently of the multi-source
+      player. First experiment to run: `mci-colour` on a clean night.
 
 ## Pipeline foundations
 
@@ -156,6 +132,10 @@ Cross-cutting:
       written to `~/astro/calib/sky-mask-<camera>-<YYYY-MM-DD>.fits.fz`.
       Pre-reqs: rain sensor on the camera Pi; `bin/auto-sky-mask`
       needs chromakey added (currently brightness-threshold only).
+- [ ] **FITS-level frame interpolation** for missing / headlight-
+      rejected frames. JPEG-level interpolation (mci on the sweep
+      mp4) is cosmetic; FITS-level fixes propagate to every
+      downstream operation. Defer until we have a concrete case.
 
 ## Cold archive (starcam)
 
@@ -182,8 +162,8 @@ points if revived:
    committing to a model.
 
 Multi-night stacking (`derot-week`) deferred until per-night pipeline
-matures. Notes: `notes/per-tile-effective-pole.md`,
-`notes/tracking-is-iterated-derot.md`, `notes/zonal-derot-strategy.md`.
+matures. Notes: `design/per-tile-effective-pole.md`,
+`design/tracking-is-iterated-derot.md`, `design/zonal-derot-strategy.md`.
 
 ## Targets
 
@@ -211,3 +191,6 @@ matures. Notes: `notes/per-tile-effective-pole.md`,
       focused-Pi repo idea is still open.
 - [ ] Decide whether `astrocam-capture.service` moves out of `astro/`
       into ansible once `astro.capture` takes over.
+- [ ] Items from `TODO-other.md` to fold in when their direction
+      crystallises: splay/web-player convergence, stereo-viewer
+      unification, skycam extract from Berrylands.

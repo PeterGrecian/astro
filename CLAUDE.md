@@ -84,7 +84,7 @@ filesystem; writes back what it moved.
 
 ## NFS layout
 
-Canonical tree (full schema in `notes/storage-layout.md`):
+Canonical tree (full schema in `design/storage-layout.md`):
 
 ```
 ~/astro-frames/YYYY/MM/DD/<camera>/
@@ -131,9 +131,9 @@ Per-camera (`<camera>/`):
 Per-host (one file per Pi / NFS host, future):
 - `host.json` — which cameras live here, cross-camera rules
   (e.g. eclipticam v3w gating v1). Empty `rules` for single-camera
-  hosts. See `notes/capture-unification.md`.
+  hosts. See `design/capture-unification.md`.
 
-Per-camera per-night state and signal (see `notes/storage-layout.md`
+Per-camera per-night state and signal (see `design/storage-layout.md`
 for the full schema):
 - `<night>/<camera>/brightness.csv` — every captured frame's
   brightness, written by stage 2. Outside `day|night/` mode dirs
@@ -231,7 +231,7 @@ noon-rollover-aware) skip the band gate. Useful for spot-checks like
 
 - **`Berrylands/gardencam/`** — historical Pi-side capture for starcam
   (`starcam_night_daemon.py`) and skycam. The capture-unification
-  plan (see `notes/capture-unification.md`) gradually pulls scientific
+  plan (see `design/capture-unification.md`) gradually pulls scientific
   capture into `astro/astro/capture/`. Berrylands keeps skycam.
 - **`~/photography/timelapse/starcam/`** — day-mode timelapse, pretty
   pictures. Different repo, different goals.

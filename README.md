@@ -43,7 +43,7 @@ astro/
 ├── eclipticam/             # per-camera config + capture daemons (v1, v3w)
 ├── starcam/                # camera.json only — historical reprocess
 ├── services/               # systemd units (publish timers, capture services)
-├── notes/                  # design notes / feasibility studies
+├── design/                  # design notes / feasibility studies
 ├── legacy/                 # quarantined reference — see legacy/README.md
 ├── docs/                   # operational docs (pipeline.md, sg90.md)
 ├── README.md

@@ -21,7 +21,7 @@ components. Per-camera `brightness.csv` and `state.json` live
 the same shape: `<camera>/nights/YYYY/MM/DD/...`. Cold tier the same.
 
 Full schema, rationale, and migration plan in
-`notes/storage-layout.md`.
+`design/storage-layout.md`.
 
 **Why.**
 - **Date-first, not mode-first or camera-first.** One night = one
@@ -141,7 +141,7 @@ privacy lookup. The only thing the two cameras genuinely share is a
 host and a location — neither of which justifies coupling the data
 model. With them split, every camera in the fleet looks the same to
 the pipeline. The per-host concerns (v3w gating v1, cross-camera
-state) move into a future `host.json` (see `notes/capture-unification.md`),
+state) move into a future `host.json` (see `design/capture-unification.md`),
 which is where they belong.
 
 **How to apply.** New camera dirs are flat: `eclipticam-v1/`,
