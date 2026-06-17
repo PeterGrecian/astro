@@ -42,25 +42,18 @@ LENS_POSITION_V3W = 0.0
 NIGHT_SHUTTERS_US = [55_000_000]
 NIGHT_GAIN = 1.0
 BRIGHTNESS_SHUTTER_US = 55_000_000  # same frame drives both stack + brightness
-# Hysteresis on scene_luminance = mean_pixel / (shutter_us * gain).
-# DAY -> NIGHT when below the dark threshold for MODE_HOLD_TICKS ticks.
-# NIGHT -> DAY when above the light threshold for MODE_HOLD_TICKS ticks.
-# 10x gap between thresholds prevents flapping near twilight.
-LUMINANCE_NIGHT_ENTER = 0.0005
-LUMINANCE_NIGHT_EXIT = 0.005
-MODE_HOLD_TICKS = 3  # min ticks (30 min) before mode can switch back
-# Day→night requires BOTH lum < LUMINANCE_NIGHT_ENTER *and* sun
-# altitude below this threshold. Without the second condition the
-# short-exposure JPEG used in day mode reads "dark" at twilight, we
-# flip to night, the 55s IMX708 exposure pegs (the sky is bright on
-# that timescale), the saturation guard fires back to day, and we
-# flap every ~5 minutes until the sun actually drops.
-# 2026-06-16 night data: -10° was the *minimum* — saturation
-# continued in bursts until sun reached -10.2°. -14° puts us well
-# into astronomical twilight with comfortable headroom, eliminating
-# the dusk flap cycle for v3w at 55s gain 1. Trade-off: ~30 min less
-# capture window per night vs. ~15 wasted-flap saturated frames.
-SUN_ALT_NIGHT_ENTER_DEG = -14.0
+# Mode decision is purely sun-altitude. Brightness measurements are
+# still recorded per frame (drives frame-quality gating downstream and
+# the per-night brightness plot), but they do NOT decide whether to
+# enter night — car headlights, the moon, AE wobble, and cloud edges
+# all confuse per-frame brightness, while sun altitude is a hard
+# physical signal we can compute exactly from time + location.
+# Asymmetric thresholds give natural hysteresis. -14° is well into
+# astronomical twilight (sun far enough below the horizon that v3w's
+# 55s exposure survives without saturating); -10° is end-of-nautical-
+# twilight, captures all dark hours before any chance of saturation.
+SUN_ALT_NIGHT_DEG = -14.0
+SUN_ALT_DAY_DEG = -10.0
 _EXIF_EXPOSURE = 33434
 _EXIF_ISO = 34855
 
@@ -99,12 +92,13 @@ def scene_luminance_from_jpeg(path):
 def scene_luminance_from_fits(path):
     """Same metric, from FITS using stored EXPTIME + GAIN.
 
-    Saturation guard: if the frame is clipped (mean at or near uint16
-    ceiling) the lum calculation underestimates badly — a saturated 30s
-    daytime frame returns ~0.002 which falsely reads as "night". Force a
-    huge lum in that case so decide_mode trips the night→day transition
-    immediately rather than sticking in night for hours of wasted 30s
-    daylight captures."""
+    Saturation clamp: if the frame is clipped (mean at or near uint16
+    ceiling) the per_s = mean / (shutter * gain) metric underestimates
+    badly — a saturated 30s frame returns ~0.002 even though it's
+    pegged. Clamp to 1.0 so saturation shows up as "definitely bright"
+    in state.json and logs. (The controller doesn't decide mode from
+    lum any more — sun altitude does — but recording an honest 1.0
+    keeps the observational signal readable.)"""
     with fits.open(path) as hdul:
         hdr = hdul[1].header
         data = hdul[1].data
@@ -112,7 +106,7 @@ def scene_luminance_from_fits(path):
     gain = float(hdr["GAIN"])
     mean = float(np.mean(data))
     if mean >= 64000:
-        return 1.0  # forces above any LUMINANCE_NIGHT_EXIT
+        return 1.0  # saturated; observational clamp
     if shutter_us * gain <= 0:
         return None
     return mean / (shutter_us * gain)
@@ -154,15 +148,12 @@ def ensure_v3w_streaming_stopped():
 
 def streaming_v3w_lum():
     """Read the most-recent per_s from the streaming daemon's
-    brightness.csv (in tmpfs). Returns None if no streaming output
-    is available — caller should fall back to previous state.
+    brightness.csv (in tmpfs) for recording into state.json. Mode is
+    now decided from sun altitude — this is observational only.
 
-    Saturation guard: if the latest frame's mean is at/near the uint16
-    ceiling, per_s collapses to a tiny number and falsely reads as
-    deep night. Force a huge lum so decide_mode trips night→day
-    immediately, matching scene_luminance_from_fits's behaviour for
-    FITS. Without this guard the daemon stayed in night mode for 21+
-    hours of broad-daylight saturation on 2026-06-16.
+    Saturation clamp: if the latest frame's mean is at/near uint16
+    ceiling, per_s collapses to a tiny number and looks like deep
+    night in the state file. Clamp to 1.0 so saturation is honest.
     CSV columns: epoch_ms,mean,exposure_us,gain,per_s.
     """
     bf = V3W_BUFFER_DIR / "brightness.csv"
@@ -176,7 +167,7 @@ def streaming_v3w_lum():
         parts = lines[-1].split(",")
         mean = float(parts[1])
         if mean >= 64000:
-            return 1.0  # forces above any LUMINANCE_NIGHT_EXIT
+            return 1.0  # saturated; observational clamp
         return float(parts[4])
     except Exception:
         return None
@@ -359,40 +350,34 @@ def sun_altitude_deg(when=None):
     return float(ephem.Sun(obs).alt) * 180.0 / 3.141592653589793
 
 
-def decide_mode(prev, last_lum, sun_alt_deg=None):
-    """Apply hysteresis + min-hold. prev = {'mode': 'day'|'night', 'hold': int, 'lum': float}.
+def decide_mode(prev, sun_alt_deg):
+    """Mode is a pure function of sun altitude.
 
-    Returns new mode + new hold counter. Day is the default if no prev state.
+    sun_alt < SUN_ALT_NIGHT_DEG  → night
+    sun_alt > SUN_ALT_DAY_DEG    → day
+    in-between                    → keep prev (asymmetric thresholds
+                                     give natural hysteresis with no
+                                     flap, no flip-back guard, no
+                                     hold counter).
 
-    SATURATED_EXIT bypasses min-hold: a lum of 1.0 (from a saturated
-    frame in scene_luminance_from_fits) means we're definitively in
-    daylight — no point waiting MODE_HOLD_TICKS more 30s captures of
-    pure white. Same shape but with no hold delay.
+    prev = {'mode': 'day'|'night', ...} (other fields ignored).
+    Returns (mode, hold) where hold is just an incrementing tick
+    counter — kept for state-file backwards compatibility; nothing
+    reads it as a control input any more.
 
-    sun_alt_deg gates the day→night transition: even if lum says it's
-    dark, refuse to enter night until the sun is below
-    SUN_ALT_NIGHT_ENTER_DEG. Without this gate, the day-mode short
-    JPEG reads "dark" at twilight, we flip to night, the 55s exposure
-    saturates, the saturation guard flips back to day, repeat every
-    ~5 min until the sun actually drops. If sun_alt_deg is None
-    (no location / no ephem), the gate is skipped — old behaviour.
+    If sun_alt_deg is None (location.json or ephem missing), default
+    to day. This is the safe fall-back: a stuck day mode never starts
+    the streaming daemon at all, no chance of writing pegged frames.
     """
-    SATURATED_EXIT = 0.5  # any lum above this is an unambiguous "day"
     mode = prev.get("mode", "day")
-    hold = int(prev.get("hold", MODE_HOLD_TICKS))
-    if last_lum is None:
-        return mode, hold + 1
-    if mode == "night" and last_lum >= SATURATED_EXIT:
-        return "day", 0  # bypass min-hold
-    if hold < MODE_HOLD_TICKS:
-        return mode, hold + 1
-    if mode == "day" and last_lum < LUMINANCE_NIGHT_ENTER:
-        if sun_alt_deg is not None and sun_alt_deg > SUN_ALT_NIGHT_ENTER_DEG:
-            return mode, hold + 1  # stay in day; sun too high
-        return "night", 0
-    if mode == "night" and last_lum > LUMINANCE_NIGHT_EXIT:
-        return "day", 0
-    return mode, hold + 1
+    hold = int(prev.get("hold", 0)) + 1
+    if sun_alt_deg is None:
+        return "day", hold
+    if sun_alt_deg < SUN_ALT_NIGHT_DEG:
+        return "night", hold
+    if sun_alt_deg > SUN_ALT_DAY_DEG:
+        return "day", hold
+    return mode, hold
 
 
 def capture_tick():
@@ -409,13 +394,16 @@ def capture_tick():
     # when v1 gets its own role (e.g. solar imaging during the day).
     state = load_state()
     new_state = {}
-    # Sun altitude is the day→night gate (see decide_mode). Compute once
-    # per tick; both cameras share the same observer location.
+    # Mode is purely sun-altitude (see decide_mode). Brightness is
+    # still measured and recorded per frame — drives frame-quality
+    # gating downstream, populates the per-night brightness plot, and
+    # lives in state.json as observation — but it does NOT decide
+    # mode. Sun altitude is a hard physical signal; per-frame
+    # brightness is confused by headlights, moon, AE wobble, clouds.
     sun_alt = sun_altitude_deg(now)
     # v3w first: its mode gates whether v1 even bothers shooting.
     v3w_prev = state.get("v3w", {})
-    v3w_mode, v3w_hold = decide_mode(v3w_prev, v3w_prev.get("lum"),
-                                     sun_alt_deg=sun_alt)
+    v3w_mode, v3w_hold = decide_mode(v3w_prev, sun_alt_deg=sun_alt)
     if v3w_mode == "night":
         # Streaming daemon owns the camera. Don't touch cam0 here.
         ensure_v3w_streaming_running()
@@ -434,8 +422,7 @@ def capture_tick():
     # noise — skip it. v1 state freezes so its hysteresis resumes
     # cleanly when day returns.
     v1_prev = state.get("v1", {})
-    v1_mode, v1_hold = decide_mode(v1_prev, v1_prev.get("lum"),
-                                   sun_alt_deg=sun_alt)
+    v1_mode, v1_hold = decide_mode(v1_prev, sun_alt_deg=sun_alt)
     if v3w_mode == "day":
         hour_dir = FRAMES / "day" / utc_date / "v1" / hh
         out_path = next_frame_path(hour_dir, "jpg")
