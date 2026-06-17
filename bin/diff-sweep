@@ -1,25 +1,35 @@
 #!/usr/bin/env python3
-"""diff-sweep — sliding-window max(frame - window_mean) -> JPEG sequence.
+"""diff-sweep — sliding-window (max-stack - mean) -> JPEG sequence.
 
 Third deliverable alongside window-stack-sweep (max) and sum-sweep (sum):
 
-    pixel_out = max over window of (frame[i] - mean_over_window)
+    pixel_out = max(frame[i])  -  mean(frame[i])   over window i
 
-Window-mean subtraction kills:
-- The sensor pedestal (constant in every frame)
-- Hot pixels (same value in every frame -> 0 residual)
-- The window's average sky brightness (so cloudy *late* frames don't
-  raise the floor for the early clear ones; the mean blends them)
+i.e. the per-pixel max-stack of the window minus the per-pixel mean.
+Bright transients (single-frame or persistent) end up in the max and
+survive the mean subtraction; the pedestal, hot pixels, and average
+sky cancel.
 
-What survives:
-- Star trails (each pixel sees a star for ~6 of ~60 frames -> +residual)
-- Transients (planes, meteors -> single-frame high residual)
-- Anything BRIGHTER than the window average at the pixel position
+Optional knobs:
+- --noise-floor-mult M (default 0): subtract M × σ × √(2 ln N) per
+  pixel, where σ is the per-pixel std across the window and N is
+  the number of frames. √(2 ln N) is the expected position of the
+  max of N standard Gaussians above the mean — i.e. for pure noise,
+  max-mean already sits this high without any signal. Setting M=1
+  cancels that statistical floor exactly; M>1 is conservative,
+  M<1 keeps faint speckle visible.
+- --signed: don't clip negative output to zero. Useful when you want
+  to see darkening events (dust eclipse, dimming source).
+- --neg-blue: implies --signed. Render negatives as a blue lobe and
+  positives as the usual asinh greys.
+- --colour: process per RGB plane (de-bayered). With --neg-blue,
+  the "negative" decision is global luminance (sum of planes), not
+  per-channel.
 
 Single-process streaming: each FITS frame is decoded ONCE and stashed
 in a deque of recent binned frames. When a window closes we look back
-over the deque, compute the mean over that window, then max the
-deviations. The deque is pruned of frames older than the oldest
+over the deque, compute max + mean (+ std if noise floor enabled)
+over that window. The deque is pruned of frames older than the oldest
 still-open window.
 
 --synthetic mode: a single bright pixel walking diagonally on a
@@ -37,7 +47,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 from astro.frames import list_night_frames
 from astro.process import bayer
-from astro.present.render import render_asinh_jpeg, render_asinh_jpeg_rgb
+from astro.present.render import (
+    render_asinh_jpeg, render_asinh_jpeg_rgb,
+    render_signed_asinh_jpeg, render_signed_asinh_jpeg_rgb,
+)
 
 
 def parse_hhmm_to_utc(night: str, hhmm: str) -> datetime:
@@ -76,24 +89,43 @@ def load_fits_binned(path, rgb_pattern):
 
 
 def close_window(idx, w_start, w_end, recent, rgb_pattern,
-                 frames_dir, rotate_180):
-    """Find the frames in [w_start, w_end), compute mean, max deviation,
-    render."""
+                 frames_dir, rotate_180,
+                 noise_floor_mult=0.0, signed=False, neg_blue=False):
+    """Find the frames in [w_start, w_end), compute max-mean (optionally
+    minus a noise floor), render."""
     in_win = [(t, f) for (t, f) in recent if w_start <= t < w_end]
     if not in_win:
         print(f"  skip window {idx:05d}: no frames in deque "
               f"(possible drain edge)")
         return
-    stack = np.stack([f for (_, f) in in_win]).astype(np.int32)
+    stack = np.stack([f for (_, f) in in_win]).astype(np.float32)
+    N = stack.shape[0]
     mean = stack.mean(axis=0)
-    dev = stack - mean
-    max_dev = dev.max(axis=0)
-    np.maximum(max_dev, 0, out=max_dev)
+    max_ = stack.max(axis=0)
+    out_img = max_ - mean
+    if noise_floor_mult > 0 and N >= 2:
+        # Expected max of N Gaussians sits at mean + sigma * sqrt(2 ln N).
+        # Subtract that, scaled by user multiplier, to suppress pure-noise
+        # speckle without erasing real signal.
+        sigma = stack.std(axis=0, ddof=1)
+        floor = noise_floor_mult * sigma * float(np.sqrt(2.0 * np.log(N)))
+        out_img = out_img - floor
+    if not signed:
+        np.maximum(out_img, 0, out=out_img)
     out_path = frames_dir / f"frame_{idx:05d}.jpg"
-    if rgb_pattern is not None:
-        render_asinh_jpeg_rgb(max_dev, out_path, rotate_180=rotate_180)
+    if signed or neg_blue:
+        if rgb_pattern is not None:
+            render_signed_asinh_jpeg_rgb(out_img, out_path,
+                                         neg_blue=neg_blue,
+                                         rotate_180=rotate_180)
+        else:
+            render_signed_asinh_jpeg(out_img, out_path,
+                                     neg_blue=neg_blue,
+                                     rotate_180=rotate_180)
+    elif rgb_pattern is not None:
+        render_asinh_jpeg_rgb(out_img, out_path, rotate_180=rotate_180)
     else:
-        render_asinh_jpeg(max_dev, out_path, rotate_180=rotate_180)
+        render_asinh_jpeg(out_img, out_path, rotate_180=rotate_180)
     print(f"  closed window {idx:05d}  ({len(in_win)} frames)")
 
 
@@ -106,11 +138,28 @@ def main() -> int:
     ap.add_argument("--window-min", type=int, default=10)
     ap.add_argument("--step-min", type=int, default=1)
     ap.add_argument("--out-dir", required=True, type=Path)
-    ap.add_argument("--rgb", action="store_true")
+    ap.add_argument("--rgb", action="store_true",
+                    help="alias for --colour (operate per RGB plane)")
+    ap.add_argument("--colour", action="store_true",
+                    help="operate per RGB plane (de-bayered)")
+    ap.add_argument("--noise-floor-mult", type=float, default=0.0,
+                    metavar="M",
+                    help="subtract M × σ × sqrt(2 ln N) per pixel before "
+                         "rendering (M=0 disables, M=1 cancels the "
+                         "statistical max-of-N-Gaussians floor exactly)")
+    ap.add_argument("--signed", action="store_true",
+                    help="keep negative values instead of clipping at 0")
+    ap.add_argument("--neg-blue", action="store_true",
+                    help="render negative values as a blue lobe; implies "
+                         "--signed")
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--no-mp4", action="store_true")
     ap.add_argument("--synthetic", type=int, default=0, metavar="N")
     args = ap.parse_args()
+    if args.neg_blue:
+        args.signed = True
+    if args.colour:
+        args.rgb = True
 
     window = timedelta(minutes=args.window_min)
     step = timedelta(minutes=args.step_min)
@@ -159,7 +208,9 @@ def main() -> int:
         while pending and pending[0][2] <= t:
             idx, ws, we = pending.pop(0)
             close_window(idx, ws, we, recent, rgb_pattern,
-                         frames_dir, rotate_180)
+                         frames_dir, rotate_180,
+                         noise_floor_mult=args.noise_floor_mult,
+                         signed=args.signed, neg_blue=args.neg_blue)
 
         # Prune deque: drop frames older than the oldest still-open
         # window's start.
@@ -175,7 +226,9 @@ def main() -> int:
     while pending:
         idx, ws, we = pending.pop(0)
         close_window(idx, ws, we, recent, rgb_pattern,
-                     frames_dir, rotate_180)
+                     frames_dir, rotate_180,
+                     noise_floor_mult=args.noise_floor_mult,
+                     signed=args.signed, neg_blue=args.neg_blue)
 
     print(f"diff-sweep: {n} frames in, {len(windows)} JPEGs written")
 
