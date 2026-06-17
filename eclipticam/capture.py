@@ -54,11 +54,13 @@ MODE_HOLD_TICKS = 3  # min ticks (30 min) before mode can switch back
 # short-exposure JPEG used in day mode reads "dark" at twilight, we
 # flip to night, the 55s IMX708 exposure pegs (the sky is bright on
 # that timescale), the saturation guard fires back to day, and we
-# flap every ~5 minutes until the sun actually drops. -10° was
-# observed empirically on 2026-06-16 to be just below the saturation
-# knee for v3w at 55s gain 1; -12° (nautical twilight) is a more
-# conservative default if lower noise matters.
-SUN_ALT_NIGHT_ENTER_DEG = -10.0
+# flap every ~5 minutes until the sun actually drops.
+# 2026-06-16 night data: -10° was the *minimum* — saturation
+# continued in bursts until sun reached -10.2°. -14° puts us well
+# into astronomical twilight with comfortable headroom, eliminating
+# the dusk flap cycle for v3w at 55s gain 1. Trade-off: ~30 min less
+# capture window per night vs. ~15 wasted-flap saturated frames.
+SUN_ALT_NIGHT_ENTER_DEG = -14.0
 _EXIF_EXPOSURE = 33434
 _EXIF_ISO = 34855
 
