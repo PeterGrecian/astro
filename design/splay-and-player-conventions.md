@@ -36,9 +36,9 @@ Sorted by category.
 | `.` | play **forward** |
 | `←` | step one frame back |
 | `→` | step one frame forward |
-| `p` | pace slower (geometric: 1× → ½× → ¼×) |
-| `P` (shift-P) | pace faster (geometric: 1× → 2× → 4×) |
-| `m` | cycle loop mode (loop / once / pingpong) |
+| `<` (shift-`,`) | pace slower (geometric: 1× → ½× → ¼×) |
+| `>` (shift-`.`) | pace faster (geometric: 1× → 2× → 4×) |
+| `u` | cycle loop mode (loop / once / pingpong) |
 
 Pace is a *setting* independent of play state — pressing `p` while
 paused changes the next play's speed. Discrete steps `¼× ½× 1× 2×
@@ -67,9 +67,11 @@ is the alignment rule (see "Multi-stream alignment" below).
 | `l` | toggle list mode (all / selected only) |
 | `a` | cycle sort (name / mtime / load order) |
 | `w` | wipe between two most recently shown |
+| `p` | pixel probe — cycle off → snapshot → live |
+| `m` | toggle hot-pixel mask (shift-`m` toggles highlight) |
 
-`l` = list mode is Splay's existing meaning. Video loop mode moved
-to `m` to free this.
+`l` = list mode is Splay's existing meaning. Video loop mode lives on
+`u` to avoid stepping on Splay's pre-existing `l` / `p` / `m`.
 
 ### Clip marks (video only)
 
@@ -184,11 +186,14 @@ that recreates the launch invocation). Not now.
 - `Space` (already): play/pause — keep.
 - `←`/`→` (already): step — keep.
 - `↑`/`↓` (already): source switch — keep.
-- `1`–`9` (already): source jump — keep.
-- `,`/`.`: speed up/down → **transport backward/forward**. Speed
-  becomes `p`/`P`.
-- `l` (loop mode) → **`m`**. Frees `l` for stills if web player
-  ever loads stills.
+- `1`–`9` (was source jump) → **0–4 zoom / brightness** (Splay convention).
+  `0` fit, `1` 1×, `2` 2×, `3` darker, `4` brighter. Source jump
+  dropped (cycle via `↑/↓` is enough at small N).
+- `,`/`.`: speed up/down → **transport backward/forward**. Pace
+  becomes `<`/`>` (shift `,`/`.`).
+- `l` (loop mode) → **`u`**. Frees `l` for stills mode in Splay,
+  and `m` for Splay's hot-pixel mask, and `p` for Splay's pixel
+  probe.
 - `[`/`]`/`+`/`-` (already): clip marks — keep.
 - `h` (currently broken per TODO.md): fix HUD; render per the
   content rules above.
@@ -197,14 +202,17 @@ that recreates the launch invocation). Not now.
 
 ## Splay changes to bring into convention
 
-- Add `Space` (play/pause), `,`/`.` (transport), `p`/`P` (pace),
-  `m` (loop mode). These become live once frame-sequence playback
+- Add `Space` (play/pause), `,`/`.` (transport), `<`/`>` (pace),
+  `u` (loop mode). These become live once frame-sequence playback
   lands.
-- Add `↑`/`↓` and `1`–`9` (source switch). Live when multi-stream
-  lands.
-- Add `t` (piano-roll toggle). Live when the piano roll lands.
+- Add `↑`/`↓` (source switch). Live when multi-stream lands. No
+  `1`–`9` source jump; Splay reuses `0`–`4` for zoom/brightness
+  (already does for `0` `1` `2` `3` `4`).
+- `t` already in Splay (thumbnail strip); semantics extend to
+  piano roll when that lands.
 - Existing `l` (list), `s` (select), `d` (deselect), `a` (sort),
-  `w` (wipe), `h`, `f`, `q`, `Esc` — keep as-is.
+  `w` (wipe), `p` (pixel probe), `m` (hot-pixel mask), `h`, `f`,
+  `q`, `Esc` — keep as-is.
 
 ## Order of implementation
 
