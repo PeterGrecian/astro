@@ -216,7 +216,7 @@ def main():
         # so the combined plot sits at "<camera>/brightness-combined.png"
         # — one stable key, no per-night nesting.
         cam_prefix = cfg.s3["prefix"].removesuffix("/nights")
-        key = f"{cam_prefix}/{stem}brightness-combined.png"
+        key = f"{cam_prefix}/brightness-combined.png"
         s3 = boto3.client("s3")
         s3.upload_file(str(out_path), bucket, key,
                        ExtraArgs={"ContentType": "image/png"})
