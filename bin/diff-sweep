@@ -90,9 +90,10 @@ def load_fits_binned(path, rgb_pattern):
 
 def close_window(idx, w_start, w_end, recent, rgb_pattern,
                  frames_dir, rotate_180,
-                 noise_floor_mult=0.0, signed=False, neg_blue=False):
-    """Find the frames in [w_start, w_end), compute max-mean (optionally
-    minus a noise floor), render."""
+                 noise_floor_mult=0.0, mean_mult=1.0,
+                 signed=False, neg_blue=False):
+    """Find the frames in [w_start, w_end), compute (max - k·mean)
+    optionally minus a noise floor, render."""
     in_win = [(t, f) for (t, f) in recent if w_start <= t < w_end]
     if not in_win:
         print(f"  skip window {idx:05d}: no frames in deque "
@@ -102,7 +103,7 @@ def close_window(idx, w_start, w_end, recent, rgb_pattern,
     N = stack.shape[0]
     mean = stack.mean(axis=0)
     max_ = stack.max(axis=0)
-    out_img = max_ - mean
+    out_img = max_ - mean_mult * mean
     if noise_floor_mult > 0 and N >= 2:
         # Expected max of N Gaussians sits at mean + sigma * sqrt(2 ln N).
         # Subtract that, scaled by user multiplier, to suppress pure-noise
@@ -147,6 +148,12 @@ def main() -> int:
                     help="subtract M × σ × sqrt(2 ln N) per pixel before "
                          "rendering (M=0 disables, M=1 cancels the "
                          "statistical max-of-N-Gaussians floor exactly)")
+    ap.add_argument("--mean-mult", type=float, default=1.0,
+                    metavar="K",
+                    help="multiply the subtracted mean by K (default 1.0). "
+                         "K>1 pushes residual sky-glow into the negatives "
+                         "for an 'extra dark sky' aesthetic; K<1 leaves "
+                         "more pedestal in.")
     ap.add_argument("--signed", action="store_true",
                     help="keep negative values instead of clipping at 0")
     ap.add_argument("--neg-blue", action="store_true",
@@ -210,6 +217,7 @@ def main() -> int:
             close_window(idx, ws, we, recent, rgb_pattern,
                          frames_dir, rotate_180,
                          noise_floor_mult=args.noise_floor_mult,
+                         mean_mult=args.mean_mult,
                          signed=args.signed, neg_blue=args.neg_blue)
 
         # Prune deque: drop frames older than the oldest still-open

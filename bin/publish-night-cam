@@ -96,7 +96,10 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         fi
     done
 
-    # --- diff-sweep: max(frame - window_mean) mono mp4 -------------
+    # --- diff-sweep: (max - mean) per pixel, minus the statistical
+    # max-of-N-Gaussians noise floor (M=1). Cancels pedestal, sky
+    # pollution DC, and pure-noise speckle; what survives is real
+    # bright transients (planes, meteors, satellite trails).
     diff_dir="${night_dir}/sweep-diff"
     mkdir -p "$diff_dir"
     diff_args=(
@@ -105,6 +108,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         --window-min "$WINDOW_MIN" --step-min "$STEP_MIN"
         --fps "$FPS"
         --out-dir "$diff_dir"
+        --noise-floor-mult 1.0
     )
     echo "--- diff-sweep (mono, window-mean subtracted)"
     if "$PY" "$HERE/diff-sweep" "${diff_args[@]}"; then
