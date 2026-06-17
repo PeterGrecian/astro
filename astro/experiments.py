@@ -51,6 +51,12 @@ def repo_commit(repo_root: Path | None = None) -> dict:
     return {"repo": name, "commit": commit, "dirty": dirty}
 
 
+# Bump META_SCHEMA whenever an incompatible change is made to the
+# ExperimentMeta fields. Adding optional fields does NOT need a bump;
+# consumers tolerate unknown keys. See design/meta-conventions.md.
+META_SCHEMA = 1
+
+
 @dataclass
 class ExperimentMeta:
     name: str                # short slug, e.g. "mci-60fps"
@@ -64,6 +70,7 @@ class ExperimentMeta:
     dirty: bool
     run_at_utc: str
     artefacts: list[str] = field(default_factory=list)  # uploaded filenames
+    schema: int = META_SCHEMA
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, sort_keys=True)

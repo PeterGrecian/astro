@@ -72,6 +72,7 @@ listing, not by reading any summary.
 
 ```jsonc
 {
+  "schema": 1,
   "name": "mci-colour-60",
   "kind": "mci",
   "camera": "eclipticam-v3w",
@@ -85,6 +86,8 @@ listing, not by reading any summary.
   "artefacts": ["mci-colour-60.mp4", "meta.json"]
 }
 ```
+
+`schema` is the integer set by `astro.experiments.META_SCHEMA`.
 
 `repo` + `commit` are the load-bearing fields — they let the website
 (and Splay) trace any frame back to the exact code that made it.
