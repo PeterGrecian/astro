@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""astro-experiment — run a one-off experiment and publish to S3.
+
+Experiments are NOT deliverables — they don't run every night, they're
+not expected to be present for any other night, and old ones stick
+around as a record of what was tried. Each experiment lands at:
+
+    s3://<bucket>/<prefix>/<night>/experiments/<name>/
+
+with a meta.json carrying name, description, args, repo+commit (so a
+frame on the website traces back to the exact code that made it).
+
+Usage:
+  astro-experiment --camera <cam> --night <YYYY-MM-DD> \\
+                   --name <slug> --kind <impl> \\
+                   --param key=value [--param key=value ...] \\
+                   [--description "..."] [--dry-run] [--keep-workdir]
+
+Example (interpolate the night's colour sweep up to 60 fps):
+  astro-experiment --camera eclipticam-v3w --night 2026-06-16 \\
+                   --name mci-colour-60 --kind mci \\
+                   --param input=sweep-colour.mp4 --param fps=60 \\
+                   --description "MCI smoothing of the colour sweep"
+
+Implementations live in astro/experiments_impl/<kind>.py and must
+expose run(cfg, night, name, work_dir, **params) -> description_str.
+"""
+from __future__ import annotations
+
+import argparse
+import importlib
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from astro.config import CameraConfig
+from astro.experiments import make_meta, upload_experiment
+
+
+def parse_params(pairs):
+    out = {}
+    for p in pairs or []:
+        if "=" not in p:
+            raise SystemExit(f"--param must be key=value, got {p!r}")
+        k, v = p.split("=", 1)
+        out[k] = v
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
+    ap.add_argument("--name", required=True,
+                    help="short slug for the experiment dir on S3")
+    ap.add_argument("--kind", required=True,
+                    help="implementation key — module under "
+                         "astro/experiments_impl/")
+    ap.add_argument("--param", action="append",
+                    help="key=value, repeatable. Passed to the experiment "
+                         "impl as kwargs.")
+    ap.add_argument("--description", default="",
+                    help="one-line description for meta.json + website")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="run the experiment but don't upload")
+    ap.add_argument("--keep-workdir", action="store_true",
+                    help="leave the temp work dir on disk after upload")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    params = parse_params(args.param)
+
+    try:
+        mod = importlib.import_module(f"astro.experiments_impl.{args.kind}")
+    except ImportError as e:
+        raise SystemExit(f"unknown experiment kind {args.kind!r}: {e}")
+    if not hasattr(mod, "run"):
+        raise SystemExit(
+            f"experiment impl {args.kind!r} missing run() function")
+
+    work_dir = Path(tempfile.mkdtemp(prefix=f"astro-exp-{args.name}-"))
+    try:
+        print(f"=== experiment {args.name} (kind={args.kind}) ===")
+        print(f"camera={args.camera} night={args.night}")
+        print(f"work_dir={work_dir}")
+        produced_desc = mod.run(cfg, args.night, args.name, work_dir,
+                                **params)
+        description = args.description or produced_desc
+
+        meta = make_meta(name=args.name, kind=args.kind,
+                         camera=args.camera, night=args.night,
+                         description=description, args=params)
+        if meta.dirty:
+            print(f"WARNING: repo is dirty; meta.json will record commit={meta.commit} dirty=True")
+
+        keys = upload_experiment(cfg, meta, work_dir, dry_run=args.dry_run)
+        print(f"=== done: {len(keys)} keys ===")
+    finally:
+        if args.keep_workdir:
+            print(f"work_dir kept: {work_dir}")
+        else:
+            shutil.rmtree(work_dir, ignore_errors=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
