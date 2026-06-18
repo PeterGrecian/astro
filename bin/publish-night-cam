@@ -185,5 +185,5 @@ PYEOF
 
 # Refresh the multi-night combined brightness plot at the camera prefix.
 echo "--- combined brightness (multi-night)"
-"$HERE/combined-brightness" --camera "$CAMERA" --publish || true
+"$PY" "$HERE/combined-brightness" --camera "$CAMERA" --publish || true
 echo "=== done ==="
