@@ -243,12 +243,20 @@ def main() -> int:
     if not args.no_mp4:
         import subprocess
         out_mp4 = args.out_dir / "sweep.mp4"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
-                        "-framerate", str(args.fps),
-                        "-i", str(frames_dir / "frame_%05d.jpg"),
-                        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                        "-crf", "20", "-preset", "medium",
-                        str(out_mp4)], check=False)
+        # frame_%05d uses the *window* index, which is sparse (skipped
+        # windows leave gaps and the first frame is rarely 00000), so the
+        # image2 demuxer's contiguous-from-start_number assumption fails.
+        # Glob the frames that actually exist instead.
+        rc = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                             "-framerate", str(args.fps),
+                             "-pattern_type", "glob",
+                             "-i", str(frames_dir / "frame_*.jpg"),
+                             "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                             "-crf", "20", "-preset", "medium",
+                             str(out_mp4)], check=False).returncode
+        if rc != 0 or not out_mp4.exists():
+            print(f"ffmpeg failed (rc={rc}); no {out_mp4}", file=sys.stderr)
+            return 1
         print(f"wrote {out_mp4}")
     return 0
 
