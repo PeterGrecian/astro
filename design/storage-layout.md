@@ -116,32 +116,43 @@ There is no global `state.json` — every artefact is per-camera-per-night.
 A host-level summary (if needed for monitoring) is derived, not
 authoritative.
 
-## Where stage 3 runs — config knob, not topology
+## Where stage 3 runs — follows storage locality, not CPU
 
-Goal: camera hosts can be made independent. Today eclipticam (pi5)
-and astrocam (pi4) have enough CPU to run their own dusk/dawn
-processing. Tomorrow that may change. The decision should be a
-config edit, not a deployment.
+**Stage 3 runs where the frames physically live.** The earlier framing
+("the Pis have enough CPU, so let them self-process") was wrong: CPU was
+never the bottleneck — **I/O locality** is. Today the camera Pis write
+their frames to puppy's NFS export. A Pi running its own stage 3 reads
+every frame *back across NFS* from puppy, on a weak CPU, and writes the
+deliverables back over NFS — the worst of both worlds.
+
+Measured 2026-06-20 (astrocam backfill, 1674 frames/night): the Pi 4
+managed ~30 frames/min over NFS; **puppy did ~400/min reading the same
+data locally — ~13× faster.** So:
+
+- **All cameras set `processing.host: "puppy"`** while the Pis write to
+  puppy's NFS. The Pis keep stage 1 (`astro-state`, which must run where
+  capture is — it reads brightness.csv and writes state.json) + capture.
+- **`processing.host: "self"` only becomes correct when a Pi has its own
+  local storage** for its frames. Then "self" means processing *local*
+  data — the whole point of host independence. Until then, self is a
+  trap.
 
 In `camera.json`:
 
 ```jsonc
 "processing": {
-  "host": "self",            // "self" = run on the camera's host
-                              // or a named host: "puppy", "muppet"
-  "fallback_host": "puppy"   // optional; if "self" lags or NFS is down
+  "host": "puppy",           // run stage 3 where the frames live
+                              // "self" only once the Pi stores locally
+  "fallback_host": "muppet"  // optional; if the primary lags / is down
 }
 ```
 
-`astro-process` daemons run on every host that's listed as a
-processing target (its own + any cameras pointing at it). Each
-daemon watches the state.json of every camera assigned to it via
-NFS; transitions trigger work locally.
-
-"Self" pushes toward camera-host independence; remote keeps the
-historical puppy-does-everything topology available. Switching is
-a one-line config change plus enabling the systemd unit on the
-target host.
+`astro-process` daemons run on every host that's a processing target
+(its own + any cameras pointing at it). Each daemon watches the
+state.json of every assigned camera over NFS; transitions trigger work
+*locally to that host*. Switching hosts is a one-line config change plus
+enabling the systemd unit on the target host (and disabling it on the
+old one).
 
 ## S3 layout (deliverables tier)
 

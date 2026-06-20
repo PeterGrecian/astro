@@ -15,7 +15,7 @@
   "frames_root": "~/astrocam-frames",
   "night_layout": "flat",
   "night_layout_notes": "YYYY-MM-DD/HH/MMSS.fits.fz (UTC dirs); night membership decided by DATE-OBS within the noon-rollover window.",
-  "processing_host": "astrocam",
+  "processing": {"host": "puppy"},
   "s3": {"bucket": "astro-berrylands-eu-west-1", "prefix": "astrocam/nights"},
   "occlusion_file": "occlusion.json",
   "quality_file": "quality.json",

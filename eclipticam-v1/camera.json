@@ -13,7 +13,7 @@
   "frames_root": "~/eclipticam-frames",
   "night_layout": "percam",
   "night_layout_notes": "TRANSITIONAL: live eclipticam/capture.py still writes to night/<night>/v1/HH/NNNN.fits.fz and day/<date>/v1/HH/NNNN.jpg. The post-split camera name 'eclipticam-v1' resolves the legacy 'v1' subcam via the percam reader. Once capture is migrated, flip to 'canonical' (per DECISIONS.md 2026-06-16).",
-  "processing": {"host": "self"},
+  "processing": {"host": "puppy"},
   "state": {"sun_altitude_night_deg": -10.0},
   "state_notes": "Shares the sky with eclipticam-v3w; night starts at sun -10 deg (was the -12 default). v1 is day-only so this mainly keeps the two cameras' state machines consistent.",
   "s3": {"bucket": "astro-berrylands-eu-west-1", "prefix": "eclipticam-v1/nights"},

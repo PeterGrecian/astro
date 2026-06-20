@@ -11,7 +11,7 @@
   "frames_root": "~/eclipticam-frames",
   "night_layout": "percam",
   "night_layout_notes": "TRANSITIONAL: live v3w_uploader.py still writes to night/<night>/v3w/HH/<epoch_ms>.fits.fz. The post-split camera name 'eclipticam-v3w' resolves the legacy 'v3w' subcam via the percam reader. Once the uploader is migrated, flip to 'canonical' (per DECISIONS.md 2026-06-16): <frames_root>/YYYY/MM/DD/eclipticam-v3w/night/HH/HH-MM-SS.fits.fz. brightness.csv already lands at the canonical path (astro.brightness_log.append writes there directly).",
-  "processing": {"host": "self"},
+  "processing": {"host": "puppy"},
   "state": {"sun_altitude_night_deg": -10.0},
   "state_notes": "Night starts when the sun is 10 deg below the horizon (was the -12 default) so night capture begins ~30-40 min earlier. Frame-quality gating still rejects too-bright twilight frames from the stack.",
   "brightness_roi": {"top_fraction": 0.5},
