@@ -124,10 +124,19 @@ def main():
     ap.add_argument("--nights", default=None,
                     help="comma-separated YYYY-MM-DD nights to ALWAYS "
                          "include (e.g. a known dark reference night), "
-                         "added to the --recent set and de-duplicated")
+                         "added to the --recent set and de-duplicated. "
+                         "Defaults to camera.json 'reference_nights'.")
     args = ap.parse_args()
 
     cfg = CameraConfig.load(args.camera)
+
+    # Standing reference nights from config, unless overridden on the CLI.
+    # Lets the nightly published chart always show a known dark baseline
+    # without hardcoding a date in the service scripts.
+    if args.nights is None:
+        ref_cfg = cfg.get("reference_nights")
+        if ref_cfg:
+            args.nights = ",".join(ref_cfg)
     out_path = args.out or (cfg.frames_root / "brightness-combined.png")
 
     all_nights = sorted(find_nights(cfg), key=lambda nc: nc[0])
