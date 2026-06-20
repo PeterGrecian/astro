@@ -1,0 +1,11 @@
+[Unit]
+Description=astro: repoint per-camera `latest` symlinks at today's data
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=peter
+ExecStart=/home/peter/astro/services/astro-latest-links-run.sh
+StandardOutput=journal
+StandardError=journal

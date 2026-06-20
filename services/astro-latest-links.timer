@@ -1,0 +1,13 @@
+[Unit]
+Description=astro: refresh per-camera `latest` symlinks
+
+[Timer]
+# Twice daily: 07:00 after dawn processing lands the just-finished night,
+# and 13:00 after the noon-rollover so `latest` follows over to the new
+# current night promptly. Cheap (symlink updates only).
+OnCalendar=*-*-* 07:00:00 Europe/London
+OnCalendar=*-*-* 13:00:00 Europe/London
+Persistent=true
+
+[Install]
+WantedBy=timers.target
