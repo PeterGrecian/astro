@@ -62,6 +62,16 @@ class CameraLoop:
             "hold_ticks", DEFAULTS["hold_ticks"])
 
     def tick(self):
+        # astro-process clears pending_process flags on disk after it runs
+        # the deliverables. We keep mode/hysteresis in memory, but the
+        # pending flags are co-owned, so re-read them from disk each tick —
+        # otherwise our next write re-asserts the stale flag and astro-process
+        # fires every tick forever.
+        if self.committed is not None:
+            on_disk = load_state(self.frames_root, self.name)
+            if on_disk is not None:
+                self.committed.pending_process = on_disk.pending_process
+
         candidate = decide(
             camera=self.name, host=self.host,
             cfg_state=self.cfg_state, location=self.location,

@@ -1,0 +1,10 @@
+[Unit]
+Description=astro: refresh the eclipticam multi-night brightness chart daily
+
+[Timer]
+# After dawn processing has had time to land the latest night's brightness.csv.
+OnCalendar=*-*-* 06:30:00 Europe/London
+Persistent=true
+
+[Install]
+WantedBy=timers.target

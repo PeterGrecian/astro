@@ -113,15 +113,18 @@ def _mode_from_brightness(stops: float, params: dict,
     return "dawn"
 
 
-def _mode_from_sun(alt_deg: float, params: dict) -> str:
+def _mode_from_sun(alt_deg: float, params: dict,
+                   previous: str | None = None) -> str:
     if alt_deg <= params["sun_altitude_night_deg"]:
         return "night"
     if alt_deg >= params["sun_altitude_day_deg"]:
         return "day"
-    # Civil-to-nautical twilight band: same dusk/dawn split as brightness
-    # but we don't have history here; default to dusk in the evening half,
-    # dawn in the morning half.
-    return "dusk" if alt_deg < 0 else "dawn"  # placeholder; refined below
+    # In the twilight band the sun is always below the horizon, so altitude
+    # alone can't tell dusk from dawn — use the trajectory implied by the
+    # previous mode: leaving day -> dusk; leaving night -> dawn.
+    if previous in ("day", "dusk"):
+        return "dusk"
+    return "dawn"
 
 
 def decide(camera: str, host: str, cfg_state: dict | None,
@@ -168,7 +171,8 @@ def decide(camera: str, host: str, cfg_state: dict | None,
             previous.mode if previous else None)
     elif sun_alt is not None:
         source = "sun_altitude"
-        mode = _mode_from_sun(sun_alt, params)
+        mode = _mode_from_sun(sun_alt, params,
+                              previous.mode if previous else None)
     else:
         source = "default_day"
         mode = "day"
@@ -197,10 +201,12 @@ def decide(camera: str, host: str, cfg_state: dict | None,
         "dawn_window_complete": False,
     })
     # Transition into night marks dusk window complete; into day marks dawn.
+    # Morning can arrive via dawn or (if the band was mislabelled) dusk, so
+    # accept any not-from-day path into day as a completed dawn window.
     if previous and previous.mode != mode:
         if mode == "night":
             pending = {**pending, "dusk_window_complete": True}
-        elif mode == "day" and previous.mode in ("night", "dawn"):
+        elif mode == "day" and previous.mode in ("night", "dawn", "dusk"):
             pending = {**pending, "dawn_window_complete": True}
 
     return State(

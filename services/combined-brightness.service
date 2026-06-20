@@ -1,0 +1,11 @@
+[Unit]
+Description=astro: refresh + publish the eclipticam multi-night brightness chart
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=peter
+ExecStart=/home/peter/astro/services/combined-brightness-run.sh
+StandardOutput=journal
+StandardError=journal
