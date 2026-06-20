@@ -1,7 +1,6 @@
 numpy
 scipy
 astropy
-fitsio
 opencv-python-headless
 Pillow
 boto3
