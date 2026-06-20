@@ -80,6 +80,12 @@ Cross-cutting:
 - [ ] **eclipticam-v1 as a dedicated sun camera** — fixed filter, day
       mode only. Capture schema in `design/capture-unification.md`
       already covers a `sun` mode.
+- [ ] **Lighten astrocam's nightly sweep render.** astrocam's all-night
+      ~1600 frames → 351 sweep windows; the colour+mono+diff render is
+      ~66 min/night even on puppy (vs eclipticam's ~150 windows). Now
+      that astrocam processes nightly on puppy (2026-06-20), that cost
+      recurs every night. Options: coarser `--step-min`, fewer sweep
+      variants for astrocam, or skip a sweep. Not urgent.
 
 ## Deliverables (website)
 
