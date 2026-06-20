@@ -173,11 +173,14 @@ def main():
         h = t_local.hour
         return h >= 21 or h < 5
 
-    # Explicit reference nights (from --nights) draw dashed + bold so a
-    # known dark night stands out from the recent set being compared.
+    # Explicit reference nights (from --nights / config reference_nights).
     ref_set = set()
     if args.nights:
         ref_set = {s.strip() for s in args.nights.split(",") if s.strip()}
+    # The latest night gets the prominent bold dashed-black line — it's the
+    # one you care about most. Reference nights stay dashed (so they read as
+    # "not a recent night") but coloured, not black.
+    latest_night = nights[-1][0] if nights else None
 
     plotted = 0
     for i, (night_str, csv_p) in enumerate(nights):
@@ -197,19 +200,24 @@ def main():
         # pedestal becomes ~0 stops, not a -10 clip artefact.
         signal = np.maximum(vals - pedestal, 0.5)
         xs = to_anchor_axis(times, night_str)
+        is_latest = night_str == latest_night
         is_ref = night_str in ref_set
+        if is_latest:
+            style = dict(linewidth=2.0, linestyle="--", color="black",
+                         zorder=6, label=f"{night_str} (latest)")
+        elif is_ref:
+            style = dict(linewidth=1.4, linestyle="--", color=cmap(i % 10),
+                         zorder=5, label=f"{night_str} (ref)")
+        else:
+            style = dict(linewidth=1.0, linestyle="-", color=cmap(i % 10),
+                         zorder=2, label=night_str)
         # Plot as a thin line (1-min cadence is dense enough that points
         # would overlap into a smear). gapcolor=None keeps any frame-
         # less stretches visibly broken rather than interpolated.
-        ax.plot(xs, signal,
-                linewidth=2.0 if is_ref else 1.0,
-                linestyle="--" if is_ref else "-",
-                color="black" if is_ref else cmap(i % 10),
-                label=f"{night_str} (ref)" if is_ref else night_str,
-                solid_joinstyle="round", zorder=5 if is_ref else 2)
+        ax.plot(xs, signal, solid_joinstyle="round", **style)
         plotted += 1
-        print(f"  {night_str}: {len(times)} pts  pedestal={pedestal:.0f}"
-              f"{'  [ref]' if is_ref else ''}")
+        tag = "  [latest]" if is_latest else ("  [ref]" if is_ref else "")
+        print(f"  {night_str}: {len(times)} pts  pedestal={pedestal:.0f}{tag}")
 
     if not plotted:
         print("no curves plotted", file=sys.stderr)
