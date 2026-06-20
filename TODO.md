@@ -1,3 +1,10 @@
+20/6  the multinight brighness charts should include 2026-06-10 so we can compare recent nights (say, last 4) with a known dark night
+
+20/6 moon visibility on eclipticam day.  I'm surprised I can't see it.  3pm?
+
+20/6 return to anim.  The capture 19/6 had some very good passages so I'm thinking we need to do some local lens distortion fixes to derot/detrans.  we should use all frames where brightness < 10 stops above pedistal and work out what to do about gaps in the animation.  it's all right for initial night playthrough but the bad frames clobber derot/detrans
+
+
 # astro — TODO
 
 Live work list. Move items to DECISIONS.md once they crystallise into
@@ -6,8 +13,6 @@ load-bearing choices; delete done items (per the
 
 ## Now
 
-- [ ] **Merge `unify-cameras` → `main`** and delete the branch (per
-      DECISIONS.md 2026-06-16). Tag the merge commit.
 - [ ] **Migrate eclipticam capture writers to canonical layout.**
       Today `eclipticam/capture.py` (v1) and `eclipticam/v3w_uploader.py`
       (v3w) still write `~/eclipticam-frames/night/<date>/<v1|v3w>/HH/...`
@@ -24,12 +29,11 @@ load-bearing choices; delete done items (per the
 - [ ] **Re-derive astrocam pole/orientation from a clear night** — the
       camera fell during a previous night and was refit by hand
       (2026-06-14). Pointing may have shifted.
-- [ ] **Migrate puppy to the new repo path.** Puppy still runs from
-      `/home/peter/astro-unify/`; the `services/publish-*.service` unit
-      paths and `bin/publish-night-cam`'s `REPO=` already point to
-      `/home/peter/astro/`. Either rename the puppy clone or update
-      the service files on puppy to point at `astro-unify/` while it
-      remains.
+- [ ] **Remove dead `publish-*` runner scripts on puppy.** The
+      `publish-{eclipticam,astrocam}.timer` units are now disabled
+      (2026-06-20) — both cameras self-process on their Pis. The
+      runner scripts still reference the dead `/home/peter/astro-unify/`
+      path; harmless but worth deleting along with the unit files.
 
 ## Four-stage migration (per DECISIONS.md 2026-06-16)
 
