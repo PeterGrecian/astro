@@ -20,6 +20,7 @@ Layout: ~/astrocam-frames/YYYY-MM-DD/HHMMSS.fits.fz
 State:  /var/lib/astrocam/state.json
 """
 import json
+import math
 import signal
 import subprocess
 import sys
@@ -39,6 +40,7 @@ from photutils.detection import DAOStarFinder
 # Shared noon-rollover helper used by all cameras.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.nightdir import night_of  # noqa: E402
+from astro.brightness_log import BrightnessRow, append as append_brightness  # noqa: E402
 from picamera2 import Picamera2
 
 # Gaussian fits on non-star noise candidates produce a flood of these.
@@ -72,6 +74,10 @@ GAIN = 4.0
 # 8 frames * 1.2s = 9.6s integration per output, ~6 outputs/min vs ~50.
 # Sum stays in uint16 (max 8 * 1023 = 8184 << 65535) so no widening.
 COADD_N = 8
+
+# Sensor pedestal (black level) for "stops above pedestal" in brightness.csv.
+# Keep in sync with astrocam/camera.json "pedestal".
+PEDESTAL = 519.0
 
 RESOLUTION = (3280, 2464)
 RAW_FORMAT = "SBGGR10"  # IMX219 native, confirmed from rpicam-still
@@ -327,6 +333,31 @@ def main():
                         coadd_buf, fits_path, EXPOSURE_US, GAIN,
                         coadd_count, coadd_t_start, now,
                     )
+
+                    # Brightness sidecar for stage 1 (astro-state) and the
+                    # brightness plot — one row per landed FITS, on the coadd.
+                    # Mirrors eclipticam-v3w's streaming writer. NFS hiccup
+                    # must not stop capture; astro-state falls back to
+                    # sun-altitude until rows resume.
+                    coadd_mean = float(coadd_buf.mean())
+                    exptime_s = EXPOSURE_US / 1e6 * coadd_count
+                    per_s = (coadd_mean / (exptime_s * GAIN)
+                             if exptime_s * GAIN > 0 else coadd_mean)
+                    stops = (math.log2(coadd_mean / PEDESTAL)
+                             if coadd_mean > 0 and PEDESTAL > 0 else float("nan"))
+                    try:
+                        append_brightness(FRAMES, "astrocam", BrightnessRow(
+                            utc_iso=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            epoch_ms=int(now.timestamp() * 1000),
+                            mode="night",
+                            exptime_s=exptime_s,
+                            gain=GAIN,
+                            mean=coadd_mean,
+                            per_s=per_s,
+                            stops_above_pedestal=stops,
+                        ))
+                    except OSError as e:
+                        print(f"brightness.csv append failed: {e}", flush=True)
 
                     if (now_mono - last_starfind) >= STARFIND_INTERVAL_S:
                         cands = starfind_tiles(
