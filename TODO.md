@@ -41,7 +41,9 @@ load-bearing choices; delete done items (per the
 ## Four-stage migration (per DECISIONS.md 2026-06-16)
 
 Stage 1 (`astro-state`) and stage 3 (`astro-process`) landed
-2026-06-16 — see CLAUDE.md status section. Remaining:
+2026-06-16 and are now deployed + enabled on both the eclipticam and
+astrocam Pis (2026-06-20); the old publish-* timers are retired.
+Remaining:
 
 1. [ ] **`bin/astro-capture` daemon.** Generic `picamera2` loop driven
       by `camera.json` modes (see `design/capture-unification.md`).
@@ -63,18 +65,6 @@ Cross-cutting:
       Today the per-host camera lists are duplicated in env files at
       `services/astro-<stage>.env.<hostname>`; host.json will replace
       them.
-- [ ] **Deploy `astro-state.service` and `astro-process.service`** on
-      eclipticam, astrocam, and (for any camera with
-      `processing.host != "self"`) puppy/muppet. Copy the matching
-      `services/astro-<stage>.env.<hostname>` to
-      `/etc/default/astro-<stage>`. Disable the old
-      `publish-{astrocam,eclipticam}.timer` on the same hosts at
-      enable-time (stage 3 supersedes them).
-- [ ] **Retire `publish-{astrocam,eclipticam}.{timer,service}` and
-      their `-run.sh` wrappers** once stage 3 has run cleanly for a
-      week. Today's deliverables flow doesn't change — stage 3
-      shells the same `bin/publish-night-cam` — only the trigger
-      moves from cron-like to event-driven.
 - [ ] **Migrate to canonical storage layout** (per DECISIONS.md
       2026-06-16; full plan in `design/storage-layout.md`). Per night,
       per camera: rsync from `~/<camera>-frames/{day,night}/<date>/...`
@@ -90,13 +80,6 @@ Cross-cutting:
       FITS encode / badpix off the capture loop. Target <200 ms
       per-frame overhead so we hit the camera's natural ~9.6 s cadence.
       Use the `super/bin/` async-file-transfer queue pattern.
-- [ ] **astrocam → `astro.capture.streaming`.** First user of the
-      shared module beyond eclipticam v3w. Template:
-      `eclipticam/v3w_night_daemon.py`. Will reveal what's accidentally
-      specific to v3w. Plan: `design/capture-unification.md`.
-- [ ] **Move processing to the eclipticam Pi** as much as possible
-      (brightness, binning, 10-min window accumulation) so puppy only
-      stores derived products.
 - [ ] **eclipticam-v1 as a dedicated sun camera** — fixed filter, day
       mode only. Capture schema in `design/capture-unification.md`
       already covers a `sun` mode.
@@ -108,8 +91,6 @@ Cross-cutting:
       of the night) and the brightness curve. The skycam calendar is
       the model — extract as a shared component
       (`design/repo-boundaries-and-reuse.md`).
-- [ ] **Backfill existing eclipticam nights** through the unified
-      pipeline so the calendar has history.
 - [ ] **Dawn-to-dusk derot animation** — start with a 10-min window
       derot stack centred on the darkest part of the night; feather
       the window width smoothly out to full-night and back; move the
