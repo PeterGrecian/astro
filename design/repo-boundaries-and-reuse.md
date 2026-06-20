@@ -103,6 +103,21 @@ app one day), the canonical contract is the JSON + S3 layout in
 share schemas. That keeps each idiomatic in its runtime without
 forcing a lowest-common-denominator library.
 
+## Open boundary questions
+
+Carried over from TODO.md 2026-06-20 — these are boundary decisions to
+make as `astro.capture` matures, not tasks to schedule:
+
+- **The astro / `Berrylands/gardencam` / `super/services` boundary.**
+  gardencam (Pi capture) is gradually emptying as `astro.capture`
+  absorbs the camera daemons; `super/services` owns the async
+  file-transfer queue. The `pilib` / `piservices` focused-Pi-repo idea
+  is still open — revisit when gardencam is nearly empty.
+- **Where `astrocam-capture.service` lives.** Today it's in `astro/`.
+  Once `astro.capture` takes over capture, the systemd unit may belong
+  in `ansible/` (fleet config) rather than the code repo. Decide at the
+  capture-unification cutover.
+
 ## Not now
 
 Anything in this doc is design-level direction, not action items.

@@ -161,29 +161,3 @@ Multi-night stacking (`derot-week`) deferred until per-night pipeline
 matures. Notes: `design/per-tile-effective-pole.md`,
 `design/tracking-is-iterated-derot.md`, `design/zonal-derot-strategy.md`.
 
-## Targets
-
-- **Neptune (mag +7.8), Nov 2026.** Late Sep / early Oct opposition;
-  observable through November. Estimated ~28 h of derotated stacking
-  (~4 dark nights × ~7 h) for 5–6× current single-hour SNR. Needs
-  sharp per-night `final/derot.fits.fz` and a planet-aware motion
-  model (Neptune drifts ~1 arcmin/day vs. sidereal). Camera also
-  needs to survive winter (warm + dry; cover working).
-- **Uranus (mag +5.6), Nov 2026 opposition.** Should appear in
-  per-night derot already; blink-comparator diff vs. previous night
-  should be unmistakable.
-- **Wandering-star (planet) blink discriminator** — subtract two
-  per-night derot.fits.fz at identical pole + distortion. Stars
-  cancel; planets / asteroids / comets leave a ±star signature at
-  tonight's and yesterday's pixel. Sketch: `derot-diff <A> <B>` →
-  `<B>/diff-vs-<A>.fits.fz`.
-
-## Repo housekeeping
-
-- [ ] Periodically review the boundary between this repo,
-      `Berrylands/gardencam` (Pi capture, gradually emptying as
-      `astro.capture` absorbs daemons), and `super/services`
-      (async file transfer queue). The `pilib` / `piservices`
-      focused-Pi repo idea is still open.
-- [ ] Decide whether `astrocam-capture.service` moves out of `astro/`
-      into ansible once `astro.capture` takes over.
