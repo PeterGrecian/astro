@@ -57,10 +57,17 @@ def find_nights(cfg):
             if csv_p.exists() and d.name[:4].isdigit():
                 yield d.name, csv_p
         return
+    # percam legacy tree: brightness.csv lives at the night level. Naming
+    # changed mid-migration — newer nights use plain "brightness.csv",
+    # older ones the subcam-prefixed "<subcam>_brightness.csv" (e.g.
+    # v3w_brightness.csv). Accept both so pre-migration reference nights
+    # (e.g. the dark 2026-06-10) still plot.
+    subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
     for d in sorted(nights_root.iterdir()):
-        csv_p = d / name
-        if csv_p.exists():
-            yield d.name, csv_p
+        for cand in (d / name, d / f"{subcam}_{name}"):
+            if cand.exists():
+                yield d.name, cand
+                break
 
 
 def load_curve(csv_path: Path):
@@ -111,20 +118,36 @@ def main():
     ap.add_argument("--publish", action="store_true",
                     help="upload to S3 as <camera>/brightness-combined.png "
                          "(no per-night prefix; one key)")
-    ap.add_argument("--limit", type=int, default=14,
+    ap.add_argument("--recent", "--limit", type=int, default=14,
+                    dest="recent",
                     help="plot the N most recent nights (default 14)")
+    ap.add_argument("--nights", default=None,
+                    help="comma-separated YYYY-MM-DD nights to ALWAYS "
+                         "include (e.g. a known dark reference night), "
+                         "added to the --recent set and de-duplicated")
     args = ap.parse_args()
 
     cfg = CameraConfig.load(args.camera)
     out_path = args.out or (cfg.frames_root / "brightness-combined.png")
 
-    nights = list(find_nights(cfg))
-    # Most recent N by date string (yyyy-mm-dd sorts lexically)
-    nights = sorted(nights, key=lambda nc: nc[0])[-args.limit:]
-    if not nights:
+    all_nights = sorted(find_nights(cfg), key=lambda nc: nc[0])
+    if not all_nights:
         print(f"no per-night brightness CSVs under {cfg.frames_root}",
               file=sys.stderr)
         return 1
+    by_str = {n: p for n, p in all_nights}
+
+    # Selection: the N most recent, plus any explicit --nights (e.g. a
+    # known dark night to compare against), de-duplicated and re-sorted.
+    selected = {n for n, _ in all_nights[-args.recent:]}
+    if args.nights:
+        for want in (s.strip() for s in args.nights.split(",") if s.strip()):
+            if want in by_str:
+                selected.add(want)
+            else:
+                print(f"  --nights: {want} has no brightness CSV, skipping",
+                      file=sys.stderr)
+    nights = [(n, by_str[n]) for n in sorted(selected)]
 
     fig, ax = plt.subplots(figsize=(11, 5))
     cmap = plt.get_cmap("tab10")
@@ -140,6 +163,12 @@ def main():
     def _in_observing_window(t_local):
         h = t_local.hour
         return h >= 21 or h < 5
+
+    # Explicit reference nights (from --nights) draw dashed + bold so a
+    # known dark night stands out from the recent set being compared.
+    ref_set = set()
+    if args.nights:
+        ref_set = {s.strip() for s in args.nights.split(",") if s.strip()}
 
     plotted = 0
     for i, (night_str, csv_p) in enumerate(nights):
@@ -159,13 +188,19 @@ def main():
         # pedestal becomes ~0 stops, not a -10 clip artefact.
         signal = np.maximum(vals - pedestal, 0.5)
         xs = to_anchor_axis(times, night_str)
+        is_ref = night_str in ref_set
         # Plot as a thin line (1-min cadence is dense enough that points
         # would overlap into a smear). gapcolor=None keeps any frame-
         # less stretches visibly broken rather than interpolated.
-        ax.plot(xs, signal, linewidth=1.0, color=cmap(i % 10),
-                label=night_str, solid_joinstyle="round")
+        ax.plot(xs, signal,
+                linewidth=2.0 if is_ref else 1.0,
+                linestyle="--" if is_ref else "-",
+                color="black" if is_ref else cmap(i % 10),
+                label=f"{night_str} (ref)" if is_ref else night_str,
+                solid_joinstyle="round", zorder=5 if is_ref else 2)
         plotted += 1
-        print(f"  {night_str}: {len(times)} pts  pedestal={pedestal:.0f}")
+        print(f"  {night_str}: {len(times)} pts  pedestal={pedestal:.0f}"
+              f"{'  [ref]' if is_ref else ''}")
 
     if not plotted:
         print("no curves plotted", file=sys.stderr)
@@ -187,7 +222,10 @@ def main():
     ax.set_xlabel("local time (BST)")
     ax.set_ylabel("stops above pedestal")
     title_cam = cfg.name.split("-", 1)[-1] if "-" in cfg.name else cfg.name
-    ax.set_title(f"{title_cam} — last {plotted} nights")
+    n_ref = len(ref_set & {n for n, _ in nights})
+    title = (f"{title_cam} — {plotted} nights"
+             + (f" (+{n_ref} reference)" if n_ref else ""))
+    ax.set_title(title)
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
     ax.xaxis.set_major_formatter(
