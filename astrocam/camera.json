@@ -19,6 +19,6 @@
   "s3": {"bucket": "astro-berrylands-eu-west-1", "prefix": "astrocam/nights"},
   "occlusion_file": "occlusion.json",
   "quality_file": "quality.json",
-  "location_file": null,
+  "location_file": "location.json",
   "privacy_file": null
 }
