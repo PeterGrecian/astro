@@ -1,6 +1,3 @@
-20/6 return to anim.  The capture 19/6 had some very good passages so I'm thinking we need to do some local lens distortion fixes to derot/detrans.  we should use all frames where brightness < 10 stops above pedistal and work out what to do about gaps in the animation.  it's all right for initial night playthrough but the bad frames clobber derot/detrans
-
-
 # astro — TODO
 
 Live work list. Move items to DECISIONS.md once they crystallise into
@@ -96,7 +93,14 @@ Cross-cutting:
       the window width smoothly out to full-night and back; move the
       window start from dusk to dawn. ~60 s video at 60 fps. Probably
       needs barrel-distortion correction more than precise pole
-      finding.
+      finding. Immediate sub-problems (from the 06-19 capture, which
+      had some very good passages):
+      - Local lens-distortion fixes to derot/detrans (per-tile, not
+        global) — bad frames currently clobber the derot/detrans.
+      - Frame selection: use all frames where brightness < 10 stops
+        above pedestal.
+      - Decide how to handle gaps in the animation — the raw
+        playthrough tolerates them but derot/detrans does not.
 - [ ] **Astro experiments page** lists the menu under
       `s3://.../<camera>/nights/<night>/experiments/` so each
       experiment is browsable independently of the multi-source
@@ -144,20 +148,9 @@ Cross-cutting:
 - [ ] **Finish per-night cold archival** — see `whereisallthedata.csv`
       for the inventory across hosts and tiers.
 
-## Multi-night / catalog (parked)
+## Parked
 
-The Gaia catalog-match exploration is parked — full design and what
-worked / didn't is in `TODO_fit.MD` (deleted on 2026-06-16; available
-in git history at commit before the legacy-pipeline deletion). Resume
-points if revived:
-
-1. Multi-anchor WCS fit (Polaris + 3–4 Big Dipper stars) to constrain
-   (pole_x, pole_y, plate_scale, rotation, k1, k2) jointly.
-2. Per-tile WCS instead of global — local distortion is small.
-3. Visual side-by-side confirmation of identifications before
-   committing to a model.
-
-Multi-night stacking (`derot-week`) deferred until per-night pipeline
-matures. Notes: `design/per-tile-effective-pole.md`,
-`design/tracking-is-iterated-derot.md`, `design/zonal-derot-strategy.md`.
+- **Catalog match & multi-night stacking** — parked exploration, now
+  in `design/catalog-match-parked.md` (Gaia WCS fit resume points,
+  `derot-week` deferral).
 
