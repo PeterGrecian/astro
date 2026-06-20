@@ -76,7 +76,15 @@ def main() -> int:
 
     if args.verbose:
         print(f"# {loc.camera} {loc.night}  root={loc.root}  "
-              f"layout={loc.layout}", file=sys.stderr)
+              f"layout={loc.layout}  storage={loc.storage_class}",
+              file=sys.stderr)
+    if not loc.online:
+        # Archived/offline (USB stick, S3 deep-archive): print the recorded
+        # location but warn so a naive `cd`/`splay` doesn't silently fail.
+        print(f"# {loc.night} is offline ({loc.storage_class}) at "
+              f"{loc.root}:{loc.path}", file=sys.stderr)
+        print(loc.path)
+        return 0
     print(loc.path)
     return 0
 

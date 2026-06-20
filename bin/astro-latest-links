@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""astro-latest-links — repoint per-camera `latest` symlinks at today's data.
+
+For each camera given, resolve today's night dir (via astro.locate, so it
+follows the data across roots/layouts) and point a stable symlink at it:
+
+    <frames_root>/latest-<camera>  ->  <today's resolved night dir>
+
+So `cd ~/eclipticam-frames/latest-eclipticam-v3w` (or `splay` it) always
+lands on tonight's data with no command substitution. Idempotent; safe to
+run repeatedly. Intended to run nightly (cron, or alongside astro-state).
+
+Resolves "today" by noon-rollover, like the rest of the pipeline; before
+tonight's capture starts the link points at the just-finished night, which
+is what you want to look at anyway.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from astro.config import CameraConfig
+from astro import locate
+
+
+def _repoint(link: Path, target: Path) -> str:
+    """Atomically point `link` at `target`. Returns a status word."""
+    if link.is_symlink() and Path(os.readlink(link)) == target:
+        return "unchanged"
+    tmp = link.with_name(link.name + ".tmp")
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
+    tmp.symlink_to(target)
+    os.replace(tmp, link)  # atomic swap, even over an existing symlink
+    return "updated"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", action="append", required=True,
+                    help="camera name (repeatable)")
+    args = ap.parse_args()
+
+    rc = 0
+    for camera in args.camera:
+        try:
+            cfg = CameraConfig.load(camera)
+        except FileNotFoundError as e:
+            print(f"skip: {e}", file=sys.stderr)
+            rc = 1
+            continue
+        loc = locate.resolve(cfg)  # today
+        # Anchor the link in the first (primary) root so its location is
+        # stable even if today's data resolved from a cold root.
+        link = cfg.search_roots[0] / f"latest-{camera}"
+        if loc is None:
+            print(f"{camera}: no data for today; leaving {link} as-is",
+                  file=sys.stderr)
+            continue
+        status = _repoint(link, loc.path)
+        print(f"{camera}: {link} -> {loc.path} ({status})")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

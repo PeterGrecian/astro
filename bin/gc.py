@@ -119,6 +119,12 @@ def find_dated_candidates() -> tuple[list[tuple[str, int, Path]], list[Path]]:
         if not root.is_dir():
             continue
         for child in root.iterdir():
+            # Skip symlinks outright — they're navigation aids (e.g. the
+            # latest-<camera> pointers astro-latest-links maintains), never
+            # dated artefacts the GC owns. is_dir() follows the link, so
+            # without this they'd be misreported as orphans every run.
+            if child.is_symlink():
+                continue
             if child.is_dir():
                 # Canonical: YYYY-MM-DD directory at the root.
                 key = canonical_date_key(child)

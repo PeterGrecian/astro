@@ -53,7 +53,49 @@ class Located:
     night: str
     root: Path
     layout: str
-    path: Path     # the resolved night directory (exists)
+    path: Path     # the resolved night directory (exists), or the recorded
+                   # path/URI for registry hits (which may be offline media)
+    storage_class: str = "local"   # local | usb-stick | deep-archive | ...
+    online: bool = True            # False for archived/offline (USB, S3 cold)
+
+
+# The data-location registry: ~/astro/whereisallthedata.csv records where
+# nights have been *moved* (squashed, copied to USB, deep-archived) — places
+# a live filesystem probe can't see. cold-archive-night writes it. We read
+# it so resolve() can answer for archived nights instead of "not found".
+# Schema: night,host,path,...,storage_class,notes  (camera implicit/optional).
+import csv as _csv
+import os as _os
+
+_REGISTRY_PATH = Path(_os.path.expanduser("~/astro/whereisallthedata.csv"))
+
+
+def _registry_rows():
+    if not _REGISTRY_PATH.is_file():
+        return []
+    with _REGISTRY_PATH.open(newline="") as f:
+        return list(_csv.DictReader(f))
+
+
+def registry_locations(night: str, camera: str | None = None) -> list[Located]:
+    """All recorded locations for a night from the registry, online or not.
+    `camera` filters when the registry carries a camera column (newer rows);
+    legacy starcam rows have no camera and match any."""
+    out = []
+    for r in _registry_rows():
+        if r.get("night") != night:
+            continue
+        row_cam = r.get("camera")
+        if camera and row_cam and row_cam != camera:
+            continue
+        sc = r.get("storage_class", "local")
+        out.append(Located(
+            camera=camera or row_cam or "?", night=night,
+            root=Path(r.get("host", "?")), layout="registry",
+            path=Path(r.get("path", "?")),
+            storage_class=sc,
+            online=(sc == "local")))
+    return out
 
 
 def resolve(cfg, night: str | None = None) -> Located | None:
@@ -76,7 +118,16 @@ def resolve(cfg, night: str | None = None) -> Located | None:
             if d.is_dir():
                 return Located(camera=camera, night=night, root=root,
                                layout=layout, path=d)
-    return None
+
+    # Not live on any root — consult the registry for moved/archived data.
+    # Prefer an online (local) recorded copy; otherwise return the first
+    # offline record so the caller learns *where* it went (USB / deep-archive)
+    # rather than a bare "not found".
+    recs = registry_locations(night, camera)
+    for loc in recs:
+        if loc.online and loc.path.is_dir():
+            return loc
+    return recs[0] if recs else None
 
 
 def list_nights(cfg) -> list[tuple[str, "Located"]]:
