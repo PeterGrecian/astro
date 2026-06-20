@@ -1,21 +1,21 @@
-night,host,path,raw_bayer_bytes,binned_bytes,raw_sum8_bytes,binned_sum2_bytes,tarball_bytes,storage_class,notes
-2026-05-20,muppet,~/starcam-backup/2026-05-20,0,0,3034776960,2832361920,0,local,squashed; sources deleted
-2026-05-20,muppet,/mnt/astrobackup/starcam/night/2026-05-20,5867732579,0,0,0,0,usb-stick,MANIFEST.sha256 verified
-2026-05-20,aws,s3://astro-berrylands-eu-west-1/cold/starcam/night/2026-05-20/starcam-night-2026-05-20.tar,0,0,0,0,5870551040,deep-archive,sha256 in object metadata
-2026-05-21,puppy,~/starcam-frames/night/2026-05-21,33114506845,9490578560,0,0,0,local,not yet squashed
-2026-05-22,muppet,~/starcam-backup/2026-05-22,0,0,6063681600,0,0,local,no binned (never built); raw-sum8 only
-2026-05-22,muppet,/mnt/astrobackup/starcam/night/2026-05-22,6063772833,0,0,0,0,usb-stick,MANIFEST.sha256 verified
-2026-05-23,puppy,~/starcam-frames/night/2026-05-23,33973688785,8800719148,0,0,0,local,not yet squashed; darkest night
-2026-05-24,puppy,~/starcam-frames/night/2026-05-24,32369871966,9280205761,0,0,0,local,not yet squashed
-2026-05-25,puppy,~/starcam-frames/night/2026-05-25,0,0,2340740160,2203122240,0,local,squashed; sources retained on puppy
-2026-05-25,muppet,/mnt/astrobackup/starcam/night/2026-05-25,4544238291,0,0,0,0,usb-stick,MANIFEST.sha256 verified
-2026-05-26,muppet,~/starcam-backup/2026-05-26,0,0,3415982400,3143828160,0,local,squashed; sources deleted
-2026-05-26,muppet,/mnt/astrobackup/starcam/night/2026-05-26,6560249685,0,0,0,0,usb-stick,MANIFEST.sha256 verified
-2026-05-27,puppy,~/starcam-frames/night/2026-05-27,31537339055,8926499162,0,0,0,local,not yet squashed
-2026-05-28,puppy,~/starcam-frames/night/2026-05-28,18184016878,5001297274,0,0,0,local,not yet squashed
-2026-05-30,muppet,~/starcam-backup/2026-05-30,0,0,4668364800,4123123200,0,local,squashed; sources deleted
-2026-05-30,muppet,/mnt/astrobackup/starcam/night/2026-05-30,8792051043,0,0,0,0,usb-stick,MANIFEST.sha256 verified
-2026-06-01,puppy,~/starcam-frames/night/2026-06-01,21677190131,6541040490,0,0,0,local,not yet squashed; median=0 anomaly
-2026-06-02,puppy,~/starcam-frames/night/2026-06-02,2814531131,828209314,0,0,0,local,not yet squashed; median=0 anomaly
-2026-06-03,puppy,~/starcam-frames/night/2026-06-03,8855274168,2556620370,0,0,0,local,not yet squashed; dark
-2026-06-04,puppy,~/starcam-frames/night/2026-06-04,5633508115,1651923956,0,0,0,local,not yet squashed; dark
+night,camera,host,path,raw_bayer_bytes,binned_bytes,raw_sum8_bytes,binned_sum2_bytes,tarball_bytes,storage_class,notes
+2026-05-20,starcam,muppet,~/starcam-backup/2026-05-20,0,0,3034776960,2832361920,0,local,squashed; sources deleted
+2026-05-20,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-20,5867732579,0,0,0,0,usb-stick,MANIFEST.sha256 verified
+2026-05-20,starcam,aws,s3://astro-berrylands-eu-west-1/cold/starcam/night/2026-05-20/starcam-night-2026-05-20.tar,0,0,0,0,5870551040,deep-archive,sha256 in object metadata
+2026-05-21,starcam,puppy,~/starcam-frames/night/2026-05-21,33114506845,9490578560,0,0,0,local,not yet squashed
+2026-05-22,starcam,muppet,~/starcam-backup/2026-05-22,0,0,6063681600,0,0,local,no binned (never built); raw-sum8 only
+2026-05-22,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-22,6063772833,0,0,0,0,usb-stick,MANIFEST.sha256 verified
+2026-05-23,starcam,puppy,~/starcam-frames/night/2026-05-23,33973688785,8800719148,0,0,0,local,not yet squashed; darkest night
+2026-05-24,starcam,puppy,~/starcam-frames/night/2026-05-24,32369871966,9280205761,0,0,0,local,not yet squashed
+2026-05-25,starcam,puppy,~/starcam-frames/night/2026-05-25,0,0,2340740160,2203122240,0,local,squashed; sources retained on puppy
+2026-05-25,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-25,4544238291,0,0,0,0,usb-stick,MANIFEST.sha256 verified
+2026-05-26,starcam,muppet,~/starcam-backup/2026-05-26,0,0,3415982400,3143828160,0,local,squashed; sources deleted
+2026-05-26,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-26,6560249685,0,0,0,0,usb-stick,MANIFEST.sha256 verified
+2026-05-27,starcam,puppy,~/starcam-frames/night/2026-05-27,31537339055,8926499162,0,0,0,local,not yet squashed
+2026-05-28,starcam,puppy,~/starcam-frames/night/2026-05-28,18184016878,5001297274,0,0,0,local,not yet squashed
+2026-05-30,starcam,muppet,~/starcam-backup/2026-05-30,0,0,4668364800,4123123200,0,local,squashed; sources deleted
+2026-05-30,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-30,8792051043,0,0,0,0,usb-stick,MANIFEST.sha256 verified
+2026-06-01,starcam,puppy,~/starcam-frames/night/2026-06-01,21677190131,6541040490,0,0,0,local,not yet squashed; median=0 anomaly
+2026-06-02,starcam,puppy,~/starcam-frames/night/2026-06-02,2814531131,828209314,0,0,0,local,not yet squashed; median=0 anomaly
+2026-06-03,starcam,puppy,~/starcam-frames/night/2026-06-03,8855274168,2556620370,0,0,0,local,not yet squashed; dark
+2026-06-04,starcam,puppy,~/starcam-frames/night/2026-06-04,5633508115,1651923956,0,0,0,local,not yet squashed; dark

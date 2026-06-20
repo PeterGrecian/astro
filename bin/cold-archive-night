@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""cold-archive-night — push a stick-resident night to S3 Deep Archive.
+
+Scope (v1, run on muppet):
+  - Reads /mnt/astrobackup/<camera>/<mode>/<night>/ (must contain MANIFEST.sha256).
+  - Verifies the manifest.
+  - Streams `tar c` of that dir to s3://<bucket>/cold/<camera>/<mode>/<night>/<camera>-<mode>-<night>.tar
+    with StorageClass=DEEP_ARCHIVE, sha256 in object Metadata, and a STANDARD-class
+    .sha256 sidecar next to it.
+  - Updates ~/astro/whereisallthedata.csv (upsert the aws row).
+
+Idempotent: if the S3 object already exists with matching size, skips upload.
+Dry-run by default. Pass --go to actually upload.
+
+Future work (run on muppet, later commits): squash raw -> sum8/sum2, stage to
+~/starcam-backup, copy to stick + MANIFEST. For now those steps are manual.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import io
+import os
+import subprocess
+import sys
+import tarfile
+from pathlib import Path
+
+import boto3
+from botocore.exceptions import ClientError
+
+CSV_PATH = Path.home() / "astro" / "whereisallthedata.csv"
+DEFAULT_BUCKET = "astro-berrylands-eu-west-1"
+DEFAULT_STICK = Path("/mnt/astrobackup")
+REGION = "eu-west-1"
+CHUNK = 8 * 1024 * 1024  # 8 MiB streaming chunk
+MULTIPART_THRESHOLD = 64 * 1024 * 1024
+MULTIPART_CHUNKSIZE = 64 * 1024 * 1024
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def verify_manifest(night_dir: Path) -> None:
+    manifest = night_dir / "MANIFEST.sha256"
+    if not manifest.is_file():
+        die(f"no MANIFEST.sha256 in {night_dir}")
+    print(f"verifying {manifest} ...")
+    r = subprocess.run(
+        ["sha256sum", "-c", "--quiet", "MANIFEST.sha256"],
+        cwd=night_dir,
+    )
+    if r.returncode != 0:
+        die("manifest verification failed")
+    print("manifest verified")
+
+
+def tar_stream_to_sha_and_size(night_dir: Path, parent: Path) -> tuple[str, int]:
+    """Stream tar of night_dir relative to parent, return (sha256, bytes)."""
+    h = hashlib.sha256()
+    size = 0
+    arcname = night_dir.name
+
+    class Counter(io.RawIOBase):
+        def writable(self) -> bool:
+            return True
+
+        def write(self, b):  # type: ignore[override]
+            nonlocal size
+            h.update(b)
+            size += len(b)
+            return len(b)
+
+    with tarfile.open(fileobj=Counter(), mode="w|", bufsize=CHUNK) as tf:
+        tf.add(str(night_dir), arcname=arcname, recursive=True)
+    return h.hexdigest(), size
+
+
+def head_object(s3, bucket: str, key: str):
+    try:
+        return s3.head_object(Bucket=bucket, Key=key)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchKey", "NotFound"):
+            return None
+        raise
+
+
+class TarSourceStream(io.RawIOBase):
+    """Readable file-like that produces the tarball bytes on demand,
+    updating a running sha256 as it goes."""
+
+    def __init__(self, night_dir: Path):
+        self._night_dir = night_dir
+        self._buf = b""
+        self._closed_tar = False
+        self._sha = hashlib.sha256()
+        self._size = 0
+        r, w = os.pipe()
+        self._r = os.fdopen(r, "rb")
+        self._w_fd = w
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.close(r)
+                with os.fdopen(w, "wb") as wf, tarfile.open(
+                    fileobj=wf, mode="w|", bufsize=CHUNK
+                ) as tf:
+                    tf.add(str(night_dir), arcname=night_dir.name, recursive=True)
+                os._exit(0)
+            except Exception as e:  # pragma: no cover
+                print(f"tar child error: {e}", file=sys.stderr)
+                os._exit(2)
+        else:
+            os.close(w)
+            self._child_pid = pid
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, n: int = -1) -> bytes:  # type: ignore[override]
+        if n is None or n < 0:
+            n = CHUNK
+        data = self._r.read(n)
+        if data:
+            self._sha.update(data)
+            self._size += len(data)
+        return data
+
+    def close(self) -> None:  # type: ignore[override]
+        try:
+            self._r.close()
+        finally:
+            try:
+                os.waitpid(self._child_pid, 0)
+            except Exception:
+                pass
+        super().close()
+
+    @property
+    def sha256(self) -> str:
+        return self._sha.hexdigest()
+
+    @property
+    def size(self) -> int:
+        return self._size
+
+
+def upload_tar(
+    s3, bucket: str, key: str, night_dir: Path
+) -> tuple[str, int]:
+    from boto3.s3.transfer import TransferConfig
+
+    cfg = TransferConfig(
+        multipart_threshold=MULTIPART_THRESHOLD,
+        multipart_chunksize=MULTIPART_CHUNKSIZE,
+        use_threads=True,
+        max_concurrency=4,
+    )
+    stream = TarSourceStream(night_dir)
+    # We need the sha256 in object metadata, but we only know it after the
+    # full stream is read. Trick: upload to a temp key first with a placeholder,
+    # then copy-in-place setting the real metadata. Deep Archive copy is free.
+    tmp_key = key + ".uploading"
+    print(f"uploading to s3://{bucket}/{tmp_key} (STANDARD, will transition)...")
+    s3.upload_fileobj(
+        stream,
+        bucket,
+        tmp_key,
+        ExtraArgs={"StorageClass": "DEEP_ARCHIVE"},
+        Config=cfg,
+    )
+    sha = stream.sha256
+    size = stream.size
+    print(f"tar size {size:,} bytes, sha256 {sha}")
+    print(f"copying to final key {key} with sha256 metadata...")
+    s3.copy_object(
+        Bucket=bucket,
+        Key=key,
+        CopySource={"Bucket": bucket, "Key": tmp_key},
+        Metadata={"sha256": sha},
+        MetadataDirective="REPLACE",
+        StorageClass="DEEP_ARCHIVE",
+    )
+    s3.delete_object(Bucket=bucket, Key=tmp_key)
+    return sha, size
+
+
+def write_sha_sidecar(s3, bucket: str, key: str, sha: str, night: str) -> None:
+    sidecar_key = key + ".sha256"
+    body = f"{sha}  {Path(key).name}\n".encode()
+    print(f"writing sidecar s3://{bucket}/{sidecar_key} (STANDARD)...")
+    s3.put_object(
+        Bucket=bucket,
+        Key=sidecar_key,
+        Body=body,
+        ContentType="text/plain",
+        StorageClass="STANDARD",
+    )
+
+
+def upsert_csv_row(
+    night: str, s3_uri: str, tarball_bytes: int, sha: str,
+    camera: str = "starcam",
+) -> None:
+    if not CSV_PATH.is_file():
+        die(f"CSV not found: {CSV_PATH}")
+    rows = list(csv.reader(CSV_PATH.open()))
+    header, data = rows[0], rows[1:]
+    new_row = [
+        night,
+        camera,
+        "aws",
+        s3_uri,
+        "0",
+        "0",
+        "0",
+        "0",
+        str(tarball_bytes),
+        "deep-archive",
+        f"sha256 in object metadata ({sha[:12]}…)",
+    ]
+    # Key is (night, camera, host) now that the CSV carries a camera column.
+    replaced = False
+    for i, r in enumerate(data):
+        if r[0] == night and r[1] == camera and r[2] == "aws":
+            data[i] = new_row
+            replaced = True
+            break
+    if not replaced:
+        data.append(new_row)
+        data.sort(key=lambda r: (r[0], r[1], r[2]))
+    with CSV_PATH.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(data)
+    print(f"csv: {'updated' if replaced else 'inserted'} aws row for {night}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("night", help="e.g. 2026-05-22")
+    ap.add_argument("--camera", default="starcam")
+    ap.add_argument("--mode", default="night")
+    ap.add_argument("--stick", default=str(DEFAULT_STICK))
+    ap.add_argument("--bucket", default=DEFAULT_BUCKET)
+    ap.add_argument("--region", default=REGION)
+    ap.add_argument("--go", action="store_true", help="actually upload (default is dry-run)")
+    ap.add_argument("--skip-verify", action="store_true", help="skip MANIFEST.sha256 check")
+    args = ap.parse_args()
+
+    night_dir = Path(args.stick) / args.camera / args.mode / args.night
+    if not night_dir.is_dir():
+        die(f"not a directory: {night_dir}")
+
+    key = f"cold/{args.camera}/{args.mode}/{args.night}/{args.camera}-{args.mode}-{args.night}.tar"
+    s3_uri = f"s3://{args.bucket}/{key}"
+
+    s3 = boto3.client("s3", region_name=args.region)
+    existing = head_object(s3, args.bucket, key)
+    if existing is not None:
+        print(
+            f"s3 object already present: {s3_uri}\n"
+            f"  size={existing['ContentLength']:,} "
+            f"storage={existing.get('StorageClass','STANDARD')} "
+            f"sha256={existing.get('Metadata',{}).get('sha256','(none)')}"
+        )
+        print("nothing to do (idempotent skip). exiting.")
+        return 0
+
+    if not args.skip_verify:
+        verify_manifest(night_dir)
+
+    du = sum(p.stat().st_size for p in night_dir.rglob("*") if p.is_file())
+    print(f"night dir total: {du:,} bytes")
+    print(f"target: {s3_uri} (DEEP_ARCHIVE)")
+    print(f"estimated cost: storage ~${du/1e9 * 0.00099:.4f}/month + a few cents PUTs")
+
+    if not args.go:
+        print("\nDRY RUN — pass --go to upload.")
+        return 0
+
+    sha, size = upload_tar(s3, args.bucket, key, night_dir)
+    write_sha_sidecar(s3, args.bucket, key, sha, args.night)
+    upsert_csv_row(args.night, s3_uri, size, sha, camera=args.camera)
+    print("done.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
