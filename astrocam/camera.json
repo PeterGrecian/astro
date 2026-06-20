@@ -20,5 +20,7 @@
   "occlusion_file": "occlusion.json",
   "quality_file": "quality.json",
   "location_file": "location.json",
+  "state": {"sun_altitude_night_deg": -10.0},
+  "state_notes": "Night starts at sun -10 deg below horizon (ephem), matching eclipticam-v3w/v1 at the same site so all cameras transition together. Was the -12 default before 2026-06-20.",
   "privacy_file": null
 }
