@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""astro-where — print where a camera's night data lives.
+
+Resolves a (camera, night) to its actual directory across storage roots
+and layouts (legacy/canonical/cold), so you never type a YYYY/MM/DD or
+night/<date> path by hand. Pipe straight into a viewer:
+
+    splay "$(astro-where eclipticam-v3w today)"
+    splay "$(astro-where eclipticam-v3w 2026-06-12)"
+    cd "$(astro-where eclipticam-v3w yesterday)"
+
+NIGHT accepts: today | yesterday | latest | YYYY-MM-DD (default: today).
+"latest" = the most recent night that actually resolves (handles gaps).
+
+Exit status 0 and the path on stdout when found; 1 and a message on
+stderr when not.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import timedelta
+
+REPO = __import__("pathlib").Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from astro.config import CameraConfig
+from astro.nightdir import night_of
+from astro import locate
+
+
+def _resolve_night_arg(arg: str) -> str | None:
+    """Return a YYYY-MM-DD night string, or None to mean 'latest'."""
+    from datetime import datetime, timezone
+    if arg in ("today", "now", ""):
+        return night_of()
+    if arg == "yesterday":
+        return night_of(datetime.now(timezone.utc) - timedelta(days=1))
+    if arg == "latest":
+        return None
+    # assume an explicit YYYY-MM-DD
+    return arg
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("camera", help="camera name, e.g. eclipticam-v3w")
+    ap.add_argument("night", nargs="?", default="today",
+                    help="today | yesterday | latest | YYYY-MM-DD")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="also print root and layout to stderr")
+    args = ap.parse_args()
+
+    try:
+        cfg = CameraConfig.load(args.camera)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+    night = _resolve_night_arg(args.night)
+    if night is None:  # latest
+        nights = locate.list_nights(cfg)
+        if not nights:
+            print(f"{args.camera}: no nights found in "
+                  f"{[str(r) for r in cfg.search_roots]}", file=sys.stderr)
+            return 1
+        _, loc = nights[0]
+    else:
+        loc = locate.resolve(cfg, night)
+        if loc is None:
+            print(f"{args.camera}: nothing for {night} in "
+                  f"{[str(r) for r in cfg.search_roots]}", file=sys.stderr)
+            return 1
+
+    if args.verbose:
+        print(f"# {loc.camera} {loc.night}  root={loc.root}  "
+              f"layout={loc.layout}", file=sys.stderr)
+    print(loc.path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

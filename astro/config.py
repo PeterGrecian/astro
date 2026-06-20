@@ -54,6 +54,18 @@ class CameraConfig:
         return Path(self._data["frames_root"]).expanduser()
 
     @property
+    def search_roots(self) -> list[Path]:
+        """Ordered roots to resolve a night's data across, highest priority
+        first. Lets data move to cold/archive disks without rewriting paths:
+        register a new root and the resolver finds the night wherever it now
+        lives. Defaults to [frames_root] when no `frames_roots` configured,
+        so existing single-root cameras are unaffected."""
+        roots = self._data.get("frames_roots")
+        if roots:
+            return [Path(r).expanduser() for r in roots]
+        return [self.frames_root]
+
+    @property
     def stack_brightness_max_per_s(self):
         """Quality threshold on mean/(EXPTIME*GAIN) above which a frame is
         twilight/moonlight-polluted and must not enter stacks. Comes from
