@@ -45,6 +45,11 @@ Stage 1 (`astro-state`) and stage 3 (`astro-process`) landed
       Migrate astrocam first (no production publish to disturb), then
       eclipticam v3w, then v1. Each camera's existing daemon stays
       running until the new one shows a clean week.
+      NB: astrocam/capture.py (~421 lines) already ~90% duplicates
+      astro/capture/streaming.py — the brightness.csv writer was
+      hand-ported into it 2026-06-20, so the duplication is already
+      causing copy-drift. astrocam specifics to fold in: cover servo,
+      coadd-in-RAM, starfind tiles.
 2. [ ] **`bin/astro-storage` timer.** Weekly squash / cold-archive /
       retention. Inputs: state record (disk pressure flag), per-night
       age. Outputs: state-record updates + log of what moved.
