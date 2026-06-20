@@ -29,11 +29,12 @@ load-bearing choices; delete done items (per the
 - [ ] **Re-derive astrocam pole/orientation from a clear night** — the
       camera fell during a previous night and was refit by hand
       (2026-06-14). Pointing may have shifted.
-- [ ] **Remove dead `publish-*` runner scripts on puppy.** The
-      `publish-{eclipticam,astrocam}.timer` units are now disabled
-      (2026-06-20) — both cameras self-process on their Pis. The
-      runner scripts still reference the dead `/home/peter/astro-unify/`
-      path; harmless but worth deleting along with the unit files.
+- [ ] **Clear up the stale `/home/peter/astro-unify/` clone on puppy.**
+      A whole duplicate repo (`unify-cameras` @ ee9a205), clean tree,
+      now unused — puppy runs from `/home/peter/astro` on `main`. The
+      dead `publish-*` unit files + repo run.sh that referenced its path
+      were already removed (2026-06-20); the clone itself remains.
+      Delete it once nothing on puppy still points at `astro-unify/`.
 
 ## Four-stage migration (per DECISIONS.md 2026-06-16)
 
