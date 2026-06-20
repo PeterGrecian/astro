@@ -99,12 +99,18 @@ SKY_CLEAR_MAX_STOPS = 10.0
 
 def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
                       band_tol=BAND_TOL, pedestal=None,
-                      sky_clear_max_stops=SKY_CLEAR_MAX_STOPS):
+                      sky_clear_max_stops=SKY_CLEAR_MAX_STOPS,
+                      brightness_roi=None):
     """Two passes over (t, path):
       pass 1 — measure brightness on the RAW Bayer frame, compute
         per_s = mean / (EXPTIME * GAIN), tag saturated frames
       pass 2 — accumulate 2x2-binned frames whose per_s is within
         ±band_tol of the night's darkest-window anchor
+
+    brightness_roi: optional {"top_fraction": f} — measure brightness
+      (the band-gate metric only, not the stack) over just the top
+      `f` of each frame. Lets a camera with ground-level light pollution
+      low in the frame gate on sky brightness instead of whole-frame.
 
     Deliverables are always derived from binned data, never the raw
     mosaic (starcam pipeline convention; stacking the mosaic leaves a
@@ -127,7 +133,14 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         with fits.open(f) as hdul:
             d = hdul[1].data
             hdr = hdul[1].header
-        row = brightness.measure(d, t, f)
+        # Brightness metric (for the band gate) may be restricted to the
+        # top of the frame so ground-level light pollution doesn't make a
+        # clear night read as cloudy. The stack itself still uses full d.
+        d_measure = d
+        if brightness_roi and brightness_roi.get("top_fraction"):
+            top = max(1, int(d.shape[0] * float(brightness_roi["top_fraction"])))
+            d_measure = d[:top]
+        row = brightness.measure(d_measure, t, f)
         rows.append(row)
         mean = float(row[3])
         median = float(row[4])
@@ -306,7 +319,8 @@ def main() -> int:
         stack_and_measure(
             frames,
             band_tol=float("inf") if explicit_window else BAND_TOL,
-            pedestal=cfg.get("pedestal"))
+            pedestal=cfg.get("pedestal"),
+            brightness_roi=cfg.get("brightness_roi"))
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:
         # Cloudy / no-usable-sky night: clear out any stale stack
