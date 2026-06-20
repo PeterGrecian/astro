@@ -1,10 +1,3 @@
-20/6  the multinight brighness charts should include 2026-06-10 so we can compare recent nights (say, last 4) with a known dark night
-
-20/6 daytime moon capture (optional): a thin crescent won't show in
-day-metered JPEGs (diagnosed 20/6 — see worklog; it's contrast, not
-cloud/pointing). To actually catch it, wait for a gibbous/full phase
-high in the SSW frame, or add a shorter moon-metered exposure / stack.
-
 20/6 return to anim.  The capture 19/6 had some very good passages so I'm thinking we need to do some local lens distortion fixes to derot/detrans.  we should use all frames where brightness < 10 stops above pedistal and work out what to do about gaps in the animation.  it's all right for initial night playthrough but the bad frames clobber derot/detrans
 
 
@@ -123,9 +116,6 @@ Cross-cutting:
       window start from dusk to dawn. ~60 s video at 60 fps. Probably
       needs barrel-distortion correction more than precise pole
       finding.
-- [ ] **Combined-brightness curated-list** — currently overlays the
-      last N nights. Wanted: explicit `--nights 2026-06-10,2026-06-13`
-      plus `--recent N`, deduplicated. (User request 2026-06-17.)
 - [ ] **Astro experiments page** lists the menu under
       `s3://.../<camera>/nights/<night>/experiments/` so each
       experiment is browsable independently of the multi-source
