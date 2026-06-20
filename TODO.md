@@ -22,9 +22,15 @@ load-bearing choices; delete done items (per the
       `night_layout: "canonical"` and rsync legacy data into the
       new tree (or accept legacy paths via the `percam` reader for
       the backlog).
+      WIP: the v3w_uploader half (canonical `_dst_for` + drops
+      `_drain_brightness`) is in `git stash@{0}` ("eclipticam
+      v3w_uploader -> canonical layout, paused 2026-06-20") — pop it
+      when resuming. v1 capture.py writers not yet done; do both
+      together so the layout flip is consistent.
 - [ ] **Retire v3w uploader's brightness-CSV drain.** Streaming
       already writes canonical brightness.csv direct to NFS;
       `_drain_brightness()` accumulates a redundant legacy copy.
+      (Done in the stashed WIP above — lands with the canonical flip.)
 - [ ] **Delete legacy starcam pipeline** (per DECISIONS.md 2026-06-16).
 - [ ] **Re-derive astrocam pole/orientation from a clear night** — the
       camera fell during a previous night and was refit by hand
