@@ -350,15 +350,46 @@ def sun_altitude_deg(when=None):
     return float(ephem.Sun(obs).alt) * 180.0 / 3.141592653589793
 
 
-def decide_mode(prev, sun_alt_deg):
+# Night threshold is config-driven: read the v3w camera.json `state`
+# override once so a single source of truth governs when night starts.
+# Falls back to the module constant if the config or key is absent.
+# v3w gates the whole pipeline; v1 is day-only so it inherits the same
+# threshold (its night mode never does astronomy anyway).
+_V3W_CAMERA_JSON = HERE.parent / "eclipticam-v3w" / "camera.json"
+_NIGHT_DEG = None  # lazily resolved
+
+
+def night_threshold_deg():
+    """The sun altitude (deg) below which v3w switches to night, from
+    eclipticam-v3w/camera.json `state.sun_altitude_night_deg`, falling
+    back to the module SUN_ALT_NIGHT_DEG constant."""
+    global _NIGHT_DEG
+    if _NIGHT_DEG is None:
+        _NIGHT_DEG = SUN_ALT_NIGHT_DEG
+        try:
+            state = json.loads(_V3W_CAMERA_JSON.read_text()).get("state", {})
+            v = state.get("sun_altitude_night_deg")
+            if v is not None:
+                _NIGHT_DEG = float(v)
+        except Exception:
+            pass
+    return _NIGHT_DEG
+
+
+def decide_mode(prev, sun_alt_deg, night_deg=None, day_deg=None):
     """Mode is a pure function of sun altitude.
 
-    sun_alt < SUN_ALT_NIGHT_DEG  → night
-    sun_alt > SUN_ALT_DAY_DEG    → day
-    in-between                    → keep prev (asymmetric thresholds
-                                     give natural hysteresis with no
-                                     flap, no flip-back guard, no
-                                     hold counter).
+    sun_alt < night_deg  → night
+    sun_alt > day_deg     → day
+    in-between            → keep prev (asymmetric thresholds give
+                             natural hysteresis with no flap, no
+                             flip-back guard, no hold counter).
+
+    night_deg / day_deg default to the module SUN_ALT_*_DEG constants,
+    but callers pass the per-camera camera.json `state` override
+    (sun_altitude_night_deg) so a single source of truth — the config —
+    governs when night starts. The module constants remain the fallback
+    when a camera.json omits the override.
 
     prev = {'mode': 'day'|'night', ...} (other fields ignored).
     Returns (mode, hold) where hold is just an incrementing tick
@@ -369,13 +400,17 @@ def decide_mode(prev, sun_alt_deg):
     to day. This is the safe fall-back: a stuck day mode never starts
     the streaming daemon at all, no chance of writing pegged frames.
     """
+    if night_deg is None:
+        night_deg = SUN_ALT_NIGHT_DEG
+    if day_deg is None:
+        day_deg = SUN_ALT_DAY_DEG
     mode = prev.get("mode", "day")
     hold = int(prev.get("hold", 0)) + 1
     if sun_alt_deg is None:
         return "day", hold
-    if sun_alt_deg < SUN_ALT_NIGHT_DEG:
+    if sun_alt_deg < night_deg:
         return "night", hold
-    if sun_alt_deg > SUN_ALT_DAY_DEG:
+    if sun_alt_deg > day_deg:
         return "day", hold
     return mode, hold
 
@@ -401,9 +436,11 @@ def capture_tick():
     # mode. Sun altitude is a hard physical signal; per-frame
     # brightness is confused by headlights, moon, AE wobble, clouds.
     sun_alt = sun_altitude_deg(now)
+    night_deg = night_threshold_deg()
     # v3w first: its mode gates whether v1 even bothers shooting.
     v3w_prev = state.get("v3w", {})
-    v3w_mode, v3w_hold = decide_mode(v3w_prev, sun_alt_deg=sun_alt)
+    v3w_mode, v3w_hold = decide_mode(v3w_prev, sun_alt_deg=sun_alt,
+                                     night_deg=night_deg)
     if v3w_mode == "night":
         # Streaming daemon owns the camera. Don't touch cam0 here.
         ensure_v3w_streaming_running()
@@ -422,7 +459,8 @@ def capture_tick():
     # noise — skip it. v1 state freezes so its hysteresis resumes
     # cleanly when day returns.
     v1_prev = state.get("v1", {})
-    v1_mode, v1_hold = decide_mode(v1_prev, sun_alt_deg=sun_alt)
+    v1_mode, v1_hold = decide_mode(v1_prev, sun_alt_deg=sun_alt,
+                                   night_deg=night_deg)
     if v3w_mode == "day":
         hour_dir = FRAMES / "day" / utc_date / "v1" / hh
         out_path = next_frame_path(hour_dir, "jpg")
