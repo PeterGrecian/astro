@@ -91,9 +91,16 @@ BAND_TOL = 0.30
 # "not actually dark" (cloud reflecting light pollution, moonlit haze).
 # Any window-mean above this cap is rejected from the stack regardless
 # of the per-night anchor, and the whole night gets verdict="cloudy".
-# The threshold is a project judgement: my v3w on a clear night sits
-# around +0 to +6 stops at the dark trough; +10 is the empirical
-# ceiling where stars stop being separable from the cloud-glow.
+#
+# This MUST be calibrated per sensor, not shared: "stops above pedestal"
+# is sensor-relative (it depends on bit depth and pedestal), so the same
+# stop count is a different fraction of each sensor's range. v3w (16-bit
+# container, pedestal ~4380, ~13 stops of headroom) sits at +0..+6 stops
+# on a clear dark trough, so +10 is a sensible cloud ceiling. astrocam
+# (raw 10-bit, pedestal ~512, only ~10.5 stops to twilight) reaches +10
+# only in twilight, so it needs a much lower line. Each camera.json
+# carries its own `sky_clear_max_stops`; this constant is only the
+# fallback default when a config omits it.
 SKY_CLEAR_MAX_STOPS = 10.0
 
 
@@ -320,6 +327,8 @@ def main() -> int:
             frames,
             band_tol=float("inf") if explicit_window else BAND_TOL,
             pedestal=cfg.get("pedestal"),
+            sky_clear_max_stops=cfg.get("sky_clear_max_stops")
+                or SKY_CLEAR_MAX_STOPS,
             brightness_roi=cfg.get("brightness_roi"))
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:

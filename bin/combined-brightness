@@ -229,8 +229,10 @@ def main():
     # Sky-clear ceiling: nights whose darkest 10-min anchor sits above
     # this line are flagged "cloudy" (see SKY_CLEAR_MAX_STOPS in
     # bin/nightly-cam). Curves spending the night below this line are
-    # genuinely dark.
-    SKY_CLEAR_MAX_STOPS = 10.0
+    # genuinely dark. Per-sensor: "stops above pedestal" depends on bit
+    # depth/pedestal, so the cloud line differs by camera (astrocam ~4,
+    # v3w ~10). Read from camera.json, fall back to 10.
+    SKY_CLEAR_MAX_STOPS = float(cfg.get("sky_clear_max_stops") or 10.0)
     ax.axhline(2 ** SKY_CLEAR_MAX_STOPS, color="#888", linestyle="--",
                linewidth=1.0, alpha=0.7)
     ax.text(0.99, 0.50, f"clear/cloudy: +{SKY_CLEAR_MAX_STOPS:.0f}",
