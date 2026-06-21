@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""separate-trails — isolate INDIVIDUAL star-trail centrelines from a
+max-stack, so parallel/touching trails don't merge into one blob.
+
+Why
+---
+Plain threshold + connected-components MERGES neighbouring parallel
+trails into a single fat component (the "sawtooth" artefact in
+fit-distortion-trails): the bow you then measure is the bundle width,
+not one trail's curvature. On eclipticam-v3w the visible trail
+curvature is dominated by LENS DISTORTION (the celestial pole is far
+off-frame, so the true sky-rotation arc over one night is nearly a
+straight chord — what bends it is the lens). To measure that bow you
+must first separate the trails.
+
+Method
+------
+1. Local-background subtract (faint central trails are ~10x dimmer than
+   the foreground/edge glow; a global stretch loses them).
+2. Restrict to the sky region (top fraction; the bottom is rooftops,
+   trees, a parked van — not sky).
+3. HESSIAN RIDGE response: at each pixel compute the Hessian of the
+   smoothed image; a bright thin ridge has one strongly-NEGATIVE
+   eigenvalue (across the ridge) and a near-zero one (along it). The
+   ridge map = max(0, -λ_min). This lights up trail CENTRELINES (1 px
+   wide) and suppresses blobs and broad glow — so parallel trails, fat
+   as blobs, separate as non-touching centrelines.
+4. Threshold the ridge map, thin to skeletons, label connected
+   components. Each centreline component = one trail.
+5. Keep components that are long + thin + near the local trail
+   direction; write a polyline (ordered along the trail) per trail.
+
+Outputs
+-------
+* a DS9 .reg sidecar (one polyline per trail) to inspect in splay
+* optionally a .npz of the per-trail centreline point arrays for the
+  distortion fit
+
+Usage
+-----
+    separate-trails --camera eclipticam-v3w --night 2026-06-20 \\
+        --reg ~/tmp/distortion-view/max.fits.reg
+    separate-trails --max-fits path/to/max.fits.fz --npz trails.npz
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+
+def load_max_stack(path: Path) -> np.ndarray:
+    with fits.open(path) as hdul:
+        for hdu in hdul:
+            if getattr(hdu, "data", None) is not None and hdu.data.ndim == 2:
+                return hdu.data.astype(np.float64)
+    raise ValueError(f"no 2-D image HDU in {path}")
+
+
+def local_bg_subtract(img, down=4, med=13):
+    import cv2
+    small = cv2.resize(img, (img.shape[1] // down, img.shape[0] // down),
+                       interpolation=cv2.INTER_AREA)
+    bg_small = ndimage.median_filter(small, size=med)
+    bg = cv2.resize(bg_small, (img.shape[1], img.shape[0]),
+                    interpolation=cv2.INTER_LINEAR)
+    return np.clip(img - bg, 0, None)
+
+
+def ridge_response(img, sigma=1.5):
+    """max(0, -λ_min(Hessian)) — bright thin ridges become large
+    positive. sigma sets the trail-width scale (px)."""
+    g = ndimage.gaussian_filter(img, sigma)
+    gxx = ndimage.gaussian_filter(g, sigma, order=(0, 2))
+    gyy = ndimage.gaussian_filter(g, sigma, order=(2, 0))
+    gxy = ndimage.gaussian_filter(g, sigma, order=(1, 1))
+    # eigenvalues of [[gxx, gxy],[gxy, gyy]]
+    tmp = np.sqrt(np.maximum((gxx - gyy) ** 2 + 4 * gxy ** 2, 0))
+    lam_min = 0.5 * ((gxx + gyy) - tmp)
+    return np.clip(-lam_min, 0, None)
+
+
+def trace_trails(ridge, sky_top_frac, ridge_pct, min_len, max_thick):
+    """Threshold ridge map → skeleton → label → keep long thin
+    components. Returns list of (N×2 x,y) ordered along each trail."""
+    import cv2
+    H, W = ridge.shape
+    mask = np.zeros_like(ridge, dtype=bool)
+    sky = slice(0, int(H * sky_top_frac))
+    thr = np.percentile(ridge[sky], ridge_pct)
+    mask[sky] = ridge[sky] > thr
+    # thin to 1-px skeleton so parallel ridges stay separate
+    m8 = (mask.astype(np.uint8)) * 255
+    skel = cv2.ximgproc.thinning(m8) if hasattr(cv2, "ximgproc") \
+        else _skeleton_fallback(m8)
+    n_cc, labels = cv2.connectedComponents((skel > 0).astype(np.uint8), 8)
+    trails = []
+    for i in range(1, n_cc):
+        ys, xs = np.where(labels == i)
+        if len(xs) < min_len:
+            continue
+        pts = np.column_stack([xs.astype(float), ys.astype(float)])
+        c = pts.mean(0)
+        evals, evecs = np.linalg.eigh(np.cov((pts - c).T))
+        evals = evals[::-1]
+        evecs = evecs[:, ::-1]
+        # thin: small across-axis spread
+        if np.sqrt(max(evals[1], 0)) > max_thick:
+            continue
+        # order along the principal axis
+        proj = (pts - c) @ evecs[:, 0]
+        trails.append(pts[np.argsort(proj)])
+    return trails
+
+
+def _skeleton_fallback(m8):
+    """Morphological skeleton if cv2.ximgproc is unavailable."""
+    import cv2
+    img = m8.copy()
+    skel = np.zeros_like(img)
+    elem = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    while True:
+        opened = cv2.morphologyEx(img, cv2.MORPH_OPEN, elem)
+        temp = cv2.subtract(img, opened)
+        eroded = cv2.erode(img, elem)
+        skel = cv2.bitwise_or(skel, temp)
+        img = eroded
+        if cv2.countNonZero(img) == 0:
+            break
+    return skel
+
+
+def write_reg(trails, H, out_path):
+    def fy(y):
+        return H - y
+    lines = ["# Region file format: DS9 version 4.1",
+             "global width=1", "image"]
+    cmap = ["green", "yellow", "cyan", "magenta", "orange", "red"]
+    for i, pts in enumerate(trails):
+        col = cmap[i % len(cmap)]
+        coords = " ".join(f"{x+1:.1f},{fy(y):.1f}" for x, y in pts[::3])
+        lines.append(f"polygon({coords}) # color={col}")
+    out_path.write_text("\n".join(lines) + "\n")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera")
+    ap.add_argument("--night")
+    ap.add_argument("--max-fits", type=Path, default=None)
+    ap.add_argument("--sigma", type=float, default=1.5,
+                    help="ridge scale (px) ~ trail half-width")
+    ap.add_argument("--sky-top-frac", type=float, default=0.45,
+                    help="only trace the top fraction of the frame (sky)")
+    ap.add_argument("--ridge-pct", type=float, default=99.0,
+                    help="ridge-strength percentile threshold")
+    ap.add_argument("--min-len", type=int, default=40,
+                    help="min centreline pixels for a trail")
+    ap.add_argument("--max-thick", type=float, default=2.0,
+                    help="max across-axis spread (px); rejects blobs")
+    ap.add_argument("--reg", type=Path, default=None,
+                    help="write DS9 polyline sidecar for splay")
+    ap.add_argument("--npz", type=Path, default=None,
+                    help="save per-trail centreline arrays")
+    args = ap.parse_args()
+
+    if args.max_fits:
+        max_path = args.max_fits
+    else:
+        if not (args.camera and args.night):
+            ap.error("need --max-fits or both --camera and --night")
+        cfg = CameraConfig.load(args.camera)
+        cands = [cfg.frames_root / args.night / "max.fits.fz",
+                 cfg.frames_root / "night" / args.night / "max.fits.fz"]
+        max_path = next((p for p in cands if p.exists()), cands[0])
+    if not max_path.exists():
+        sys.stderr.write(f"max stack not found: {max_path}\n")
+        return 2
+
+    print(f"max stack: {max_path}")
+    img = load_max_stack(max_path)
+    H, W = img.shape
+    print(f"  {W}x{H}")
+    bg = local_bg_subtract(img)
+    ridge = ridge_response(bg, sigma=args.sigma)
+    trails = trace_trails(ridge, args.sky_top_frac, args.ridge_pct,
+                          args.min_len, args.max_thick)
+    print(f"  separated {len(trails)} trail centrelines "
+          f"(sigma={args.sigma}, top {args.sky_top_frac*100:.0f}% sky, "
+          f"ridge p{args.ridge_pct:.0f})")
+    if trails:
+        lens = [len(t) for t in trails]
+        print(f"  centreline lengths: min={min(lens)} "
+              f"median={int(np.median(lens))} max={max(lens)} px")
+
+    if args.reg:
+        write_reg(trails, H, args.reg)
+        print(f"  wrote DS9 polylines {args.reg}  → reload in splay (r)")
+    if args.npz:
+        np.savez(args.npz, *[t for t in trails])
+        print(f"  wrote {args.npz}  ({len(trails)} trails)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

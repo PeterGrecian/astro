@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""fit-distortion-trails — one-parameter radial lens distortion from
+star trails in a max-stack, for the FAR-POLE (eclipticam) case.
+
+Geometry
+--------
+When the celestial pole is far outside the frame (eclipticam-v3w, ~102°
+FOV pointed away from the pole), each star trail is a short segment of a
+huge-radius circle — to first approximation a STRAIGHT line. A perfect
+lens images these as straight streaks; a distorting lens bows them. So
+the single strongest, catalogue-free distortion signal is: how much do
+the trails bow, and can one radial-distortion parameter straighten them?
+
+This is the opposite limit to astrocam, where the pole is IN frame and
+trails are full concentric circles (see bin/fit-distortion-from-poles).
+Same physics, opposite end; longer capture windows only make the trails
+longer and more continuous — better, not worse, for this fit.
+
+Model (1 parameter to start)
+----------------------------
+Optical centre fixed at the image centre; single radial term:
+
+    r' = r * (1 + k1 * r²)            (r normalised by half-diagonal R)
+
+A point at pixel p maps to the undistorted position by scaling its
+offset from centre by (1 + k1·ρ²), ρ = |p - C| / R. We fit the one k1
+that minimises total trail bow.
+
+Objective
+---------
+For each detected trail t (a connected, elongated set of bright pixels):
+  pts'  = undistort(pts, k1)
+  line  = total-least-squares fit (PCA principal axis through centroid)
+  bow_t = RMS perpendicular distance of pts' to that line
+objective(k1) = Σ_t bow_t   (optionally weighted by trail length)
+Minimise over k1 (1-D scalar solve).
+
+Trail detection reuses bin/arc-walk's recipe: threshold → connected
+components → keep large, elongated blobs (eigenvalue ratio of the
+position covariance).
+
+Usage
+-----
+    fit-distortion-trails --camera eclipticam-v3w --night 2026-06-20
+    fit-distortion-trails --max-fits path/to/max.fits.fz
+    fit-distortion-trails --camera eclipticam-v3w --night 2026-06-20 \\
+        --out-overlay ~/tmp/trails-fit.jpg
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from scipy.optimize import minimize_scalar
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+
+def load_max_stack(path: Path) -> np.ndarray:
+    """Return the max-stack as a 2-D float array. Rice-compressed FITS
+    keeps the signal in the first image HDU (CompImageHDU)."""
+    with fits.open(path) as hdul:
+        for hdu in hdul:
+            if getattr(hdu, "data", None) is not None and hdu.data.ndim == 2:
+                return hdu.data.astype(np.float64)
+    raise ValueError(f"no 2-D image HDU in {path}")
+
+
+def subtract_local_background(img: np.ndarray, kernel=51) -> np.ndarray:
+    """Subtract a large-kernel median (the smooth sky + foreground glow)
+    so faint compact features — star trails, stars — survive against a
+    VARYING background. Without this, a single global stretch keyed to
+    the bright foreground/edge sources crushes the much fainter central
+    trails (v3w central trails are ~10x dimmer than the edge/ground).
+    Returns the positive residual (float)."""
+    from scipy.ndimage import median_filter
+    # median_filter is slow at large kernels; downsample-filter-upsample
+    # gives an equivalent smooth background far faster.
+    import cv2
+    k = max(3, kernel | 1)
+    small = cv2.resize(img, (img.shape[1] // 4, img.shape[0] // 4),
+                       interpolation=cv2.INTER_AREA)
+    bg_small = median_filter(small, size=max(3, k // 4 | 1))
+    bg = cv2.resize(bg_small, (img.shape[1], img.shape[0]),
+                    interpolation=cv2.INTER_LINEAR)
+    return np.clip(img - bg, 0, None)
+
+
+def stretch_to_u8(img: np.ndarray, lo_pct=50.0, hi_pct=99.9,
+                  local_bg=False) -> np.ndarray:
+    """asinh stretch into 0-255 for thresholding only (the FIT uses
+    pixel COORDINATES, not these intensities, so the stretch choice
+    affects which trails are detected, never the geometry).
+
+    local_bg=True first subtracts a local background so faint trails on
+    a dim part of the frame are detected alongside bright ones."""
+    base = subtract_local_background(img) if local_bg else img
+    lo = np.percentile(base, lo_pct)
+    hi = np.percentile(base, hi_pct)
+    x = np.clip((base - lo) / max(hi - lo, 1e-6), 0, None)
+    s = np.arcsinh(x * 10.0) / np.arcsinh(10.0)
+    return np.clip(s * 255.0, 0, 255).astype(np.uint8)
+
+
+def detect_trails(u8, threshold, min_pixels, elong_min,
+                  ignore_bottom_frac, ignore_right_frac,
+                  star_elong_min=None, star_angle_max=None):
+    """arc-walk's extraction: threshold → connected components → keep
+    large elongated blobs.
+
+    Star trails separate from foreground (rooftops, trees, a parked van)
+    by TWO features, not by position: a star trail is highly elongated
+    AND near-horizontal (the local sky-rotation direction), whereas
+    foreground is blobby (low elongation) and/or steep. When
+    star_elong_min / star_angle_max are given, only components passing
+    both are kept — this is what lets the central trails be used without
+    the van leaking in. Returns a list of pixel arrays (N×2, x,y)."""
+    import cv2
+    H, W = u8.shape
+    _, binary = cv2.threshold(u8, threshold, 255, cv2.THRESH_BINARY)
+    n_cc, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+    y_cut = int(H * (1.0 - ignore_bottom_frac))
+    x_cut = int(W * (1.0 - ignore_right_frac))
+    trails = []
+    for i in range(1, n_cc):
+        if int(stats[i, cv2.CC_STAT_AREA]) < min_pixels:
+            continue
+        ys, xs = np.where(labels == i)
+        pts = np.column_stack([xs.astype(np.float64), ys.astype(np.float64)])
+        c = pts.mean(axis=0)
+        if c[1] > y_cut or c[0] > x_cut:
+            continue
+        cov = np.cov((pts - c).T)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        eigvals = eigvals[::-1]
+        eigvecs = eigvecs[:, ::-1]
+        elong = eigvals[0] / max(eigvals[1], 1e-3)
+        if elong < elong_min:
+            continue
+        if star_elong_min is not None and elong < star_elong_min:
+            continue
+        if star_angle_max is not None:
+            long_axis = eigvecs[:, 0]
+            ang = abs(np.degrees(np.arctan2(long_axis[1], long_axis[0])))
+            ang = min(ang, 180.0 - ang)   # fold to [0, 90]
+            if ang > star_angle_max:
+                continue
+        trails.append(pts)
+    return trails
+
+
+def undistort(pts, cx, cy, R, k1):
+    """Apply r' = r·(1 + k1·ρ²) about (cx,cy), ρ normalised by R."""
+    d = pts - np.array([cx, cy])
+    rho2 = (d[:, 0] ** 2 + d[:, 1] ** 2) / (R * R)
+    scale = 1.0 + k1 * rho2
+    return np.array([cx, cy]) + d * scale[:, None]
+
+
+def trail_bow(pts):
+    """RMS perpendicular distance of pts to their total-least-squares
+    line (PCA principal axis through the centroid)."""
+    c = pts.mean(axis=0)
+    centred = pts - c
+    # principal (long) axis = eigvec of largest eigenvalue
+    _, eigvecs = np.linalg.eigh(np.cov(centred.T))
+    normal = eigvecs[:, 0]  # smallest-eigenvalue dir = across the trail
+    perp = centred @ normal
+    return float(np.sqrt(np.mean(perp ** 2)))
+
+
+def total_bow(trails, cx, cy, R, k1, weight_by_length=True):
+    tot = 0.0
+    for pts in trails:
+        u = undistort(pts, cx, cy, R, k1)
+        b = trail_bow(u)
+        w = len(pts) if weight_by_length else 1.0
+        tot += w * b * b   # sum of weighted squared bow
+    return tot
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera")
+    ap.add_argument("--night")
+    ap.add_argument("--max-fits", type=Path, default=None,
+                    help="explicit path to a max.fits.fz (overrides "
+                         "--camera/--night resolution)")
+    ap.add_argument("--threshold", type=int, default=60,
+                    help="bright-pixel binary threshold (0-255) on the "
+                         "stretched stack")
+    ap.add_argument("--min-pixels", type=int, default=400)
+    ap.add_argument("--elong-min", type=float, default=15.0)
+    ap.add_argument("--local-bg", action="store_true",
+                    help="subtract a local background before thresholding "
+                         "so faint trails on a dim part of the frame are "
+                         "detected alongside bright ones (needed for v3w "
+                         "central trails, ~10x fainter than the edges)")
+    ap.add_argument("--star-elong-min", type=float, default=50.0,
+                    help="min elongation for a component to count as a "
+                         "star trail (vs blobby foreground)")
+    ap.add_argument("--star-angle-max", type=float, default=25.0,
+                    help="max angle from horizontal (deg) for a star "
+                         "trail; steep components are foreground")
+    ap.add_argument("--ignore-bottom-frac", type=float, default=0.0,
+                    help="drop trails whose centroid is in the bottom "
+                         "fraction (ground/occlusion)")
+    ap.add_argument("--keep-top-frac", type=float, default=None,
+                    help="keep only trails in the top fraction of the "
+                         "frame (sky); overrides --ignore-bottom-frac. "
+                         "Defaults to camera.json brightness_roi."
+                         "top_fraction when resolving via --camera.")
+    ap.add_argument("--ignore-right-frac", type=float, default=0.0)
+    ap.add_argument("--fit-region-frac", type=float, default=0.3333,
+                    help="fit k1 only on trails whose centroid is within "
+                         "this fraction of the half-width/half-height of "
+                         "centre (default 1/3 → central 1/9 of area, where "
+                         "the 1-parameter radial model is valid)")
+    ap.add_argument("--k1-bound", type=float, default=0.5,
+                    help="search k1 in [-bound, +bound]")
+    ap.add_argument("--out-overlay", type=Path, default=None,
+                    help="write a before/after trail overlay JPEG")
+    ap.add_argument("--out-strips", type=Path, default=None,
+                    help="write per-trail before/after straightness strips "
+                         "(a sample of central + edge trails)")
+    ap.add_argument("--n-strips", type=int, default=8,
+                    help="how many trails to show in --out-strips "
+                         "(split central/edge)")
+    ap.add_argument("--out-reg", type=Path, default=None,
+                    help="write a DS9 .reg sidecar (image coords) marking "
+                         "detected trails — green=central (fit), red=edge "
+                         "(residual) — plus the central fit box. Drop it "
+                         "next to max.fits.fz and open both in splay.")
+    args = ap.parse_args()
+
+    # Resolve the max stack.
+    if args.max_fits:
+        max_path = args.max_fits
+    else:
+        if not (args.camera and args.night):
+            ap.error("need --max-fits, or both --camera and --night")
+        cfg = CameraConfig.load(args.camera)
+        # max.fits.fz lives at the night dir for this camera. Use the
+        # config's frames_root; fall back to the legacy percam tree.
+        candidates = [
+            cfg.frames_root / args.night / "max.fits.fz",
+            cfg.frames_root / "night" / args.night / "max.fits.fz",
+        ]
+        max_path = next((p for p in candidates if p.exists()), candidates[0])
+    if not max_path.exists():
+        sys.stderr.write(f"max stack not found: {max_path}\n")
+        return 2
+
+    print(f"max stack: {max_path}")
+    img = load_max_stack(max_path)
+    H, W = img.shape
+    cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+    R = 0.5 * float(np.hypot(W, H))   # half-diagonal: ρ=1 at the corners
+    print(f"  {W}x{H}  centre=({cx:.1f},{cy:.1f})  R(half-diag)={R:.1f}")
+
+    # Foreground (rooftops/trees/streetlights low in the frame) detects
+    # as bright elongated blobs and contaminates the fit. Mask it: keep
+    # only trails whose centroid is in the top `keep_top_frac` of the
+    # frame. Default from the camera's brightness_roi.top_fraction (the
+    # known-clean sky half), else the --ignore-bottom-frac CLI value.
+    keep_top_frac = args.keep_top_frac
+    if keep_top_frac is None and not args.max_fits:
+        roi = cfg.get("brightness_roi") or {}
+        keep_top_frac = roi.get("top_fraction")
+    ignore_bottom = (1.0 - keep_top_frac) if keep_top_frac \
+        else args.ignore_bottom_frac
+
+    u8 = stretch_to_u8(img, local_bg=args.local_bg)
+    trails = detect_trails(u8, args.threshold, args.min_pixels,
+                           args.elong_min, ignore_bottom,
+                           args.ignore_right_frac,
+                           star_elong_min=args.star_elong_min,
+                           star_angle_max=args.star_angle_max)
+    print(f"  detected {len(trails)} star trails "
+          f"(local_bg={args.local_bg}, elong≥{args.star_elong_min:.0f}, "
+          f"|angle|≤{args.star_angle_max:.0f}°, kept top "
+          f"{(1-ignore_bottom)*100:.0f}% of frame)")
+
+    # A single radial k1 (r' = r·(1+k1·ρ²)) is only a faithful model
+    # NEAR THE CENTRE. On a ~102° ultra-wide lens the edges need higher-
+    # order terms; letting edge trails into a 1-parameter fit drags k1 to
+    # the search boundary (it chases an un-modellable gradient). So fit
+    # k1 ONLY on trails inside the central region — the central 1/9th of
+    # area = central 1/3 of each linear dimension (--fit-region-frac
+    # 0.333) — and report the rest as residual where the model stops.
+    frac = args.fit_region_frac
+    hx, hy = (W - 1) / 2.0, (H - 1) / 2.0
+    def in_region(pts):
+        c = pts.mean(axis=0)
+        return abs(c[0] - cx) <= frac * hx and abs(c[1] - cy) <= frac * hy
+    fit_trails = [t for t in trails if in_region(t)]
+    out_trails = [t for t in trails if not in_region(t)]
+    print(f"  central region (frac={frac:.3f} of half-extent, "
+          f"~1/9 area): {len(fit_trails)} fit trails, "
+          f"{len(out_trails)} outside (residual only)")
+    if len(fit_trails) < 3:
+        sys.stderr.write(
+            f"too few central trails ({len(fit_trails)}) to fit k1 — "
+            "lower --threshold/--min-pixels/--elong-min, widen "
+            "--fit-region-frac, or use a denser stack\n")
+        return 1
+
+    # 1-D solve for k1 on the central trails only.
+    res = minimize_scalar(
+        lambda k: total_bow(fit_trails, cx, cy, R, k),
+        bounds=(-args.k1_bound, args.k1_bound), method="bounded")
+    k1 = float(res.x)
+    railed = abs(abs(k1) - args.k1_bound) < 1e-3
+
+    def mean_rms_bow(group, k):
+        if not group:
+            return float("nan")
+        return float(np.mean([trail_bow(undistort(p, cx, cy, R, k))
+                              for p in group]))
+    bow0 = mean_rms_bow(fit_trails, 0.0)
+    bow1 = mean_rms_bow(fit_trails, k1)
+    print(f"\nfitted k1 = {k1:+.5f}   (r' = r·(1 + k1·ρ²), ρ=|p-C|/R)")
+    if railed:
+        print("  WARNING: k1 hit the search boundary — the central "
+              "trails do not constrain a 1-parameter fit (likely already "
+              "straight, or detection-contaminated). Treat as 'no usable "
+              "distortion signal', not a real coefficient.")
+    print(f"  central-trail bow:  k1=0 → {bow0:.3f} px   "
+          f"k1={k1:+.4f} → {bow1:.3f} px   "
+          f"({100*(1-bow1/max(bow0,1e-9)):.0f}% reduction)")
+    sign = "barrel" if k1 < 0 else ("pincushion" if k1 > 0 else "none")
+    print(f"  distortion sign: {sign}")
+    # Residual outside the fit region: how badly the central-only model
+    # describes the edges (expected to be large — that's the point).
+    if out_trails:
+        print(f"  edge-trail bow (model NOT fit there):  "
+              f"k1=0 → {mean_rms_bow(out_trails, 0.0):.3f} px   "
+              f"k1={k1:+.4f} → {mean_rms_bow(out_trails, k1):.3f} px")
+
+    if args.out_overlay:
+        _write_overlay(img, trails, cx, cy, R, k1, args.out_overlay,
+                       frac=frac)
+        print(f"  wrote overlay {args.out_overlay}")
+    if args.out_strips:
+        _write_strips(trails, cx, cy, R, k1, frac, args.out_strips,
+                      n=args.n_strips)
+        print(f"  wrote strips {args.out_strips}")
+    if args.out_reg:
+        _write_reg(trails, cx, cy, frac, W, H, args.out_reg)
+        print(f"  wrote DS9 regions {args.out_reg}")
+        print(f"    → view in splay:  splay {max_path} "
+              f"  (sidecar {args.out_reg.name} auto-loads if named "
+              f"{max_path.stem}.reg next to it)")
+    return 0
+
+
+def _write_reg(trails, cx, cy, frac, W, H, out_path):
+    """DS9 region sidecar in IMAGE coords. Each trail drawn as a line
+    from end to end; green if its centroid is in the central fit box,
+    red otherwise. Plus the central fit box as a green rectangle. DS9
+    image coords are 1-based with y measured from the BOTTOM, while our
+    pixel arrays are 0-based y-from-top — flip y = H - y_top."""
+    def fy(y):  # top-origin pixel row -> DS9 bottom-origin, 1-based
+        return H - y
+    lines = ["# Region file format: DS9 version 4.1",
+             'global dash=0 width=2',
+             "image"]
+    for pts in trails:
+        c = pts.mean(axis=0)
+        is_c = abs(c[0] - cx) <= frac * cx and abs(c[1] - cy) <= frac * cy
+        colour = "green" if is_c else "red"
+        # endpoints along the principal axis
+        centred = pts - c
+        _, eigvecs = np.linalg.eigh(np.cov(centred.T))
+        long_axis = eigvecs[:, 1]
+        proj = centred @ long_axis
+        p0 = pts[np.argmin(proj)]
+        p1 = pts[np.argmax(proj)]
+        lines.append(
+            f"line({p0[0]+1:.1f},{fy(p0[1]):.1f},"
+            f"{p1[0]+1:.1f},{fy(p1[1]):.1f}) # color={colour}")
+    # central fit box
+    bw, bh = 2 * frac * cx, 2 * frac * cy
+    lines.append(
+        f"box({cx+1:.1f},{fy(cy):.1f},{bw:.1f},{bh:.1f},0) "
+        f"# color=cyan width=2 text={{fit region}}")
+    out_path.write_text("\n".join(lines) + "\n")
+
+
+def _trail_line_resid(pts):
+    """Signed perpendicular distance of each pixel to the trail's TLS
+    line, ordered along the trail. Returns (along, perp) in px, where
+    `perp` is the bow profile and `along` runs 0..length."""
+    c = pts.mean(axis=0)
+    centred = pts - c
+    _, eigvecs = np.linalg.eigh(np.cov(centred.T))
+    long_axis = eigvecs[:, 1]   # largest-eigenvalue direction
+    normal = eigvecs[:, 0]
+    along = centred @ long_axis
+    perp = centred @ normal
+    order = np.argsort(along)
+    return along[order] - along[order].min(), perp[order]
+
+
+def _write_strips(trails, cx, cy, R, k1, frac, out_path, n=8):
+    """Per-trail before/after straightness panels. For each sampled
+    trail, plot its bow profile (perpendicular deviation along the
+    trail) at k1=0 (blue) and at the fitted k1 (orange). A straight
+    trail is a flat line at 0; a bowed one is a curve. Samples both
+    central (in fit region) and edge trails so the contrast is visible.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    # classify by the same central box used for the fit (half-extent =
+    # the image centre coords, since centre is the frame centre)
+    def is_central(pts):
+        c = pts.mean(axis=0)
+        return abs(c[0] - cx) <= frac * cx and abs(c[1] - cy) <= frac * cy
+    central = [t for t in trails if is_central(t)]
+    edge = [t for t in trails if not is_central(t)]
+    # sort each by bow descending so we show the most informative ones
+    central.sort(key=trail_bow, reverse=True)
+    edge.sort(key=trail_bow, reverse=True)
+    half = max(1, n // 2)
+    sample = ([("central", t) for t in central[:half]] +
+              [("edge", t) for t in edge[:half]])
+    if not sample:
+        return
+    ncol = 2
+    nrow = (len(sample) + ncol - 1) // ncol
+    fig, axes = plt.subplots(nrow, ncol, figsize=(11, 2.2 * nrow),
+                             squeeze=False)
+    for ax in axes.flat:
+        ax.axis("off")
+    for i, (kind, pts) in enumerate(sample):
+        ax = axes[i // ncol][i % ncol]
+        ax.axis("on")
+        a0, p0 = _trail_line_resid(pts)
+        a1, p1 = _trail_line_resid(undistort(pts, cx, cy, R, k1))
+        ax.axhline(0, color="#888", lw=0.6)
+        ax.plot(a0, p0, ".", ms=1.5, color="#007AFF",
+                label=f"k1=0  (bow {trail_bow(pts):.2f}px)")
+        ax.plot(a1, p1, ".", ms=1.5, color="#FF9500",
+                label=f"k1={k1:+.3f}  (bow "
+                      f"{trail_bow(undistort(pts,cx,cy,R,k1)):.2f}px)")
+        c = pts.mean(axis=0)
+        rho = np.hypot(c[0] - cx, c[1] - cy) / R
+        ax.set_title(f"{kind} trail  ρ={rho:.2f}  n={len(pts)}",
+                     fontsize=9)
+        ax.set_xlabel("along trail (px)", fontsize=7)
+        ax.set_ylabel("perp dev (px)", fontsize=7)
+        ax.tick_params(labelsize=6)
+        ax.legend(fontsize=6, loc="best")
+    fig.suptitle("per-trail straightness: flat@0 = straight, "
+                 "curve = bowed (blue raw, orange undistorted)",
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=110)
+    plt.close(fig)
+
+
+def _write_overlay(img, trails, cx, cy, R, k1, out_path, frac=0.3333):
+    """Stretched stack with detected trails (blue) and their undistorted
+    positions (orange), plus the central fit region (green box)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    H, W = img.shape
+    u8 = stretch_to_u8(img)
+    fig, ax = plt.subplots(figsize=(11, 11 * H / W))
+    ax.imshow(u8, cmap="gray", origin="upper")
+    for pts in trails:
+        ax.plot(pts[:, 0], pts[:, 1], ".", ms=0.4, color="#007AFF", alpha=0.5)
+        u = undistort(pts, cx, cy, R, k1)
+        ax.plot(u[:, 0], u[:, 1], ".", ms=0.4, color="#FF9500", alpha=0.5)
+    hx, hy = (W - 1) / 2.0, (H - 1) / 2.0
+    ax.add_patch(Rectangle((cx - frac * hx, cy - frac * hy),
+                           2 * frac * hx, 2 * frac * hy,
+                           fill=False, edgecolor="#34C759", lw=1.5,
+                           label="k1 fit region"))
+    ax.set_title(f"trails (blue) vs undistorted k1={k1:+.4f} (orange); "
+                 f"green = central fit region")
+    ax.set_xticks([]); ax.set_yticks([])
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=110)
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
