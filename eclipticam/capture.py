@@ -17,15 +17,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
-import rawpy
-from PIL import Image, ExifTags
-from astropy.io import fits
-
-# OV5647 (v1) hardware shutter caps near 3.07 s in video config. To produce
-# a 30 s integration on v1 we stream N raw frames via picamera2 and coadd
-# them in RAM. Per-frame exposure stays at OV5647_FRAME_US (~3 s).
-OV5647_FRAME_US = 3_000_000
-V1_STACK_FRAMES = 10  # 10 x 3s ≈ 30s total integration
+from PIL import Image
 
 HOME = Path.home()
 HERE = Path(__file__).resolve().parent
@@ -44,14 +36,6 @@ LOCATION_FILE = HERE / "location.json"
 # drift (focus shifts with lens/sensor temp, day-vs-night ~15-20 C). 3.15
 # is the fixed fallback measured warm; verify it holds on a cold night.
 LENS_POSITION_V3W = 3.15
-# Near-60s exposure at 1-min cadence: 55 s leaves ~5 s for libcamera
-# warm-up + write before the next timer fire. The IMX708 (v3w) ceiling
-# is ~112 s in still-config so we're well inside it. Saturation tends
-# to land around twilight where it's expected anyway — the anchor-band
-# gate downstream rejects bright frames.
-NIGHT_SHUTTERS_US = [55_000_000]
-NIGHT_GAIN = 1.0
-BRIGHTNESS_SHUTTER_US = 55_000_000  # same frame drives both stack + brightness
 # Mode decision is purely sun-altitude. Brightness measurements are
 # still recorded per frame (drives frame-quality gating downstream and
 # the per-night brightness plot), but they do NOT decide whether to
@@ -97,30 +81,6 @@ def scene_luminance_from_jpeg(path):
     if shutter_us * iso <= 0:
         return None
     return mean / (shutter_us * iso / 100.0)  # iso/100 = gain
-
-
-def scene_luminance_from_fits(path):
-    """Same metric, from FITS using stored EXPTIME + GAIN.
-
-    Saturation clamp: if the frame is clipped (mean at or near uint16
-    ceiling) the per_s = mean / (shutter * gain) metric underestimates
-    badly — a saturated 30s frame returns ~0.002 even though it's
-    pegged. Clamp to 1.0 so saturation shows up as "definitely bright"
-    in state.json and logs. (The controller doesn't decide mode from
-    lum any more — sun altitude does — but recording an honest 1.0
-    keeps the observational signal readable.)"""
-    with fits.open(path) as hdul:
-        hdr = hdul[1].header
-        data = hdul[1].data
-    shutter_us = float(hdr["EXPTIME"]) * 1e6
-    gain = float(hdr["GAIN"])
-    mean = float(np.mean(data))
-    if mean >= 64000:
-        return 1.0  # saturated; observational clamp
-    if shutter_us * gain <= 0:
-        return None
-    return mean / (shutter_us * gain)
-
 
 
 # --- v3w streaming daemon coordination -------------------------------
@@ -194,101 +154,6 @@ def shoot_day(camera_idx, out_path, lens_position=None, timeout_ms=1500):
         print(r.stderr[-400:], file=sys.stderr)
 
 
-def shoot_night_one(camera_idx, out_path_fits, shutter_us, lens_position=None):
-    """Force one long exposure, capture DNG, convert to .fits.fz, delete DNG + JPEG sidecar."""
-    sidecar_jpg = out_path_fits.parent / (out_path_fits.stem + ".tmp.jpg")
-    dng_path = sidecar_jpg.with_suffix(".dng")
-    cmd = ["rpicam-still", "--camera", str(camera_idx),
-           "--rotation", "180", "-o", str(sidecar_jpg),
-           "-n", "-t", "500",
-           "--shutter", str(shutter_us),
-           "--gain", str(NIGHT_GAIN),
-           "--raw"]
-    if lens_position is not None:
-        cmd += ["--autofocus-mode", "manual", "--lens-position", str(lens_position)]
-    timeout_s = (shutter_us // 1_000_000) + 15
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-    if r.returncode != 0 or not dng_path.exists():
-        print(f"night capture FAILED cam{camera_idx} {shutter_us}us -> {dng_path}", file=sys.stderr)
-        print(r.stderr[-400:], file=sys.stderr)
-        sidecar_jpg.unlink(missing_ok=True)
-        return
-
-    with rawpy.imread(str(dng_path)) as raw:
-        bayer = raw.raw_image_visible.copy()
-        pattern = "".join(chr(raw.color_desc[i]) for i in raw.raw_pattern.flatten())
-    hdu = fits.CompImageHDU(data=bayer, compression_type="RICE_1")
-    hdu.header["EXPTIME"] = shutter_us / 1e6
-    hdu.header["GAIN"] = NIGHT_GAIN
-    hdu.header["BAYERPAT"] = pattern
-    hdu.header["DATE-OBS"] = datetime.now(timezone.utc).isoformat()
-    hdu.header["CAMERA"] = "imx708" if camera_idx == CAM_V3W else "ov5647"
-    fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(out_path_fits, overwrite=True)
-    dng_path.unlink()
-    sidecar_jpg.unlink(missing_ok=True)
-
-
-def shoot_night_v1_stack(out_path_fits, frame_us=OV5647_FRAME_US,
-                         n_frames=V1_STACK_FRAMES):
-    """v1 long-integration via picamera2 streaming + in-RAM coadd.
-
-    OV5647 max single shutter is ~3 s. We run a video pipeline at
-    frame_us per frame and sum n_frames raw Bayer arrays into uint32.
-    Total integration = frame_us * n_frames.
-
-    Bayer pattern stored as SGBRG (OV5647 native, per project convention).
-    """
-    from picamera2 import Picamera2
-    cam = Picamera2(camera_num=CAM_V1)
-    try:
-        cfg = cam.create_video_configuration(
-            raw={"size": (2592, 1944), "format": "SGBRG10"},
-            buffer_count=4,
-        )
-        cam.configure(cfg)
-        cam.set_controls({
-            "AeEnable": False,
-            "AwbEnable": False,
-            "AnalogueGain": NIGHT_GAIN,
-            "FrameDurationLimits": (frame_us, frame_us),
-            "ExposureTime": frame_us,
-        })
-        cam.start()
-        # Drop first frame — controls may not be applied yet.
-        req = cam.capture_request()
-        req.release()
-
-        coadd = None
-        t_start = datetime.now(timezone.utc)
-        for _ in range(n_frames):
-            req = cam.capture_request()
-            try:
-                bayer = req.make_array("raw").view(np.uint16)
-            finally:
-                req.release()
-            if coadd is None:
-                coadd = bayer.astype(np.uint32)
-            else:
-                coadd += bayer
-        t_end = datetime.now(timezone.utc)
-    finally:
-        cam.stop()
-        cam.close()
-
-    # Sensor delivers data left-rotated 180 relative to rpicam-still output
-    # (which we use --rotation 180). Match by flipping both axes.
-    coadd = coadd[::-1, ::-1]
-    hdu = fits.CompImageHDU(data=coadd.astype(np.uint32), compression_type="RICE_1")
-    hdu.header["EXPTIME"] = frame_us * n_frames / 1e6
-    hdu.header["FRAMEEXP"] = frame_us / 1e6
-    hdu.header["NCOADD"] = n_frames
-    hdu.header["GAIN"] = NIGHT_GAIN
-    hdu.header["BAYERPAT"] = "SGBRG"
-    hdu.header["DATE-OBS"] = t_start.isoformat()
-    hdu.header["DATE-END"] = t_end.isoformat()
-    hdu.header["CAMERA"] = "ov5647"
-    fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(out_path_fits, overwrite=True)
-
 
 def next_frame_path(hour_dir, ext):
     """hour_dir/NNNN.<ext> for the next free 4-digit counter."""
@@ -301,35 +166,6 @@ def next_frame_path(hour_dir, ext):
     n = (max(used) + 1) if used else 1
     return hour_dir / f"{n:04d}.{ext}"
 
-
-def shoot_night(camera_idx, hour_dir, lens_position=None):
-    """Capture all NIGHT_SHUTTERS_US at this tick. Returns path of brightness frame.
-
-    v1 (OV5647) can't do >3 s in a single exposure, so any shutter > OV5647_FRAME_US
-    is delivered as a streamed coadd via shoot_night_v1_stack().
-
-    The brightness frame is preferred at BRIGHTNESS_SHUTTER_US (a short
-    no-trails reference), but if that shutter isn't in NIGHT_SHUTTERS_US
-    today we fall back to the longest available frame — otherwise the
-    luminance state never updates and the mode machine gets stuck.
-    """
-    brightness_path = None
-    fallback_path = None
-    for shutter_us in NIGHT_SHUTTERS_US:
-        out_path = next_frame_path(hour_dir, "fits.fz")
-        if camera_idx == CAM_V1 and shutter_us > OV5647_FRAME_US:
-            n_frames = max(1, round(shutter_us / OV5647_FRAME_US))
-            shoot_night_v1_stack(out_path, frame_us=OV5647_FRAME_US,
-                                 n_frames=n_frames)
-        else:
-            shoot_night_one(camera_idx, out_path, shutter_us,
-                            lens_position=lens_position)
-        if out_path.exists():
-            if shutter_us == BRIGHTNESS_SHUTTER_US:
-                brightness_path = out_path
-            else:
-                fallback_path = out_path
-    return brightness_path or fallback_path
 
 
 _LOCATION = None  # lazily loaded; sun_altitude_deg reuses it across ticks
