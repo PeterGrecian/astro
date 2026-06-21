@@ -31,10 +31,19 @@ LOCATION_FILE = HERE / "location.json"
 # to ~3.0-3.2 (119). Autofocus on an infinity scene settled at 3.07-3.25
 # across 5 runs (mean ~3.15) at 42 C sensor temp. So TRUE infinity is ~3.15,
 # not 0.0 — every prior night star/moon frame was out of focus. Set to 3.15.
-# TODO (AF-feeds-night): day mode should autofocus and record the lens
-# position to a state file; night reads it so focus tracks temperature
-# drift (focus shifts with lens/sensor temp, day-vs-night ~15-20 C). 3.15
-# is the fixed fallback measured warm; verify it holds on a cold night.
+#
+# KEEP THIS FIXED. The Module 3 lens has FOCUS BREATHING — changing the
+# lens position changes the effective focal length, hence the FOV and
+# PLATE SCALE. So focus must be a single constant or every night's plate
+# scale / distortion / pointing differs and the calibrations don't
+# compose. Do NOT autofocus and do NOT vary lens position to chase
+# temperature drift (an earlier TODO suggested this — it's WRONG: it
+# would re-introduce a variable FOV). If a cold-night refocus is ever
+# needed, re-derive plate scale + k1,k2 + pointing AT the new value and
+# treat it as a new calibration epoch.
+# NB all calibration from 2026-06-21 and earlier (k1,k2 distortion, moon
+# pointing, plate scale) was at the OLD lens=0.0 / out-of-focus FOV and
+# must be REDONE at 3.15 before mixing with in-focus frames.
 LENS_POSITION_V3W = 3.15
 # Mode decision is purely sun-altitude. Brightness measurements are
 # still recorded per frame (drives frame-quality gating downstream and
