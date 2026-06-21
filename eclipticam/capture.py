@@ -33,7 +33,17 @@ FRAMES = HOME / "eclipticam-frames"  # day/<date>/<cam>/HH/NNNN.jpg, night/<nigh
 STATE_DIR = Path("/var/lib/eclipticam")
 STATE_FILE = STATE_DIR / "luminance.json"
 LOCATION_FILE = HERE / "location.json"
-LENS_POSITION_V3W = 0.0
+# IMX708 manual focus is in DIOPTRES (1/metres); 0.0 is NOMINALLY infinity
+# but is badly soft on this Module 3 Wide — measured 2026-06-21: rooftop/
+# distant-tree sharpness (laplacian variance) rose ~10x from lens 0.0 (12)
+# to ~3.0-3.2 (119). Autofocus on an infinity scene settled at 3.07-3.25
+# across 5 runs (mean ~3.15) at 42 C sensor temp. So TRUE infinity is ~3.15,
+# not 0.0 — every prior night star/moon frame was out of focus. Set to 3.15.
+# TODO (AF-feeds-night): day mode should autofocus and record the lens
+# position to a state file; night reads it so focus tracks temperature
+# drift (focus shifts with lens/sensor temp, day-vs-night ~15-20 C). 3.15
+# is the fixed fallback measured warm; verify it holds on a cold night.
+LENS_POSITION_V3W = 3.15
 # Near-60s exposure at 1-min cadence: 55 s leaves ~5 s for libcamera
 # warm-up + write before the next timer fire. The IMX708 (v3w) ceiling
 # is ~112 s in still-config so we're well inside it. Saturation tends
