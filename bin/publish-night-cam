@@ -137,18 +137,27 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         echo "detrans-sweep FAILED; continuing without it"
     fi
 
-    # Calendar thumbnail: middle frame of the colour sweep.
-    colour_mp4="${night_dir}/sweep-colour.mp4"
-    thumb="${night_dir}/thumb.jpg"
-    if [[ -s "$colour_mp4" ]]; then
-        mid_n=$(ffprobe -v error -count_packets -select_streams v:0 \
-                -show_entries stream=nb_read_packets -of csv=p=0 \
-                "$colour_mp4")
-        mid_n=$(( mid_n / 2 ))
-        ffmpeg -y -loglevel error -i "$colour_mp4" \
-            -vf "select=eq(n\,$mid_n)" -frames:v 1 -q:v 4 "$thumb"
-        echo "wrote $thumb (mid frame $mid_n)"
-    fi
+    # Per-video poster thumbnails: the middle frame of EACH sweep, so the
+    # website previews each clip with a frame from itself (not a shared
+    # colour-sweep thumb). poster-<name>.jpg next to <name>.mp4. The
+    # colour mid-frame is also copied to thumb.jpg for the calendar card.
+    extract_mid () {  # $1 = mp4 path, $2 = out jpg
+        [[ -s "$1" ]] || return 0
+        local n
+        n=$(ffprobe -v error -count_packets -select_streams v:0 \
+            -show_entries stream=nb_read_packets -of csv=p=0 "$1")
+        n=$(( n / 2 ))
+        ffmpeg -y -loglevel error -i "$1" \
+            -vf "select=eq(n\,$n)" -frames:v 1 -q:v 4 "$2" \
+            && echo "wrote $2 (mid frame $n of $(basename "$1"))"
+    }
+    for s in colour mono diff detrans; do
+        extract_mid "${night_dir}/sweep-${s}.mp4" \
+                    "${night_dir}/poster-${s}.jpg"
+    done
+    # Calendar card thumbnail = the colour poster.
+    [[ -s "${night_dir}/poster-colour.jpg" ]] \
+        && cp "${night_dir}/poster-colour.jpg" "${night_dir}/thumb.jpg"
 fi
 
 # --- 3. publish to S3 ------------------------------------------------
@@ -171,6 +180,10 @@ names = [
     "max.jpg",
     "derot.jpg",
     "thumb.jpg",
+    "poster-colour.jpg",
+    "poster-mono.jpg",
+    "poster-diff.jpg",
+    "poster-detrans.jpg",
     "sweep-mono.mp4",
     "sweep-colour.mp4",
     "sweep-diff.mp4",
@@ -182,7 +195,9 @@ missing = [n for n in names if not (nd/n).exists()]
 # OK so publish's privacy guard doesn't refuse them.
 if getattr(cfg, "privacy", None):
     for n in ("sweep-mono.mp4", "sweep-colour.mp4",
-              "sweep-diff.mp4", "sweep-detrans.mp4", "thumb.jpg"):
+              "sweep-diff.mp4", "sweep-detrans.mp4", "thumb.jpg",
+              "poster-colour.jpg", "poster-mono.jpg",
+              "poster-diff.jpg", "poster-detrans.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
