@@ -6,6 +6,12 @@
   "resolution": [2304, 1296],
   "pedestal": 4380,
   "pedestal_notes": "Sensor black level in libcamera's 16-bit container — measured 2026-06-12 as the minimum mean across deep-night (00:00-03:00 UTC) frames from 3 nights of v3w data. Slightly above the documented IMX708 black level (~4096) due to dark current. Use as fixed zero point so 'stops above pedestal' is comparable across nights.",
+  "capture": {
+    "night_exposure_us": 59900000,
+    "night_gain": 1.0,
+    "lens_position": 3.15
+  },
+  "capture_notes": "v3w NIGHT streaming-capture params — the single source of truth for eclipticam/v3w_night_daemon.py (it reads these; env vars V3W_EXPOSURE_US / V3W_GAIN / V3W_LENS_POSITION still override per-host). lens_position: IMX708 manual focus in dioptres; 0.0 ('nominal infinity') is badly soft on this Module 3 Wide — true infinity is ~3.15 (autofocus settled 3.07-3.25; rooftop sharpness ~10x better than 0.0; measured 2026-06-21). night_exposure_us ~60s at 1-min cadence. DAY focus is the same value but lives in eclipticam/capture.py LENS_POSITION_V3W (day uses rpicam-still, not this daemon) — keep the two in step until capture is unified.",
   "plate_scale_deg_px": 0.0443,
   "plate_scale_notes": "Module 3 Wide, 102 deg horizontal / 2304 px at the half-res capture mode in use (native 4608x2592).",
   "distortion": {
