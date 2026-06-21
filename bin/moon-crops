@@ -1,79 +1,207 @@
 #!/usr/bin/env python3
-"""Emit 300x300 crops around predicted sun/moon position for a day's frames.
+"""moon-crops — per-frame 150x150 crops centred on the predicted moon,
+with a green cross at the prediction. A local deliverable (run on puppy)
+for hand-verifying / refining the camera pointing against the moon.
 
-Reads ~/eclipticam-frames/series/<day>/log.csv and writes one crop per row
-where pred_x,pred_y are populated and inside the frame.
+The moon is a daytime fiducial for v3w pointing: ephemeris gives its
+true az/alt at each frame's capture time; project that to a pixel via
+the camera pointing model, crop around it, draw the cross. You then
+eyeball (in splay) whether the cross sits on the moon and `p`-mark
+corrections (which refine --boresight-az/--alt/--focal next run).
+
+Pointing model (gnomonic, then known lens distortion k1,k2):
+  (az,alt) --gnomonic about boresight, roll, focal length--> ideal px
+          --apply radial k1,k2 distortion--> observed px
+Boresight + focal default to the 2026-06-21 daytime-moon measurement
+(the camera is a tilted cardboard box, so this is the REAL pointing);
+override on the CLI as the fit tightens.
+
+NB FOCUS BREATHING (see camera.json capture_notes): pointing / plate
+scale / k1,k2 are only valid at the lens position the frames were
+captured at. Don't mix focus epochs. The 2026-06-21 defaults here were
+measured at the OLD lens=0.0 out-of-focus FOV — re-measure at 3.15.
+
+Crop ORIGIN is encoded in each filename (moon_<frame>_x<X0>_y<Y0>.png)
+so a splay `p`-click converts to full coords unambiguously
+(full = origin + click).
+
+Usage:
+    moon-crops --camera eclipticam-v3w --night 2026-06-22 \\
+        --out ~/tmp/moon-crops [--mode day]
+    moon-crops ... --boresight-az 216.6 --boresight-alt 29.7 --focal 1300
 """
-import argparse
-import csv
-from pathlib import Path
-import cv2
+from __future__ import annotations
 
-FRAMES = Path.home() / "eclipticam-frames" / "series"
-CROP = 300
+import argparse
+import datetime
+import glob
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw
+from PIL.ExifTags import TAGS
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+# 2026-06-21 daytime-moon pointing measurement (tilted cardboard mount,
+# so this is the real physical pointing). Focal is plate-scale-rough.
+DEFAULT_BORESIGHT_AZ = 216.6
+DEFAULT_BORESIGHT_ALT = 29.7
+DEFAULT_ROLL_DEG = -32.0
+DEFAULT_FOCAL_PX = 1300.0
+SURFACE = (2304, 1296)   # 2x-binned draft surface (what splay shows)
+CROP = 150
+
+
+def _ephem_observer(loc):
+    import ephem
+    obs = ephem.Observer()
+    obs.lat = str(loc["lat_deg"])
+    obs.lon = str(loc["lon_deg"])
+    obs.elevation = loc.get("height_m", 0)
+    obs.pressure = 0
+    return obs
+
+
+def _frame_utc_day(path):
+    ex = Image.open(path)._getexif() or {}
+    s = {TAGS.get(k): v for k, v in ex.items()}.get("DateTimeOriginal")
+    return (datetime.datetime.strptime(s, "%Y:%m:%d %H:%M:%S")
+            if s else None)
+
+
+def _frame_utc_night(path):
+    """Night FITS filename is epoch_ms."""
+    try:
+        ms = int(Path(path).name.split(".")[0])
+        return datetime.datetime.fromtimestamp(
+            ms / 1000, datetime.timezone.utc).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _moon_azalt(obs, dt):
+    import ephem
+    obs.date = dt
+    m = ephem.Moon(obs)
+    return float(m.az), float(m.alt)   # radians
+
+
+def _load_surface(path, mode):
+    """2D luminance at the SURFACE (2304x1296) scale."""
+    if mode == "day":
+        im = Image.open(path)
+        im.draft("RGB", SURFACE)   # 2x DCT downscale
+        a = np.asarray(im.convert("L"))
+    else:
+        from astropy.io import fits
+        a = np.asarray(fits.open(path)[1].data)
+    # ensure surface size (night FITS may be 1152x648 binned — upscale-free
+    # handling: just use whatever it is, but the pointing model assumes
+    # SURFACE; warn-by-shape mismatch is caller's concern)
+    return a
+
+
+def project(az, alt, az0, alt0, roll, f, cx, cy, k1, k2, Rdiag):
+    cosc = (np.sin(alt0) * np.sin(alt)
+            + np.cos(alt0) * np.cos(alt) * np.cos(az - az0))
+    if cosc <= 0:
+        return None
+    xi = np.cos(alt) * np.sin(az - az0) / cosc
+    eta = (np.cos(alt0) * np.sin(alt)
+           - np.sin(alt0) * np.cos(alt) * np.cos(az - az0)) / cosc
+    u = f * (xi * np.cos(roll) + eta * np.sin(roll))
+    v = f * (-xi * np.sin(roll) + eta * np.cos(roll))
+    px, py = cx + u, cy + v
+    dx, dy = px - cx, py - cy
+    rho2 = (dx * dx + dy * dy) / (Rdiag * Rdiag)
+    s = 1 + k1 * rho2 + k2 * rho2 * rho2
+    return cx + dx * s, cy + dy * s
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("day", help="YYYY-MM-DD")
-    ap.add_argument("--body", choices=["sun", "moon", "both"], default="both")
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", default="eclipticam-v3w")
+    ap.add_argument("--night", required=True, help="YYYY-MM-DD")
+    ap.add_argument("--mode", choices=("day", "night"), default="day")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--boresight-az", type=float, default=DEFAULT_BORESIGHT_AZ)
+    ap.add_argument("--boresight-alt", type=float, default=DEFAULT_BORESIGHT_ALT)
+    ap.add_argument("--roll", type=float, default=DEFAULT_ROLL_DEG)
+    ap.add_argument("--focal", type=float, default=DEFAULT_FOCAL_PX)
+    ap.add_argument("--frames-glob", default=None)
     args = ap.parse_args()
 
-    day_dir = FRAMES / args.day
-    log = day_dir / "log.csv"
-    if not log.exists():
-        raise SystemExit(f"no log.csv at {log}")
-    out_dir = day_dir / "crops"
-    out_dir.mkdir(exist_ok=True)
+    cfg = CameraConfig.load(args.camera)
+    loc_path = (Path(__file__).resolve().parent.parent / args.camera
+                / (cfg.get("location_file") or "location.json"))
+    loc = json.loads(loc_path.read_text())
+    obs = _ephem_observer(loc)
 
-    n_written = n_skipped = 0
-    for r in csv.DictReader(log.open()):
-        body = r.get("detected_body") or ""
-        if not body:
-            continue
-        if args.body != "both" and body != args.body:
-            continue
-        try:
-            px = float(r["pred_x"]); py = float(r["pred_y"])
-        except (KeyError, ValueError):
-            continue
-        frame_path = FRAMES.parent / r["file"]
-        img = cv2.imread(str(frame_path))
-        if img is None:
-            n_skipped += 1
-            continue
-        h, w = img.shape[:2]
-        if not (0 <= px < w and 0 <= py < h):
-            n_skipped += 1
-            continue
-        half = CROP // 2
-        x0 = max(0, int(round(px)) - half)
-        y0 = max(0, int(round(py)) - half)
-        x1 = min(w, x0 + CROP)
-        y1 = min(h, y0 + CROP)
-        crop = img[y0:y1, x0:x1].copy()
-        cx = int(round(px)) - x0
-        cy = int(round(py)) - y0
-        cv2.drawMarker(crop, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 24, 1)
-        # detected centroid if available
-        try:
-            dx = float(r["det_x"]); dy = float(r["det_y"])
-            score = float(r.get("match_score") or 0)
-            cv2.drawMarker(crop, (int(round(dx)) - x0, int(round(dy)) - y0),
-                           (0, 255, 0), cv2.MARKER_TILTED_CROSS, 24, 1)
-            label = f"{r['utc']} {body} score={score:.2f}"
-        except (KeyError, ValueError):
-            label = f"{r['utc']} {body}"
-        cv2.putText(crop, label, (4, crop.shape[0] - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+    dist = cfg.get("distortion") or {}
+    k1 = float(dist.get("k1", 0.0))
+    k2 = float(dist.get("k2", 0.0))
 
-        utc_compact = r["utc"].replace(":", "").replace("-", "")
-        out = out_dir / f"{utc_compact}_{r['camera']}_{body}.jpg"
-        cv2.imwrite(str(out), crop, [cv2.IMWRITE_JPEG_QUALITY, 88])
-        n_written += 1
+    W, H = SURFACE
+    cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+    Rdiag = 0.5 * np.hypot(W, H)
+    az0 = np.radians(args.boresight_az)
+    alt0 = np.radians(args.boresight_alt)
+    roll = np.radians(args.roll)
 
-    print(f"wrote {n_written} crops to {out_dir} (skipped {n_skipped})")
+    utc_fn = _frame_utc_day if args.mode == "day" else _frame_utc_night
+    if args.frames_glob:
+        fs = glob.glob(args.frames_glob)
+    else:
+        base = cfg.frames_root / args.mode / args.night / "v3w"
+        ext = "*.jpg" if args.mode == "day" else "*.fits.fz"
+        fs = glob.glob(str(base / "*" / ext))
+    # sort by capture time (hour dirs sort 00,01,02,23 lexically -> wrong)
+    fs = sorted((f for f in fs if utc_fn(f) is not None), key=utc_fn)
+    if not fs:
+        sys.stderr.write(f"no {args.mode} frames for {args.night}\n")
+        return 2
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    for f in args.out.glob("moon_*.png"):
+        f.unlink()
+
+    print(f"k1={k1} k2={k2}  boresight az={args.boresight_az} "
+          f"alt={args.boresight_alt} roll={args.roll} focal={args.focal}")
+    made = off = 0
+    for f in fs:
+        dt = utc_fn(f)
+        az, alt = _moon_azalt(obs, dt)
+        pred = project(az, alt, az0, alt0, roll, args.focal,
+                       cx, cy, k1, k2, Rdiag)
+        if pred is None:
+            continue
+        px, py = pred
+        img = _load_surface(f, args.mode)
+        x0 = int(round(px)) - CROP // 2
+        y0 = int(round(py)) - CROP // 2
+        if x0 < 0 or y0 < 0 or x0 + CROP > img.shape[1] or y0 + CROP > img.shape[0]:
+            off += 1
+            continue
+        box = img[y0:y0 + CROP, x0:x0 + CROP].astype(np.float32)
+        lo, hi = float(box.min()), float(box.max())
+        u8 = np.clip((box - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype("uint8")
+        crop = Image.fromarray(u8).convert("RGB")
+        d = ImageDraw.Draw(crop)
+        c = CROP // 2
+        d.line([(c, c - 8), (c, c + 8)], fill=(0, 255, 80))
+        d.line([(c - 8, c), (c + 8, c)], fill=(0, 255, 80))
+        fr = Path(f).name.split(".")[0]
+        crop.save(args.out / f"moon_{fr}_x{x0}_y{y0}.png")
+        made += 1
+    print(f"wrote {made} crops to {args.out} ({off} skipped: moon off-frame)")
+    print(f"  view: splay {args.out}/moon_*.png   "
+          f"(p-click the moon; full coords = origin-in-filename + click)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
