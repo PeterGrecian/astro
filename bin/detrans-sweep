@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""detrans-sweep — animate de-translated (detrans) stacks across a night.
+
+For a far-off-pole camera (eclipticam-v3w) the star motion across the
+sensor is, over a short window, a near-uniform TRANSLATION. "Detrans" a
+window = undistort each frame (k1,k2), shift each by -v*(t-t0) to cancel
+that translation, then max-stack — the per-frame 60 s streaks overlap
+into one sharp, high-SNR streak per star instead of smearing across the
+window. Sliding the window 1 min per output frame and encoding the
+stacks to mp4 gives an animation of the night with registered streaks.
+
+Calibration (eclipticam-v3w, from the star-trail distortion + detrans
+velocity work, worklog 2026-06-21): k1=-0.636, k2=+0.311 (radial,
+binned 1152x648, centre=frame centre, rho=half-diag); v=0.040 px/s at
+7.8 deg from horizontal.
+
+Step-by-step friendly: --max-windows N processes only the first N
+output frames (a short slice) so you can check + time before the full
+night.
+
+Usage
+-----
+    detrans-sweep --camera eclipticam-v3w --night 2026-06-20 \\
+        --window-min 10 --step-min 1 --out ~/tmp/detrans-sweep.mp4 \\
+        [--max-windows 20]
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import cv2
+from astropy.io import fits
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+# eclipticam-v3w calibration (binned 1152x648) — fallback defaults;
+# the real values are read from camera.json (distortion + detrans blocks).
+K1, K2 = -0.636, 0.311
+V_PXS = 0.040
+V_ANGLE_DEG = 7.8
+
+
+def epoch_ms(p):
+    return int(Path(p).name.split(".")[0])
+
+
+def load_bin(p):
+    """Load a full-res v3w frame and 2x2 sum-bin to 1152x648 (the
+    geometry the distortion was fit on)."""
+    d = fits.open(p)[1].data.astype(np.float32)
+    H, W = d.shape
+    d = d[:H // 2 * 2, :W // 2 * 2]
+    return d.reshape(H // 2, 2, W // 2, 2).sum(axis=(1, 3))
+
+
+def undistort_map(H, W, k1=K1, k2=K2):
+    cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+    R = 0.5 * np.hypot(W, H)
+    ys, xs = np.mgrid[0:H, 0:W].astype(np.float32)
+    dx, dy = xs - cx, ys - cy
+    rt = np.sqrt(dx * dx + dy * dy) / R
+    s = np.ones_like(rt)
+    for _ in range(12):
+        rd = rt / s
+        s = 1 + k1 * rd * rd + k2 * rd ** 4
+    return (cx + dx / s).astype(np.float32), (cy + dy / s).astype(np.float32)
+
+
+def stretch_u8(img, lo_pct=50, hi_pct=99.6):
+    lo, hi = np.percentile(img, lo_pct), np.percentile(img, hi_pct)
+    x = np.clip((img - lo) / max(hi - lo, 1e-6), 0, None)
+    return np.clip(np.arcsinh(x * 12) / np.arcsinh(12) * 255, 0, 255).astype(np.uint8)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", default="eclipticam-v3w")
+    ap.add_argument("--night", required=True)
+    ap.add_argument("--window-min", type=float, default=10.0)
+    ap.add_argument("--step-min", type=float, default=1.0)
+    ap.add_argument("--v", type=float, default=None,
+                    help="px/sec (default: camera.json detrans.v_px_per_s)")
+    ap.add_argument("--angle", type=float, default=None,
+                    help="deg (default: camera.json detrans.angle_deg)")
+    ap.add_argument("--k1", type=float, default=None)
+    ap.add_argument("--k2", type=float, default=None)
+    ap.add_argument("--fps", type=int, default=12)
+    ap.add_argument("--max-windows", type=int, default=None,
+                    help="process only the first N output frames (slice)")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--frames-glob", default=None,
+                    help="override frame glob (default resolves v3w night)")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    # Calibration from camera.json (distortion + detrans blocks), with
+    # CLI overrides and the module fallbacks. A camera with no `detrans`
+    # block isn't a detrans candidate — skip cleanly so the pipeline can
+    # call this unconditionally.
+    detr = cfg.get("detrans") or {}
+    dist = cfg.get("distortion") or {}
+    if not detr and args.v is None:
+        sys.stderr.write(f"{args.camera} has no `detrans` block in "
+                         "camera.json and no --v given; skipping "
+                         "(not a detrans camera)\n")
+        return 0
+    v = args.v if args.v is not None else detr.get("v_px_per_s", V_PXS)
+    angle = args.angle if args.angle is not None \
+        else detr.get("angle_deg", V_ANGLE_DEG)
+    k1 = args.k1 if args.k1 is not None else dist.get("k1", K1)
+    k2 = args.k2 if args.k2 is not None else dist.get("k2", K2)
+    print(f"calibration: v={v} px/s @ {angle}deg, k1={k1} k2={k2}")
+
+    if args.frames_glob:
+        fs = glob.glob(args.frames_glob)
+    else:
+        # legacy percam tree: <root>/night/<night>/v3w/HH/*.fits.fz
+        base = cfg.frames_root / "night" / args.night / "v3w"
+        fs = glob.glob(str(base / "*" / "*.fits.fz"))
+    if not fs:
+        sys.stderr.write("no frames found\n")
+        return 2
+    # Sort by TIMESTAMP, not lexically: the night spans 23->00->01->02 UTC
+    # and the hour dirs sort 00,01,02,23 — lexical order is non-monotonic
+    # in time, which breaks the windowing.
+    fs = sorted(fs, key=epoch_ms)
+    t0_ms = epoch_ms(fs[0])
+    ts = np.array([(epoch_ms(p) - t0_ms) / 1000.0 for p in fs])
+    print(f"{len(fs)} frames spanning {ts[-1]/3600:.2f} h")
+
+    win_s = args.window_min * 60
+    step_s = args.step_min * 60
+    starts = np.arange(0, ts[-1] - win_s, step_s)
+    if args.max_windows:
+        starts = starts[:args.max_windows]
+    print(f"{len(starts)} output frames "
+          f"(window {args.window_min}min, step {args.step_min}min)")
+
+    # peek one frame for geometry + map
+    H, W = load_bin(fs[0]).shape
+    mapx, mapy = undistort_map(H, W, k1, k2)
+    a = np.radians(angle)
+    dv = np.array([np.cos(a), np.sin(a)])
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    tmpdir = Path("~/tmp/detrans-sweep-frames").expanduser()
+    tmpdir.mkdir(parents=True, exist_ok=True)
+    for f in tmpdir.glob("*.png"):
+        f.unlink()
+
+    # cache decoded+undistorted frames lazily (window overlap reuses them)
+    cache = {}
+
+    def get_und(i):
+        if i not in cache:
+            cache[i] = cv2.remap(load_bin(fs[i]), mapx, mapy,
+                                 cv2.INTER_LINEAR)
+            # evict far-behind frames to bound memory
+            for k in list(cache):
+                if k < i - 60:
+                    del cache[k]
+        return cache[i]
+
+    t_start = time.monotonic()
+    for wi, w0 in enumerate(starts):
+        w1 = w0 + win_s
+        idx = np.where((ts >= w0) & (ts < w1))[0]
+        if len(idx) == 0:
+            continue
+        wt0 = ts[idx[0]]
+        acc = None
+        for i in idx:
+            sh = -v * (ts[i] - wt0) * dv
+            M = np.float32([[1, 0, sh[0]], [0, 1, sh[1]]])
+            w = cv2.warpAffine(get_und(i), M, (W, H), flags=cv2.INTER_LINEAR)
+            acc = w if acc is None else np.maximum(acc, w)
+        cv2.imwrite(str(tmpdir / f"f{wi:04d}.png"), stretch_u8(acc))
+        if wi % 20 == 0:
+            el = time.monotonic() - t_start
+            print(f"  {wi+1}/{len(starts)}  {el:.0f}s "
+                  f"({el/(wi+1):.2f}s/frame)", flush=True)
+
+    # encode
+    print("encoding...")
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error", "-framerate", str(args.fps),
+        "-i", str(tmpdir / "f%04d.png"),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+        str(args.out)], check=True)
+    print(f"wrote {args.out} "
+          f"({len(starts)} frames, {time.monotonic()-t_start:.0f}s total)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

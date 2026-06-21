@@ -119,6 +119,24 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         echo "diff-sweep FAILED; continuing without it"
     fi
 
+    # --- detrans-sweep: de-translated registered-streak animation.
+    # Only runs for cameras with a `detrans` block in camera.json
+    # (currently eclipticam-v3w: pole far off-frame so star motion is a
+    # near-uniform translation; undistort + shift each frame by -v*dt and
+    # max-stack so the 60s streaks register into one sharp high-SNR streak
+    # per window). Self-skips (exit 0) for other cameras.
+    echo "--- detrans-sweep (registered-streak animation)"
+    if "$PY" "$HERE/detrans-sweep" \
+            --camera "$CAMERA" --night "$NIGHT" \
+            --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" \
+            --fps "$FPS" \
+            --out "${night_dir}/sweep-detrans.mp4"; then
+        [[ -s "${night_dir}/sweep-detrans.mp4" ]] \
+            && echo "wrote ${night_dir}/sweep-detrans.mp4"
+    else
+        echo "detrans-sweep FAILED; continuing without it"
+    fi
+
     # Calendar thumbnail: middle frame of the colour sweep.
     colour_mp4="${night_dir}/sweep-colour.mp4"
     thumb="${night_dir}/thumb.jpg"
@@ -156,6 +174,7 @@ names = [
     "sweep-mono.mp4",
     "sweep-colour.mp4",
     "sweep-diff.mp4",
+    "sweep-detrans.mp4",
 ]
 files = [nd/n for n in names if (nd/n).exists()]
 missing = [n for n in names if not (nd/n).exists()]
@@ -163,7 +182,7 @@ missing = [n for n in names if not (nd/n).exists()]
 # OK so publish's privacy guard doesn't refuse them.
 if getattr(cfg, "privacy", None):
     for n in ("sweep-mono.mp4", "sweep-colour.mp4",
-              "sweep-diff.mp4", "thumb.jpg"):
+              "sweep-diff.mp4", "sweep-detrans.mp4", "thumb.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
