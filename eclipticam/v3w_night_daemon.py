@@ -28,7 +28,13 @@ from astro.config import CameraConfig
 CAM_V3W = 0
 EXPOSURE_US = int(os.environ.get("V3W_EXPOSURE_US", "59_900_000".replace("_", "")))
 GAIN = float(os.environ.get("V3W_GAIN", "1.0"))
-LENS_POSITION = float(os.environ.get("V3W_LENS_POSITION", "0.0"))
+# IMX708 manual focus in dioptres. 0.0 ("nominal infinity") is badly soft
+# on this Module 3 Wide — true infinity is ~3.15 (autofocus settled 3.07-
+# 3.25 on a distant scene; rooftop sharpness ~10x better than 0.0).
+# Measured 2026-06-21; was 0.0, so all prior NIGHT star frames were out of
+# focus. Override per-host with V3W_LENS_POSITION if a cold-night value
+# differs (focus drifts with temperature).
+LENS_POSITION = float(os.environ.get("V3W_LENS_POSITION", "3.15"))
 BUFFER_DIR = Path(os.environ.get("V3W_BUFFER_DIR",
                                  "/var/lib/eclipticam-buffer/v3w"))
 # IMX708 pedestal from eclipticam/camera.json — kept in sync there.
