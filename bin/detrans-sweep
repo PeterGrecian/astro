@@ -73,10 +73,31 @@ def undistort_map(H, W, k1=K1, k2=K2):
     return (cx + dx / s).astype(np.float32), (cy + dy / s).astype(np.float32)
 
 
-def stretch_u8(img, lo_pct=50, hi_pct=99.6):
+def stretch_u8(img, lo_pct=50, hi_pct=99.6, linear=False):
+    """asinh percentile stretch (max mode) or a plain LINEAR percentile
+    clip (deep mode). The linear lo=13 hi=97.4 default matches splay's
+    own stretch (fits_array_to_surface) tuned for the deep mean-bg
+    image — black at the noise floor, white at p97.4, so the faint
+    stars span the full range."""
     lo, hi = np.percentile(img, lo_pct), np.percentile(img, hi_pct)
-    x = np.clip((img - lo) / max(hi - lo, 1e-6), 0, None)
+    x = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1 if linear else None)
+    if linear:
+        return (x * 255).astype(np.uint8)
     return np.clip(np.arcsinh(x * 12) / np.arcsinh(12) * 255, 0, 255).astype(np.uint8)
+
+
+def local_bg_subtract(img, down=4, med=13):
+    """Subtract a large-kernel median background (downsample-filter-
+    upsample for speed). Used by deep mode to remove the sky pedestal
+    so faint registered stars sit on a near-zero, low-noise floor —
+    the maximum-SNR / deepest path."""
+    from scipy import ndimage
+    small = cv2.resize(img, (img.shape[1] // down, img.shape[0] // down),
+                       interpolation=cv2.INTER_AREA)
+    bg_small = ndimage.median_filter(small, size=med)
+    bg = cv2.resize(bg_small, (img.shape[1], img.shape[0]),
+                    interpolation=cv2.INTER_LINEAR)
+    return np.clip(img - bg, 0, None)
 
 
 def main():
@@ -85,6 +106,12 @@ def main():
     ap.add_argument("--night", required=True)
     ap.add_argument("--window-min", type=float, default=10.0)
     ap.add_argument("--step-min", type=float, default=1.0)
+    ap.add_argument("--mode", choices=("max", "deep"), default="max",
+                    help="max: overlap 60s streaks into one bright streak "
+                         "(animation). deep: MEAN the registered frames "
+                         "then subtract local background — maximum SNR, "
+                         "pulls the faintest stars (linear p13-p97.4 "
+                         "stretch matching splay).")
     ap.add_argument("--v", type=float, default=None,
                     help="px/sec (default: camera.json detrans.v_px_per_s)")
     ap.add_argument("--angle", type=float, default=None,
@@ -150,7 +177,8 @@ def main():
     dv = np.array([np.cos(a), np.sin(a)])
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    tmpdir = Path("~/tmp/detrans-sweep-frames").expanduser()
+    # mode-specific scratch so max + deep runs don't collide
+    tmpdir = Path(f"~/tmp/detrans-sweep-frames-{args.mode}").expanduser()
     tmpdir.mkdir(parents=True, exist_ok=True)
     for f in tmpdir.glob("*.png"):
         f.unlink()
@@ -175,13 +203,29 @@ def main():
         if len(idx) == 0:
             continue
         wt0 = ts[idx[0]]
-        acc = None
-        for i in idx:
-            sh = -v * (ts[i] - wt0) * dv
-            M = np.float32([[1, 0, sh[0]], [0, 1, sh[1]]])
-            w = cv2.warpAffine(get_und(i), M, (W, H), flags=cv2.INTER_LINEAR)
-            acc = w if acc is None else np.maximum(acc, w)
-        cv2.imwrite(str(tmpdir / f"f{wi:04d}.png"), stretch_u8(acc))
+        if args.mode == "deep":
+            # MEAN the registered frames (noise averages down √N), then
+            # subtract the local background → faint stars on a near-zero
+            # floor. Linear p13-p97.4 stretch (splay's), tuned for depth.
+            acc = np.zeros((H, W), dtype=np.float64)
+            for i in idx:
+                sh = -v * (ts[i] - wt0) * dv
+                M = np.float32([[1, 0, sh[0]], [0, 1, sh[1]]])
+                acc += cv2.warpAffine(get_und(i), M, (W, H),
+                                      flags=cv2.INTER_LINEAR)
+            deep = local_bg_subtract((acc / len(idx)).astype(np.float32))
+            out8 = stretch_u8(deep, lo_pct=13.0, hi_pct=97.4, linear=True)
+        else:
+            # MAX: overlap the 60s streaks into one bright streak.
+            acc = None
+            for i in idx:
+                sh = -v * (ts[i] - wt0) * dv
+                M = np.float32([[1, 0, sh[0]], [0, 1, sh[1]]])
+                w = cv2.warpAffine(get_und(i), M, (W, H),
+                                   flags=cv2.INTER_LINEAR)
+                acc = w if acc is None else np.maximum(acc, w)
+            out8 = stretch_u8(acc)
+        cv2.imwrite(str(tmpdir / f"f{wi:04d}.png"), out8)
         if wi % 20 == 0:
             el = time.monotonic() - t_start
             print(f"  {wi+1}/{len(starts)}  {el:.0f}s "
