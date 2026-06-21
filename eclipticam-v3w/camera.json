@@ -9,13 +9,14 @@
   "plate_scale_deg_px": 0.0443,
   "plate_scale_notes": "Module 3 Wide, 102 deg horizontal / 2304 px at the half-res capture mode in use (native 4608x2592).",
   "distortion": {
-    "model": "radial_k1",
-    "k1": -0.327,
+    "model": "radial_k1_k2",
+    "k1": -0.636,
+    "k2": 0.311,
     "centre": "frame_centre",
     "rho_norm": "half_diagonal",
     "fit_image": "max.fits.fz (2x2-binned, 1152x648)"
   },
-  "distortion_notes": "Radial barrel distortion, r' = r*(1 + k1*rho^2), rho = |p - centre| / R with R the HALF-DIAGONAL and centre the frame centre. k1 = -0.327 fitted 2026-06-21 from the night-2026-06-20 max-stack: 37 star-trail centrelines separated by a Hessian ridge crawler (bin/separate-trails), then the single k1 minimising total per-trail bow (the trails are near-straight chords because the celestial pole is far off-frame, so residual bow IS the lens). Clean parabolic minimum at -0.325 (objective rises ~1.7x either side), NOT railed. Confirmed visually: applying k1 to the max image straightens the curved trails (splay before/after). Defined on the BINNED 1152x648 geometry; rescale rho_norm/centre if applied to full-res. One-parameter, centre-assumed-central first pass; free the centre + add k2 to refine. See bin/fit-distortion-trails and worklog 2026-06-21.",
+  "distortion_notes": "Radial distortion, r' = r*(1 + k1*rho^2 + k2*rho^4), rho = |p - centre| / R with R the HALF-DIAGONAL and centre the frame centre. k1 = -0.636, k2 = +0.311 fitted 2026-06-21 from the night-2026-06-20 max-stack: ~49 star-trail centrelines separated by a Hessian ridge crawler (bin/separate-trails, incl. corner trails out to rho~0.95), then (k1,k2) minimising total per-trail bow (the trails are near-straight chords because the celestial pole is far off-frame, so residual bow IS the lens). 'Barrel with an edge correction': k1 alone (-0.345) straightens the bulk excellently but leaves residual corner curvature (see edge.png, top-left); the +k2*rho^4 term bends the correction near the corner to match it. Displacement is monotonic barrel (-3px at rho 0.2 to -215px at the corner). Minimum is a real bowl (objective rises in all directions; soft along the k1<->k2 trade as expected), NOT degenerate. Confirmed visually in splay: 04_k1k2 corrects the corner that 03_k1only leaves bowed. Defined on BINNED 1152x648 geometry; rescale rho_norm/centre for full-res. Free-centre fit is degenerate on this data (centre runs to infinity) — needs more corner coverage; keep centre fixed. Alternative if k2 ever looks unreliable: crop to a valid radius (rho<~0.85, just inside the inner edge.png dot) and use k1 only. See bin/fit-distortion-trails and worklog 2026-06-21.",
   "frames_root": "~/eclipticam-frames",
   "night_layout": "percam",
   "night_layout_notes": "TRANSITIONAL: live v3w_uploader.py still writes to night/<night>/v3w/HH/<epoch_ms>.fits.fz. The post-split camera name 'eclipticam-v3w' resolves the legacy 'v3w' subcam via the percam reader. Once the uploader is migrated, flip to 'canonical' (per DECISIONS.md 2026-06-16): <frames_root>/YYYY/MM/DD/eclipticam-v3w/night/HH/HH-MM-SS.fits.fz. brightness.csv already lands at the canonical path (astro.brightness_log.append writes there directly).",
