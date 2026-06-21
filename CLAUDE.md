@@ -249,7 +249,7 @@ Stage 4 is the exception (weekly timer).
 |---|---|---|---|
 | `astro-state.service` | each Pi + NFS host | 1 | **landed** (2026-06-16) |
 | `astro-capture.service` | each camera Pi | 2 | pending — current per-camera daemons run instead |
-| `astro-process.service` | wherever `processing.host` points | 3 | **landed** (2026-06-16) |
+| `astro-process.service` | puppy only (gated by env `CAMERAS`, not `processing.host`) | 3 | **landed** (2026-06-16) |
 | `astro-storage.timer` + `.service` | NFS host | 4 | pending |
 
 Both new units read `$CAMERAS` from `/etc/default/astro-<stage>`.

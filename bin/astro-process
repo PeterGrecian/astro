@@ -6,10 +6,16 @@ pending_process flag (dusk/dawn window complete) for a camera, invokes
 the deliverables pipeline (`bin/publish-night-cam --camera <name>
 --night <YYYY-MM-DD>`) and resets the flag.
 
-Production: runs as `astro-process.service` on the NFS / CPU host
-(puppy, muppet, or the camera's own Pi when `processing.host == "self"`
-— see camera.json). One daemon per host, watching every camera
-assigned to it.
+Production: runs as `astro-process.service` on the CPU host that has
+the frames locally — currently always **puppy** (the Pis write to
+puppy's NFS; a Pi running stage 3 reads frames back over NFS, ~13x
+slower, so the Pis do stage 1 + capture only — they can't do the
+pipeline calculation until they get their own local storage). Which
+cameras a host processes is gated by that host's
+`/etc/default/astro-process` `CAMERAS` list, NOT by `processing.host`
+in camera.json — that field is intent/documentation; the dispatcher
+does not read it. So a camera only processes on the host whose env
+file lists it. Keep exactly one host's CAMERAS naming each camera.
 
 Cadence: polls state.json files every --tick seconds. Cheap (just a
 JSON read per camera). The deliverables run itself takes minutes;
