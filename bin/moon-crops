@@ -46,14 +46,21 @@ from PIL.ExifTags import TAGS
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 
-# 2026-06-21 daytime-moon pointing measurement (tilted cardboard mount,
-# so this is the real physical pointing). Focal is plate-scale-rough.
-DEFAULT_BORESIGHT_AZ = 216.6
-DEFAULT_BORESIGHT_ALT = 29.7
+# 2026-06-23 daytime-moon pointing: 7 confirmed-moon points (lunar maria
+# visible) across az 160-186deg, near-exact frame-centre crossing at
+# 18:56 UTC -> boresight ~az 186, alt 30 (v3w points ~due south, up 30).
+# Supersedes the 2026-06-21 az 216.6 estimate (that was at the wrong
+# 2304x1296 scale AND lens-0.0 focus epoch). Focal is plate-scale-rough.
+DEFAULT_BORESIGHT_AZ = 186.0
+DEFAULT_BORESIGHT_ALT = 30.0
 DEFAULT_ROLL_DEG = -32.0
-DEFAULT_FOCAL_PX = 1300.0
-SURFACE = (2304, 1296)   # 2x-binned draft surface (what splay shows)
-CROP = 150
+DEFAULT_FOCAL_PX = 2600.0   # ~2x the 2304-surface value (now full-res)
+# DAY frames are native FULL-RES 4608x2592 (the v3w day capture is NOT
+# binned). splay shows them full-res when zoomed (load_full), so marks
+# are in full-res coords. Earlier this was wrongly set to 2304x1296,
+# making every coordinate off by 2x.
+SURFACE = (4608, 2592)
+CROP = 300   # 2x the old 150 to match the doubled resolution
 
 
 def _ephem_observer(loc):
@@ -91,10 +98,10 @@ def _moon_azalt(obs, dt):
 
 
 def _load_surface(path, mode):
-    """2D luminance at the SURFACE (2304x1296) scale."""
+    """2D luminance at the SURFACE scale (full-res 4608x2592 for day)."""
     if mode == "day":
         im = Image.open(path)
-        im.draft("RGB", SURFACE)   # 2x DCT downscale
+        im.draft("RGB", SURFACE)   # full-res (no downscale at 4608x2592)
         a = np.asarray(im.convert("L"))
     else:
         from astropy.io import fits
