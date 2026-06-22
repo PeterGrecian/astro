@@ -68,7 +68,17 @@ def main() -> int:
 
     cfg = StreamingConfig(
         cam_idx=CAM_V3W,
-        sensor_size=(2304, 1296),
+        # FULL-RES capture (2026-06-22): IMX708 native 4608x2592 raw Bayer,
+        # not the 2x2-binned 2304x1296 readout used before. Doubles linear
+        # resolution (sharper stars, resolvable moon). Cost ~11GB/night vs
+        # 3GB; sensor does 4608x2592 at 14fps so readout fits the 5s budget.
+        # RECALIBRATE FROM FULL-RES FRAMES: pedestal (un-binned black level
+        # ~4x lower than the binned 4380), detrans velocity (px/s scales with
+        # resolution), and k1,k2 (rho-normalised so scale-invariant, but
+        # re-fit anyway on in-focus full-res). camera.json resolution + the
+        # detrans/distortion notes still say 2304/1296 1152/648 — update once
+        # the full-res calibration lands.
+        sensor_size=(4608, 2592),
         bayer_format="SRGGB10",
         bayer_pattern="RGGB",
         exposure_us=exposure_us,
