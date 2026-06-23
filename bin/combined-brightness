@@ -118,9 +118,11 @@ def main():
     ap.add_argument("--publish", action="store_true",
                     help="upload to S3 as <camera>/brightness-combined.png "
                          "(no per-night prefix; one key)")
-    ap.add_argument("--recent", "--limit", type=int, default=14,
+    ap.add_argument("--recent", "--limit", type=int, default=3,
                     dest="recent",
-                    help="plot the N most recent nights (default 14)")
+                    help="plot the N most recent nights (default 3) — "
+                         "plus the camera.json reference_nights baseline, "
+                         "so the chart stays uncluttered (~4 lines)")
     ap.add_argument("--nights", default=None,
                     help="comma-separated YYYY-MM-DD nights to ALWAYS "
                          "include (e.g. a known dark reference night), "
