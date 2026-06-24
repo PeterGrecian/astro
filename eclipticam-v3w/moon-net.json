@@ -217,6 +217,15 @@
           "az": 213.0,
           "alt": 13.2,
           "note": "RGB 0,0,0 - moon faded, on-thread by prediction"
+        },
+        {
+          "frame": "21/0025.jpg",
+          "utc": "2026-06-24T22:24:06",
+          "x": 1208,
+          "y": 1156,
+          "az": 213.9,
+          "alt": 12.8,
+          "note": "brightness 9 - moon faded"
         }
       ]
     }
