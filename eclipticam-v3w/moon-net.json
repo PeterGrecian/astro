@@ -1,0 +1,18 @@
+{
+  "_comment": "Accumulated moon-track threads for v3w (Peter's monthly-net). Each thread = one night's marked moon points (a curve of known sky positions). Coords are full-res 4608x2592 pixels (moon-overlay auto-scales to the target image). Add a thread per clear night; non-parallel threads (different declinations) pin pointing/scale/distortion and catch stars.",
+  "capture_full_res": [4608, 2592],
+  "threads": [
+    {
+      "night": "2026-06-24",
+      "dec_deg": -19.1,
+      "phase_pct": 78,
+      "points": [
+        {"frame": "19/0010.jpg", "utc": "2026-06-24T20:38:43", "x": 318, "y": 1059, "az": 189.4, "alt": 19.1},
+        {"frame": "19/0013.jpg", "utc": "2026-06-24T20:41:10", "x": 341, "y": 1061, "az": 190.0, "alt": 19.0},
+        {"frame": "19/0018.jpg", "utc": "2026-06-24T20:46:06", "x": 386, "y": 1062, "az": 191.2, "alt": 18.8},
+        {"frame": "19/0019.jpg", "utc": "2026-06-24T20:47:06", "x": 396, "y": 1061, "az": 191.4, "alt": 18.8},
+        {"frame": "20/0003.jpg", "utc": "2026-06-24T21:02:07", "x": 531, "y": 1071, "az": 195.0, "alt": 18.2}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""moon-overlay — draw the accumulated moon-net threads onto a deliverable.
+
+Peter's monthly-net idea: each clear night the moon traces a different,
+precisely-known track across the FIXED sensor. moon-net.json accumulates
+those threads (full-res 4608x2592 pixel points). This tool overlays them
+on any image (a max-stack, detrans-deep, etc), AUTO-SCALING from the
+full-res capture geometry to the target image's resolution — so the moon
+path can be drawn on binned deliverables too (the camera is fixed, so the
+pixel curve transfers; only the scale changes).
+
+Each thread is drawn as a coloured polyline through its marked points,
+with the points circled and the end azimuths labelled. Different threads
+(different declinations) get different colours -> you SEE the net.
+
+Usage:
+    moon-overlay --image night/2026-06-21/max.fits.fz --out moon-net.png
+    moon-overlay --image .../poster-detrans-deep.jpg --camera eclipticam-v3w
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+THREAD_COLOURS = [
+    (0, 255, 80), (255, 200, 0), (0, 200, 255), (255, 80, 200),
+    (180, 255, 0), (255, 120, 0), (120, 160, 255),
+]
+
+
+def load_image(path: Path):
+    """Return an RGB PIL image, asinh-stretched if it's a FITS."""
+    if path.suffix.lower() in (".fits", ".fit", ".fts", ".fz"):
+        from astropy.io import fits
+        with fits.open(path) as h:
+            for hdu in h:
+                if getattr(hdu, "data", None) is not None and hdu.data.ndim == 2:
+                    d = hdu.data.astype(float)
+                    break
+        lo, hi = np.percentile(d, 50), np.percentile(d, 99.7)
+        x = np.clip((d - lo) / max(hi - lo, 1e-6), 0, None)
+        u8 = np.clip(np.arcsinh(x * 10) / np.arcsinh(10) * 255,
+                     0, 255).astype("uint8")
+        return Image.fromarray(u8).convert("RGB")
+    return Image.open(path).convert("RGB")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--image", type=Path, required=True,
+                    help="deliverable to overlay on (FITS or image)")
+    ap.add_argument("--net", type=Path, default=None,
+                    help="moon-net.json (default: <camera>/moon-net.json)")
+    ap.add_argument("--camera", default="eclipticam-v3w")
+    ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--extend", action="store_true",
+                    help="extend each thread as a smooth curve across the "
+                         "whole frame (not just between marked points)")
+    args = ap.parse_args()
+
+    net_path = args.net or (Path(__file__).resolve().parent.parent
+                            / args.camera / "moon-net.json")
+    net = json.loads(net_path.read_text())
+    fullW, fullH = net.get("capture_full_res", [4608, 2592])
+
+    im = load_image(args.image)
+    W, H = im.size
+    sx, sy = W / fullW, H / fullH   # full-res -> target scale
+    draw = ImageDraw.Draw(im)
+
+    drawn = 0
+    for i, thread in enumerate(net["threads"]):
+        col = THREAD_COLOURS[i % len(THREAD_COLOURS)]
+        pts = sorted(thread["points"], key=lambda p: p.get("az", p["x"]))
+        xy = [(p["x"] * sx, p["y"] * sy) for p in pts]
+        if len(xy) < 1:
+            continue
+        if args.extend and len(xy) >= 3:
+            # smooth quadratic y(x) through the points, drawn across frame
+            xs = np.array([p["x"] * sx for p in pts])
+            ys = np.array([p["y"] * sy for p in pts])
+            c = np.polyfit(xs, ys, min(2, len(xs) - 1))
+            prev = None
+            for px in range(0, W, 3):
+                py = np.polyval(c, px)
+                if prev and 0 <= py < H:
+                    draw.line([prev, (px, py)], fill=col, width=1)
+                prev = (px, py)
+        # the measured polyline (bold)
+        for j in range(len(xy) - 1):
+            draw.line([xy[j], xy[j + 1]], fill=col, width=2)
+        for (x, y), p in zip(xy, pts):
+            draw.ellipse([x - 4, y - 4, x + 4, y + 4], outline=col, width=2)
+        # label the thread (night + dec) at its first point
+        lx, ly = xy[0]
+        label = f"{thread['night']} dec{thread.get('dec_deg', '?')}"
+        draw.text((lx + 6, ly - 14), label, fill=col)
+        drawn += 1
+
+    draw.text((8, 8), f"moon net: {drawn} thread(s)", fill=(0, 255, 80))
+    out = args.out or args.image.with_name(args.image.stem + "_moon-net.png")
+    im.save(out)
+    print(f"wrote {out}  ({drawn} threads on {W}x{H} image, "
+          f"scaled x{sx:.3f})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
