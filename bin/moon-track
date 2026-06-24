@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""moon-track — auto-track the moon across frames, seeded by hand-marks.
+
+Hand-marking every frame is tedious; the moon is bright (and at night,
+saturated) so it auto-detects easily ONCE you know roughly where to look.
+This tool:
+  1. fits pixel = f(moon az) from the existing hand-marked points for a
+     night (in moon-net.json), giving a precise per-frame prediction;
+  2. for each frame in the night/mode, predicts the moon pixel, searches
+     a small box there for the brightest blob, and centroids it;
+  3. emits the auto-detected points (and optionally appends them to the
+     thread, tagged source="auto").
+
+The box-around-prediction makes it foreground/ghost-immune: it only looks
+where the moon must be. Works best on BRIGHT moon (night frames, where a
+55s exposure saturates it — the brightest blob in the box is unmistakable)
+and on day frames while the moon is bright; it SKIPS frames where nothing
+rises above the local background (faint twilight / cloud) rather than
+marking noise.
+
+Usage:
+    # dry-run: show what it would auto-detect, vs hand-marks
+    moon-track --camera eclipticam-v3w --night 2026-06-24 --mode night
+    # append the auto points to the thread:
+    moon-track ... --mode night --append
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import glob
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+
+def _moon_az(obs, dt):
+    import ephem
+    obs.date = dt
+    return float(ephem.Moon(obs).az) * 180.0 / np.pi
+
+
+def _moon_azalt(obs, dt):
+    import ephem
+    obs.date = dt
+    m = ephem.Moon(obs)
+    return (float(m.az) * 180 / np.pi, float(m.alt) * 180 / np.pi)
+
+
+def _frame_dt(path, mode):
+    if mode == "day":
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+        ex = Image.open(path)._getexif() or {}
+        s = {TAGS.get(k): v for k, v in ex.items()}.get("DateTimeOriginal")
+        return (datetime.datetime.strptime(s, "%Y:%m:%d %H:%M:%S")
+                if s else None)
+    # night FITS: epoch_ms filename
+    try:
+        ms = int(Path(path).name.split(".")[0])
+        return datetime.datetime.fromtimestamp(
+            ms / 1000, datetime.timezone.utc).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _load_grey(path, mode):
+    if mode == "day":
+        from PIL import Image
+        im = Image.open(path)
+        im.draft("RGB", (4608, 2592))
+        return np.asarray(im.convert("L")).astype(np.float32)
+    from astropy.io import fits
+    return np.asarray(fits.open(path)[1].data).astype(np.float32)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", default="eclipticam-v3w")
+    ap.add_argument("--night", required=True)
+    ap.add_argument("--mode", choices=("day", "night"), default="night")
+    ap.add_argument("--net", type=Path, default=None)
+    ap.add_argument("--box", type=int, default=140,
+                    help="search half-size (px) around the prediction")
+    ap.add_argument("--min-bright", type=float, default=15.0,
+                    help="min blob brightness over local bg to accept "
+                         "(skip = moon too faint / cloud)")
+    ap.add_argument("--step", type=int, default=1,
+                    help="process every Nth frame")
+    ap.add_argument("--append", action="store_true",
+                    help="append auto points to the thread (source=auto)")
+    args = ap.parse_args()
+
+    import ephem
+    from scipy.ndimage import gaussian_filter
+
+    cfg = CameraConfig.load(args.camera)
+    loc_path = (Path(__file__).resolve().parent.parent / args.camera
+                / "location.json")
+    loc = json.loads(loc_path.read_text())
+    obs = ephem.Observer()
+    obs.lat = str(loc["lat_deg"]); obs.lon = str(loc["lon_deg"])
+    obs.elevation = loc.get("height_m", 0); obs.pressure = 0
+
+    net_path = args.net or (Path(__file__).resolve().parent.parent
+                            / args.camera / "moon-net.json")
+    net = json.loads(net_path.read_text())
+    thread = next((t for t in net["threads"] if t["night"] == args.night),
+                  None)
+    if thread is None:
+        sys.stderr.write(f"no thread for {args.night} in {net_path} — "
+                         "hand-mark a few points first to seed the fit\n")
+        return 2
+    seeds = [p for p in thread["points"] if p.get("note") is None]
+    if len(seeds) < 3:
+        sys.stderr.write(f"need >=3 hand-marked seed points; have "
+                         f"{len(seeds)}\n")
+        return 2
+    az = np.array([p["az"] for p in seeds])
+    X = np.array([p["x"] for p in seeds]); Y = np.array([p["y"] for p in seeds])
+    deg = min(2, len(seeds) - 1)
+    cx = np.polyfit(az, X, deg); cy = np.polyfit(az, Y, deg)
+    az_lo, az_hi = az.min(), az.max()
+    print(f"seeded from {len(seeds)} hand-marks, az {az_lo:.1f}-{az_hi:.1f}")
+
+    # frames
+    base = cfg.frames_root / args.mode / args.night / "v3w"
+    ext = "*.jpg" if args.mode == "day" else "*.fits.fz"
+    fs = glob.glob(str(base / "*" / ext))
+    fs = sorted((f for f in fs if _frame_dt(f, args.mode)),
+                key=lambda f: _frame_dt(f, args.mode))[::args.step]
+    if not fs:
+        sys.stderr.write(f"no {args.mode} frames for {args.night}\n")
+        return 2
+
+    marked = {p["frame"] for p in thread["points"]}
+    auto = []
+    n_skip_faint = n_skip_range = 0
+    for f in fs:
+        dt = _frame_dt(f, args.mode)
+        a, alt = _moon_azalt(obs, dt)
+        # only within (a bit beyond) the seeded az range — extrapolation is
+        # unreliable
+        if not (az_lo - 3 <= a <= az_hi + 3):
+            n_skip_range += 1
+            continue
+        px = float(np.polyval(cx, a)); py = float(np.polyval(cy, a))
+        g = _load_grey(f, args.mode)
+        H, W = g.shape
+        x0 = int(np.clip(px - args.box, 0, W - 1))
+        x1 = int(np.clip(px + args.box, 0, W))
+        y0 = int(np.clip(py - args.box, 0, H - 1))
+        y1 = int(np.clip(py + args.box, 0, H))
+        sub = g[y0:y1, x0:x1]
+        if sub.size == 0:
+            continue
+        resid = sub - gaussian_filter(sub, 25)
+        if resid.max() < args.min_bright:
+            n_skip_faint += 1
+            continue
+        # centroid of the bright blob (saturation-tolerant: weight by resid
+        # above half-max so a flat-topped saturated moon centroids cleanly)
+        thr = resid.max() * 0.5
+        ys, xs = np.where(resid > thr)
+        wx = (x0 + xs.mean()); wy = (y0 + ys.mean())
+        off = np.hypot(wx - px, wy - py)
+        frame_id = f.split("/v3w/")[-1]
+        tag = "(marked)" if frame_id in marked else ""
+        auto.append({"frame": frame_id,
+                     "utc": dt.isoformat(),
+                     "x": int(round(wx)), "y": int(round(wy)),
+                     "az": round(a, 2), "alt": round(alt, 2),
+                     "bright": float(resid.max()), "pred_off": float(off),
+                     "source": "auto"})
+        print(f"  AUTO {frame_id} {dt.strftime('%H:%M:%S')} az={a:.1f} "
+              f"-> ({int(wx)},{int(wy)}) bright={resid.max():.0f} "
+              f"off={off:.0f}px {tag}")
+
+    print(f"\n{len(auto)} auto-detected; {n_skip_faint} skipped (too faint), "
+          f"{n_skip_range} out of az range")
+
+    if args.append and auto:
+        # don't duplicate frames already in the thread
+        new = [a for a in auto if a["frame"] not in marked]
+        for a in new:
+            a.pop("bright", None); a.pop("pred_off", None)
+        thread["points"].extend(new)
+        net_path.write_text(json.dumps(net, indent=2))
+        print(f"appended {len(new)} new auto points to the {args.night} "
+              f"thread in {net_path.name}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
