@@ -154,6 +154,48 @@ state.json of every assigned camera over NFS; transitions trigger work
 enabling the systemd unit on the target host (and disabling it on the
 old one).
 
+### 2026-06-25: eclipticam processing+storage MOVING puppy -> the Pi
+
+The eclipticam Pi (Pi 5, 4 cores, **991 MiB RAM**) now has a **110 GB
+local SSD** (`/mnt/ssd`, `eclipticam-frames` dir created). That meets the
+"Pi has its own local storage" condition above, so processing moves to
+the Pi — the storage-locality principle now points *to* the Pi (frames
+local, no NFS round-trip). In progress, not complete: SSD provisioned,
+but `~/eclipticam-frames` still the old path and Pi `astro-process` still
+disabled. **Must not affect acquisition** (separate stage).
+
+Why the CPU worry evaporates (Peter): this is real-time processing with a
+**one-day interval**. The camera captures at night; the ~10-12 h of
+DAYLIGHT is a huge idle window to process the one night's frames. Capture
+and processing run at *different times* -> little contention, so
+acquisition-safety is largely automatic (don't process during the capture
+window). The 991 MB RAM ceiling still bounds per-job memory, but with all
+day for one night's work, process serially / memory-bounded, no time
+pressure.
+
+The real constraint is STORAGE BUDGET — a tiered plan:
+
+| Tier | Where | Purpose | Retention |
+|---|---|---|---|
+| Hot | Pi SSD (110 GB) | recent nights + **long-baseline keeps** | days..months |
+| Warm | S3 standard | deliverables + raw, long-term | ongoing |
+| Cold | S3 Glacier / Deep Archive | archival (raw Bayer "most options") | indefinite |
+
+Budget math: full-res ~11 GB/night -> 110 GB SSD ≈ **10 nights** before
+full. So the cadence MUST be reliable: capture -> process -> ship
+deliverables+raw to S3 -> free local (EXCEPT long-baseline keeps, which
+stay hot for cross-night/extreme-long-baseline re-stacking, e.g. the moon
+net). If shipping lags, the SSD fills in ~10 days. This is what STAGE 4
+(`astro-storage`, still unbuilt) must do for eclipticam: ship+free with a
+keep-policy, and an S3->Glacier lifecycle for the cold tier. Follows the
+COLD_STORAGE.md pattern (Hot/Warm/Cold -> Deep Archive) already used for
+starcam.
+
+Open: (a) long-baseline keep policy (how many nights/months stay hot);
+(b) ship+free trigger (build astro-storage); (c) S3->Glacier transition
+age; (d) OOMScoreAdjust on Pi processing so the OOM killer never kills
+capture (belt-and-braces even if they rarely overlap in time).
+
 ## S3 layout (deliverables tier)
 
 Mirrors the canonical tree:
