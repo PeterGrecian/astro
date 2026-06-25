@@ -28,12 +28,18 @@ Complementary, each camera doing what it's good at. The in-stream-bracket
 approach below remains the FALLBACK if v1 proves unusable (ghosting,
 overlap too small, can't re-enable at night).
 
+UPDATE 2026-06-25: Peter REMOVED an experimental filter from v1. Its
+images went from heavy blue double-glazing-ghost-washed (half the frame)
+to clean, bright, sharp clear sky (RGB ~171/185/197, tree-edge lap-var
+~75). The ghosting concern below is RESOLVED — v1 can now image the moon
+cleanly. v1 is a genuinely usable complement now, not a degraded fallback.
+
 OPEN: (a) re-enable v1 at night (currently switched off in capture.py —
 "v1 day-only, night JPG is just noise"); give it a short-exposure moon
-mode. (b) v1 double-glazing ghosting — may swamp a small faint moon;
-test. (c) measure the v1<->v3w overlap + transform from existing
-simultaneous day frames. (d) v1 also needs its own moon focus / lens
-position.
+mode. (b) [RESOLVED — filter removed] ~~v1 double-glazing ghosting~~.
+(c) measure the v1<->v3w overlap + transform from existing simultaneous
+day frames. (d) v1 also needs its own moon focus / lens position (OV5647
+is fixed-focus though — no VCM, so focus is whatever the lens is set to).
 
 ## The problem
 
