@@ -1,8 +1,39 @@
 # Moon capture subsystem — design
 
-Peter's design (2026-06-24/25). One short-exposure-in-stream mechanism
-serves FOUR purposes: phases timelapse, precise net tracking, moon
-removal from long exposures, and focus testing.
+Peter's design (2026-06-24/25). The moon is a Swiss-army calibration
+object serving FOUR purposes: phases timelapse, precise net tracking,
+moon removal from long exposures, and focus testing.
+
+## CHOSEN DIRECTION (2026-06-25): v1 as a COMPLEMENT to v3w
+
+Two cameras share the eclipticam Pi: v3w (IMX708 Wide, 102°, the
+faint-star camera, continuous 55s stream) and v1 (OV5647, narrower FOV,
+currently day-only). They are roughly co-pointed (verified: a midday
+frame from each shows the same sun + rooftops; v1 is narrower and badly
+double-glazing-ghosted). Rather than juggle v3w's stream, use v1 to image
+the moon:
+
+- **v1 images the moon at its OWN short exposure**, day AND night,
+  WITHOUT interrupting v3w's continuous faint-star stream. (v1 has a 3s
+  exposure ceiling — irrelevant for the bright moon; this is exactly the
+  "sun/moon-pointing" role CLAUDE.md already earmarked v1 for.)
+- **The daytime moon (when BOTH cameras see it — rarer in winter's short
+  days) gives a monthly chance to derive/refresh the v1<->v3w transform**:
+  the moon imaged in both at the same instant = matched points -> the
+  one-off inter-camera mapping (plate scale, distortion, pointing offset).
+- The transform maps v1's moon pixel into v3w's frame for moon-removal,
+  the net, etc. v1 carries the moon-tracking load; v3w stays uninterrupted.
+
+Complementary, each camera doing what it's good at. The in-stream-bracket
+approach below remains the FALLBACK if v1 proves unusable (ghosting,
+overlap too small, can't re-enable at night).
+
+OPEN: (a) re-enable v1 at night (currently switched off in capture.py —
+"v1 day-only, night JPG is just noise"); give it a short-exposure moon
+mode. (b) v1 double-glazing ghosting — may swamp a small faint moon;
+test. (c) measure the v1<->v3w overlap + transform from existing
+simultaneous day frames. (d) v1 also needs its own moon focus / lens
+position.
 
 ## The problem
 
