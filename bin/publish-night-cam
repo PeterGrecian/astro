@@ -283,6 +283,7 @@ from astro.present import privacy as P
 from astro.present.publish import publish_night
 cfg = CameraConfig.load("$CAMERA")
 nd = Path("$night_dir")
+web_only = $WEB_ONLY
 names = [
     "summary.json",
     "brightness.png",
@@ -294,11 +295,6 @@ names = [
     "poster-diff.jpg",
     "poster-detrans.jpg",
     "poster-detrans-deep.jpg",
-    "sweep-mono.mp4",
-    "sweep-colour.mp4",
-    "sweep-diff.mp4",
-    "sweep-detrans.mp4",
-    "sweep-detrans-deep.mp4",
     # web-delivery versions (what the website actually serves: loop+fullscreen)
     "sweep-mono-web.mp4",
     "sweep-colour-web.mp4",
@@ -306,6 +302,14 @@ names = [
     "sweep-detrans-web.mp4",
     "sweep-detrans-deep-web.mp4",
 ]
+# Full-res mp4s are big (30-68MB). In web-only backfill they are ALREADY in
+# S3 from the original run, so don't re-upload them over a slow uplink —
+# only the new web mp4s + posters go up. A normal run uploads them.
+if not web_only:
+    names += [
+        "sweep-mono.mp4", "sweep-colour.mp4", "sweep-diff.mp4",
+        "sweep-detrans.mp4", "sweep-detrans-deep.mp4",
+    ]
 files = [nd/n for n in names if (nd/n).exists()]
 missing = [n for n in names if not (nd/n).exists()]
 # Videos and the thumb come out of privacy-cropped frames; mark them
