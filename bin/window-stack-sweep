@@ -312,13 +312,45 @@ def main() -> int:
         return 0
 
     out_mp4 = out_dir / "sweep.mp4"
-    print(f"stitching {out_mp4} at {args.fps}fps...")
+    # x264 memory scales with preset (lookahead depth) and thread count:
+    # each holds decoded full-res frames resident. -preset medium on a 1 GB
+    # Pi OOM'd assembling a ~250-frame 2304x1064 sweep (ffmpeg swapped hard,
+    # then the box rebooted). Pick preset + threads by available RAM so big
+    # hosts (puppy 8 GB) keep quality and small hosts stay alive. Override
+    # with FFMPEG_PRESET / FFMPEG_THREADS env.
+    import os as _os
+    try:
+        with open("/proc/meminfo") as _mi:
+            _mem_gib = int(next(l for l in _mi if l.startswith("MemTotal")).split()[1]) / 1024 / 1024
+    except (OSError, StopIteration, ValueError):
+        _mem_gib = 4.0
+    if _mem_gib < 2:
+        _preset, _threads = "veryfast", "1"   # 1 GB Pi: minimal lookahead/buffers
+    elif _mem_gib < 6:
+        _preset, _threads = "fast", "2"
+    else:
+        _preset, _threads = "medium", "0"      # 0 = ffmpeg auto (big hosts)
+    _preset = _os.environ.get("FFMPEG_PRESET", _preset)
+    _threads = _os.environ.get("FFMPEG_THREADS", _threads)
+    # The real memory lever is x264's frame queues: the lookahead buffer
+    # holds many decoded frames at once. Cap it hard on small hosts (and let
+    # publish-night-cam override). rc-lookahead=10 + sync-lookahead=0 + bf=0
+    # bounds the resident frame count to a handful regardless of clip length.
+    _default_x264 = ("rc-lookahead=10:sync-lookahead=0:bframes=0"
+                     if _mem_gib < 2 else "")
+    _x264 = _os.environ.get("FFMPEG_X264_PARAMS", _default_x264)
+    print(f"stitching {out_mp4} at {args.fps}fps "
+          f"(preset={_preset} threads={_threads} mem={_mem_gib:.1f}G "
+          f"x264='{_x264}')...")
     cmd = ["ffmpeg", "-y", "-loglevel", "error",
+           "-threads", str(_threads),
            "-framerate", str(args.fps),
            "-i", str(frames_dir / "frame_%05d.jpg"),
            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-           "-crf", "20", "-preset", "medium",
-           str(out_mp4)]
+           "-crf", "20", "-preset", _preset]
+    if _x264:
+        cmd += ["-x264-params", _x264]
+    cmd += [str(out_mp4)]
     rc = subprocess.call(cmd)
     if rc != 0:
         sys.stderr.write(f"ffmpeg failed rc={rc}\n")

@@ -36,6 +36,7 @@ still-open window.
 constant background. Bg subtracts to zero; trail survives.
 """
 import argparse
+import os
 import sys
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -247,12 +248,18 @@ def main() -> int:
         # windows leave gaps and the first frame is rarely 00000), so the
         # image2 demuxer's contiguous-from-start_number assumption fails.
         # Glob the frames that actually exist instead.
+        # x264 memory scales with preset/threads (decoded frames held
+        # resident) — -preset medium OOM'd the 1GB Pi. Honour the host-aware
+        # FFMPEG_PRESET/THREADS set by publish-night-cam; default safe.
+        _preset = os.environ.get("FFMPEG_PRESET", "veryfast")
+        _threads = os.environ.get("FFMPEG_THREADS", "1")
         rc = subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                             "-threads", str(_threads),
                              "-framerate", str(args.fps),
                              "-pattern_type", "glob",
                              "-i", str(frames_dir / "frame_*.jpg"),
                              "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                             "-crf", "20", "-preset", "medium",
+                             "-crf", "20", "-preset", _preset,
                              str(out_mp4)], check=False).returncode
         if rc != 0 or not out_mp4.exists():
             print(f"ffmpeg failed (rc={rc}); no {out_mp4}", file=sys.stderr)

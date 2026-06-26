@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
 import subprocess
 import sys
 import time
@@ -231,12 +232,18 @@ def main():
             print(f"  {wi+1}/{len(starts)}  {el:.0f}s "
                   f"({el/(wi+1):.2f}s/frame)", flush=True)
 
-    # encode
+    # encode. x264 preset/threads bound memory (frames held resident) —
+    # default medium OOM'd the 1GB Pi. Honour host-aware FFMPEG_PRESET/THREADS
+    # from publish-night-cam; default safe.
+    _preset = os.environ.get("FFMPEG_PRESET", "veryfast")
+    _threads = os.environ.get("FFMPEG_THREADS", "1")
     print("encoding...")
     subprocess.run([
-        "ffmpeg", "-y", "-loglevel", "error", "-framerate", str(args.fps),
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-threads", str(_threads), "-framerate", str(args.fps),
         "-i", str(tmpdir / "f%04d.png"),
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+        "-preset", _preset,
         str(args.out)], check=True)
     print(f"wrote {args.out} "
           f"({len(starts)} frames, {time.monotonic()-t_start:.0f}s total)")

@@ -68,7 +68,16 @@ export OPENBLAS_NUM_THREADS="$MAX_CORES"
 export MKL_NUM_THREADS="$MAX_CORES"
 export NUMEXPR_NUM_THREADS="$MAX_CORES"
 export CV2_NUM_THREADS="$MAX_CORES"   # honoured by tools that read it
-echo "parallelism: JOBS=$JOBS  MAX_CORES=$MAX_CORES  (cores=$_cores)"
+
+# ffmpeg/x264 memory is bounded by preset (lookahead) and threads — each
+# holds decoded frames resident. -preset medium OOM'd the 1GB Pi. Set a
+# host-aware default the sweep scripts honour; override via env.
+_mem_gib=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 4)
+if   [[ "$_mem_gib" -lt 2 ]]; then export FFMPEG_PRESET="${FFMPEG_PRESET:-veryfast}"; export FFMPEG_THREADS="${FFMPEG_THREADS:-1}"
+elif [[ "$_mem_gib" -lt 6 ]]; then export FFMPEG_PRESET="${FFMPEG_PRESET:-fast}";     export FFMPEG_THREADS="${FFMPEG_THREADS:-2}"
+else                               export FFMPEG_PRESET="${FFMPEG_PRESET:-medium}";   export FFMPEG_THREADS="${FFMPEG_THREADS:-0}"
+fi
+echo "parallelism: JOBS=$JOBS  MAX_CORES=$MAX_CORES  (cores=$_cores)  ffmpeg: preset=$FFMPEG_PRESET threads=$FFMPEG_THREADS"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
