@@ -299,6 +299,12 @@ names = [
     "sweep-diff.mp4",
     "sweep-detrans.mp4",
     "sweep-detrans-deep.mp4",
+    # web-delivery versions (what the website actually serves: loop+fullscreen)
+    "sweep-mono-web.mp4",
+    "sweep-colour-web.mp4",
+    "sweep-diff-web.mp4",
+    "sweep-detrans-web.mp4",
+    "sweep-detrans-deep-web.mp4",
 ]
 files = [nd/n for n in names if (nd/n).exists()]
 missing = [n for n in names if not (nd/n).exists()]
@@ -307,7 +313,10 @@ missing = [n for n in names if not (nd/n).exists()]
 if getattr(cfg, "privacy", None):
     for n in ("sweep-mono.mp4", "sweep-colour.mp4",
               "sweep-diff.mp4", "sweep-detrans.mp4",
-              "sweep-detrans-deep.mp4", "thumb.jpg",
+              "sweep-detrans-deep.mp4",
+              "sweep-mono-web.mp4", "sweep-colour-web.mp4",
+              "sweep-diff-web.mp4", "sweep-detrans-web.mp4",
+              "sweep-detrans-deep-web.mp4", "thumb.jpg",
               "poster-colour.jpg", "poster-mono.jpg",
               "poster-diff.jpg", "poster-detrans.jpg",
               "poster-detrans-deep.jpg"):
