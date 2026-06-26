@@ -12,10 +12,36 @@
 #                     --no-publish       # leave artefacts on local disk only
 set -euo pipefail
 
+# Thread cap. numpy/OpenCV (BLAS/OpenMP) spawn one thread PER CORE inside
+# every worker, so even --jobs 1 can saturate all cores and bloat memory
+# with per-thread arenas. On a small Pi that compounds the OOM. Cap threads
+# so we leave a core for capture + the OS. Override with MAX_CORES env.
+# Leave one core free (nproc-1); on the 4-core eclipticam Pi that yields 3
+# ("use 3, not 4"). Big hosts (puppy, 8 cores) keep most of their cores.
+_nproc=$(nproc 2>/dev/null || echo 4)
+MAX_CORES="${MAX_CORES:-$(( _nproc > 1 ? _nproc - 1 : 1 ))}"
+export OMP_NUM_THREADS="$MAX_CORES"
+export OPENBLAS_NUM_THREADS="$MAX_CORES"
+export MKL_NUM_THREADS="$MAX_CORES"
+export NUMEXPR_NUM_THREADS="$MAX_CORES"
+export CV2_NUM_THREADS="$MAX_CORES"   # honoured by tools that read it
+
 CAMERA=""; NIGHT=""
 NO_SWEEP=0; NO_PUBLISH=0
-WINDOW_MIN=10; STEP_MIN=1; FPS=60; JOBS=8
+WINDOW_MIN=10; STEP_MIN=1; FPS=60
 AUTO_START_STOPS=12; AUTO_END_STOPS=13
+
+# Sweep parallelism. Each window-stack worker holds a full-res frame stack
+# resident (~tens of MB), so the safe job count is bounded by RAM, not just
+# cores. On puppy (plenty of RAM) 8 was fine; on a 1 GB eclipticam Pi, 8
+# blew past RAM into swap and thrashed (load >20, kswapd pegged). Default
+# to min(cores, RAM_GiB) — ~1 job per GiB — capped at 8. Override with --jobs.
+_cores=$(nproc 2>/dev/null || echo 4)
+_mem_gib=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 4)
+[[ "$_mem_gib" -lt 1 ]] && _mem_gib=1
+JOBS=$(( _cores < _mem_gib ? _cores : _mem_gib ))
+[[ "$JOBS" -gt 8 ]] && JOBS=8
+[[ "$JOBS" -lt 1 ]] && JOBS=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
