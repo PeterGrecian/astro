@@ -184,18 +184,26 @@ def main():
     for f in tmpdir.glob("*.png"):
         f.unlink()
 
-    # cache decoded+undistorted frames lazily (window overlap reuses them)
+    # Cache decoded+undistorted frames lazily — adjacent windows overlap
+    # (e.g. 10-min window, 1-min step => ~9/10 frames shared), so caching
+    # the active working set avoids re-decoding. Each cached frame is a
+    # full binned float array, so the cache MUST be bounded to the frames
+    # still reachable, or it grows across the whole night and swaps a 1GB
+    # Pi (measured ~440MB+ with the old loose eviction). Windows advance
+    # monotonically in time, so once a window is done, any frame before the
+    # NEXT window's first frame is dead — evict it (see prune_cache below).
     cache = {}
 
     def get_und(i):
         if i not in cache:
             cache[i] = cv2.remap(load_bin(fs[i]), mapx, mapy,
                                  cv2.INTER_LINEAR)
-            # evict far-behind frames to bound memory
-            for k in list(cache):
-                if k < i - 60:
-                    del cache[k]
         return cache[i]
+
+    def prune_cache(min_keep_idx):
+        """Drop cached frames below min_keep_idx (no future window needs them)."""
+        for k in [k for k in cache if k < min_keep_idx]:
+            del cache[k]
 
     t_start = time.monotonic()
     for wi, w0 in enumerate(starts):
@@ -227,10 +235,17 @@ def main():
                 acc = w if acc is None else np.maximum(acc, w)
             out8 = stretch_u8(acc)
         cv2.imwrite(str(tmpdir / f"f{wi:04d}.png"), out8)
+        # Bound the cache: the next window starts at starts[wi]+step_s, so any
+        # frame before that is no longer reachable — evict it. Keeps the cache
+        # to ~one window's worth of frames (the working set), not the whole
+        # night. This is what stops the 1GB-Pi swap.
+        next_w0 = starts[wi] + step_s
+        keep_from = int(np.searchsorted(ts, next_w0, side="left"))
+        prune_cache(keep_from)
         if wi % 20 == 0:
             el = time.monotonic() - t_start
             print(f"  {wi+1}/{len(starts)}  {el:.0f}s "
-                  f"({el/(wi+1):.2f}s/frame)", flush=True)
+                  f"({el/(wi+1):.2f}s/frame)  cache={len(cache)}", flush=True)
 
     # encode. x264 preset/threads bound memory (frames held resident) —
     # default medium OOM'd the 1GB Pi. Honour host-aware FFMPEG_PRESET/THREADS
