@@ -12,20 +12,6 @@
 #                     --no-publish       # leave artefacts on local disk only
 set -euo pipefail
 
-# Thread cap. numpy/OpenCV (BLAS/OpenMP) spawn one thread PER CORE inside
-# every worker, so even --jobs 1 can saturate all cores and bloat memory
-# with per-thread arenas. On a small Pi that compounds the OOM. Cap threads
-# so we leave a core for capture + the OS. Override with MAX_CORES env.
-# Leave one core free (nproc-1); on the 4-core eclipticam Pi that yields 3
-# ("use 3, not 4"). Big hosts (puppy, 8 cores) keep most of their cores.
-_nproc=$(nproc 2>/dev/null || echo 4)
-MAX_CORES="${MAX_CORES:-$(( _nproc > 1 ? _nproc - 1 : 1 ))}"
-export OMP_NUM_THREADS="$MAX_CORES"
-export OPENBLAS_NUM_THREADS="$MAX_CORES"
-export MKL_NUM_THREADS="$MAX_CORES"
-export NUMEXPR_NUM_THREADS="$MAX_CORES"
-export CV2_NUM_THREADS="$MAX_CORES"   # honoured by tools that read it
-
 CAMERA=""; NIGHT=""
 NO_SWEEP=0; NO_PUBLISH=0
 WINDOW_MIN=10; STEP_MIN=1; FPS=60
@@ -62,6 +48,27 @@ done
 for arg in CAMERA NIGHT; do
     [[ -n "${!arg}" ]] || { echo "--${arg,,} required" >&2; exit 2; }
 done
+
+# Thread cap — set AFTER JOBS is final (default or --jobs), because threads
+# and jobs MULTIPLY: numpy/OpenCV (BLAS/OpenMP) spawn one thread per core
+# inside EACH of the JOBS worker processes. Left unbounded that's
+# jobs*cores threads — e.g. on an 8-core puppy with jobs=8 that's 64
+# threads fighting 8 cores (7x oversubscription, cache/context thrash).
+# Couple them so jobs*threads ~= cores (full utilisation, no contention):
+#   threads_per_job = max(1, cores // JOBS)
+#     puppy   8c jobs=8 -> 1 thread/job  (8 total, 1.0x) — each window-stack
+#                         single-threaded, 8 in parallel: ideal
+#     eclipti 4c jobs=1 -> 4 threads/job (4 total, 1.0x) — one process,
+#                         all cores; fits 1GB at jobs=1
+# Override with MAX_CORES env.
+_cores=$(nproc 2>/dev/null || echo 4)
+MAX_CORES="${MAX_CORES:-$(( _cores / JOBS > 1 ? _cores / JOBS : 1 ))}"
+export OMP_NUM_THREADS="$MAX_CORES"
+export OPENBLAS_NUM_THREADS="$MAX_CORES"
+export MKL_NUM_THREADS="$MAX_CORES"
+export NUMEXPR_NUM_THREADS="$MAX_CORES"
+export CV2_NUM_THREADS="$MAX_CORES"   # honoured by tools that read it
+echo "parallelism: JOBS=$JOBS  MAX_CORES=$MAX_CORES  (cores=$_cores)"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
