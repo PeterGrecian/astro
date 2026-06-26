@@ -214,6 +214,32 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     # Calendar card thumbnail = the colour poster.
     [[ -s "${night_dir}/poster-colour.jpg" ]] \
         && cp "${night_dir}/poster-colour.jpg" "${night_dir}/thumb.jpg"
+
+    # Web-delivery versions: 1280-wide, denoised, faststart — ~1.5MB vs the
+    # ~15-45MB full-res, visually equivalent at viewing size. The full-res
+    # mp4 stays as the high-quality/download copy; the website serves
+    # sweep-<name>-web.mp4 (loop+fullscreen). Source from the full-res mp4
+    # (near-lossless CRF20) — no need to re-stitch frames. 60fps kept (it's
+    # nearly free: consecutive stack frames compress to almost nothing).
+    # Web encode honours the host-aware FFMPEG_PRESET/THREADS (set above):
+    # the Pi gets veryfast/1-thread, laptops slow/auto. Downscaling to 1280
+    # first makes the buffers a quarter of the full-res encode, so this
+    # always fits where the full-res encode did.
+    make_web () {  # $1 = full-res mp4, $2 = out web mp4
+        [[ -s "$1" ]] || return 0
+        if ffmpeg -y -loglevel error -threads "$FFMPEG_THREADS" -i "$1" \
+            -vf "scale=1280:-2,hqdn3d=4:3:6:4" \
+            -c:v libx264 -pix_fmt yuv420p -crf 23 -preset "$FFMPEG_PRESET" \
+            -movflags +faststart "$2"; then
+            echo "wrote $2 ($(du -h "$2" | cut -f1))"
+        else
+            echo "web encode FAILED for $(basename "$1"); continuing"
+        fi
+    }
+    for s in colour mono diff detrans detrans-deep; do
+        make_web "${night_dir}/sweep-${s}.mp4" \
+                 "${night_dir}/sweep-${s}-web.mp4"
+    done
 fi
 
 # --- 3. publish to S3 ------------------------------------------------
