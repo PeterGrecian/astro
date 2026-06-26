@@ -188,9 +188,18 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     fi
 
     # detrans DEEP: mean of registered frames minus local background —
-    # maximum SNR, pulls the faintest stars per window.
-    echo "--- detrans-sweep --mode deep (faint-star depth)"
-    if "$PY" "$HERE/detrans-sweep" \
+    # maximum SNR, pulls the faintest stars per window. It's the HEAVIEST
+    # sweep (float64 accumulate + local-bg-subtract) AND the least "wow", and
+    # it's the consistent failure point on the 1GB Pi (died mid-encode, after
+    # 4 prior sweeps saturated the page cache). So SKIP it on small hosts —
+    # the deliverable a Pi4 drops. Big hosts (laptops) still produce it.
+    # Override: SKIP_DETRANS_DEEP=0/1 env. TODO: debug deep-mode memory so the
+    # Pi can keep it (undistort cache growth across the sweep is the suspect).
+    _mem_gib=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 4)
+    SKIP_DETRANS_DEEP="${SKIP_DETRANS_DEEP:-$([[ "$_mem_gib" -lt 2 ]] && echo 1 || echo 0)}"
+    if [[ "$SKIP_DETRANS_DEEP" -eq 1 ]]; then
+        echo "--- detrans-deep SKIPPED (host has ${_mem_gib}G; heaviest sweep, dropped on small hosts)"
+    elif "$PY" "$HERE/detrans-sweep" \
             --camera "$CAMERA" --night "$NIGHT" --mode deep \
             --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" \
             --fps "$FPS" \
