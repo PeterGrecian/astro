@@ -15,6 +15,12 @@ set -euo pipefail
 CAMERA=""; NIGHT=""
 NO_SWEEP=0; NO_PUBLISH=0
 WINDOW_MIN=10; STEP_MIN=1; FPS=60
+# Sweeps are re-rendered with --force by default (a live nightly run wants a
+# fresh render). For BACKFILL, where valid sweep frames already exist on
+# disk, --reuse-frames drops --force so window-stack-sweep SKIPS frames that
+# are already rendered (line "Already-rendered frames are skipped unless
+# --force") — only the mp4 re-encode + web version are redone. ~2x faster.
+REUSE_FRAMES=0
 AUTO_START_STOPS=12; AUTO_END_STOPS=13
 
 # Sweep parallelism. Each window-stack worker holds a full-res frame stack
@@ -35,6 +41,7 @@ while [[ $# -gt 0 ]]; do
         --night)         NIGHT="$2";         shift 2;;
         --no-sweep)      NO_SWEEP=1;         shift;;
         --no-publish)    NO_PUBLISH=1;       shift;;
+        --reuse-frames)  REUSE_FRAMES=1;     shift;;
         --window-min)    WINDOW_MIN="$2";    shift 2;;
         --step-min)      STEP_MIN="$2";      shift 2;;
         --jobs)          JOBS="$2";          shift 2;;
@@ -115,8 +122,9 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         --brightness-csv "$brightness_csv"
         --auto-start-stops "$AUTO_START_STOPS"
         --auto-end-stops   "$AUTO_END_STOPS"
-        --force
     )
+    # Force a fresh render unless --reuse-frames (backfill: keep valid frames).
+    [[ "$REUSE_FRAMES" -eq 0 ]] && common_args+=(--force)
 
     # Two sweeps share the same auto-start/end window: colour for the
     # pretty side, mono for the science-leaning side. Both get the
