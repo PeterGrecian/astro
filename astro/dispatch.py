@@ -80,6 +80,28 @@ def run_for_camera(camera: str, night: str, repo_root: Path,
     return rc
 
 
+def run_day_moon_tracking(camera: str, night: str, repo_root: Path,
+                          log: logging.Logger,
+                          dry_run: bool = False) -> int:
+    """Process the DAY session that just ended (fired at dusk).
+
+    The day-mode frames are JPEGs; their deliverable is MOON TRACKING —
+    auto-detect the moon across the day's frames and extend the camera's
+    moon-net thread (bin/moon-track). That pipeline is not finished yet,
+    so this is currently a clean no-op: it logs intent and returns 0 so
+    the dusk flag clears without firing the NIGHT pipeline (which has no
+    data for a night that has barely started — see git history / the
+    dusk-targets-empty-night bug this replaced).
+
+    TODO: when moon-track runs unattended, invoke:
+        bin/moon-track --camera <camera> --night <night> --mode day --append
+    and return its rc.
+    """
+    log.info(f"[{camera}/{night}] dusk: day-frame moon tracking "
+             f"not yet wired (moon-track WIP) — skipping cleanly")
+    return 0
+
+
 def tick_once(cameras: Iterable[str], repo_root: Path,
               log: logging.Logger, dry_run: bool = False) -> list[tuple[str, str, int]]:
     """One pass: for each camera, read its current state.json; if a
@@ -103,11 +125,22 @@ def tick_once(cameras: Iterable[str], repo_root: Path,
         for flag in PENDING_FLAGS:
             if not pending.get(flag):
                 continue
-            # Process the night that the just-completed window belongs to.
-            # state.night is "the night-of when stage 1 last wrote", which
-            # is "today's night" by noon-rollover — same answer.
+            # The just-completed window belongs to state.night (the
+            # night-of when stage 1 last wrote) by noon-rollover.
             night = state.night
-            rc = run_for_camera(camera, night, repo_root, log, dry_run=dry_run)
+            # Route by which window ended:
+            #   dawn (night ended)  -> NIGHT deliverables (stacks/sweeps)
+            #   dusk (day ended)    -> DAY-frame moon tracking
+            # Previously BOTH called publish-night-cam, so the dusk fire
+            # ran the night pipeline against a night that had barely
+            # started (no data) — wasteful, and on the 1GB Pi it collided
+            # with night-capture startup. Split them.
+            if flag == "dawn_window_complete":
+                rc = run_for_camera(camera, night, repo_root, log,
+                                    dry_run=dry_run)
+            else:  # dusk_window_complete
+                rc = run_day_moon_tracking(camera, night, repo_root, log,
+                                           dry_run=dry_run)
             if rc == 0 and not dry_run:
                 sp = state_path(cfg.frames_root, camera, when=when)
                 _reset_pending(sp, flag, log)
