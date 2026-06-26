@@ -13,7 +13,7 @@
 set -euo pipefail
 
 CAMERA=""; NIGHT=""
-NO_SWEEP=0; NO_PUBLISH=0
+NO_SWEEP=0; NO_PUBLISH=0; WEB_ONLY=0
 WINDOW_MIN=10; STEP_MIN=1; FPS=60
 # Sweeps are re-rendered with --force by default (a live nightly run wants a
 # fresh render). For BACKFILL, where valid sweep frames already exist on
@@ -40,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --camera)        CAMERA="$2";        shift 2;;
         --night)         NIGHT="$2";         shift 2;;
         --no-sweep)      NO_SWEEP=1;         shift;;
+        --web-only)      WEB_ONLY=1;         shift;;
         --no-publish)    NO_PUBLISH=1;       shift;;
         --reuse-frames)  REUSE_FRAMES=1;     shift;;
         --window-min)    WINDOW_MIN="$2";    shift 2;;
@@ -94,10 +95,17 @@ PY="${ASTRO_VENV_PY:-$REPO/.venv/bin/python}"
 echo "=== publish-night-cam ${CAMERA} ${NIGHT} ==="
 
 # --- 1. nightly-cam: stacks + brightness + summary -------------------
-echo "--- nightly-cam"
-if ! "$PY" "$HERE/nightly-cam" --camera "$CAMERA" --night "$NIGHT" --no-derot; then
-    echo "nightly-cam produced nothing for ${CAMERA} $NIGHT; skipping sweep + publish"
-    exit 0
+# WEB_ONLY (backfill): the stacks + full-res sweep mp4s already exist on disk;
+# only the web mp4s are new. Skip nightly-cam AND the sweep render entirely;
+# just transcode existing sweep-*.mp4 -> sweep-*-web.mp4 + publish. ~1min/night.
+if [[ "$WEB_ONLY" -eq 0 ]]; then
+    echo "--- nightly-cam"
+    if ! "$PY" "$HERE/nightly-cam" --camera "$CAMERA" --night "$NIGHT" --no-derot; then
+        echo "nightly-cam produced nothing for ${CAMERA} $NIGHT; skipping sweep + publish"
+        exit 0
+    fi
+else
+    echo "--- web-only: skipping nightly-cam (reuse existing deliverables)"
 fi
 
 # Locate the night dir from the config so the sweeper + publish find
@@ -114,6 +122,7 @@ brightness_csv="${night_dir}/brightness.csv"
 
 # --- 2. window-stack-sweep: RGB video -------------------------------
 if [[ "$NO_SWEEP" -eq 0 ]]; then
+  if [[ "$WEB_ONLY" -eq 0 ]]; then
     common_args=(
         --camera "$CAMERA" --night "$NIGHT"
         --sweep-start 22:00 --sweep-end 04:00
@@ -209,6 +218,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     else
         echo "detrans-deep FAILED; continuing without it"
     fi
+  fi  # end render block (skipped when WEB_ONLY: reuse existing sweep mp4s)
 
     # Per-video poster thumbnails: the middle frame of EACH sweep, so the
     # website previews each clip with a frame from itself (not a shared
