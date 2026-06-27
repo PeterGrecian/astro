@@ -346,4 +346,12 @@ PYEOF
 # Refresh the multi-night combined brightness plot at the camera prefix.
 echo "--- combined brightness (multi-night)"
 "$PY" "$HERE/combined-brightness" --camera "$CAMERA" --publish || true
+
+# Refresh the accumulating moon net: the reference-night max-stack with every
+# marked moon thread drawn over it. Fixed camera => the threads accumulate into
+# a net of known-position curves across the field. One stable key at the camera
+# prefix (like combined-brightness). Self-skips cleanly when the camera has no
+# moon-net.json (e.g. eclipticam-v1) or no reference stack on disk.
+echo "--- moon net (accumulated moon threads)"
+"$PY" "$HERE/moon-overlay" --camera "$CAMERA" --extend --publish || true
 echo "=== done ==="

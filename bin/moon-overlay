@@ -52,10 +52,37 @@ def load_image(path: Path):
     return Image.open(path).convert("RGB")
 
 
+def _reference_stack(repo_root, cfg):
+    """Path to the camera's pinned reference-night max-stack (the fixed
+    backdrop for the accumulating moon net). Uses reference_nights[0] from
+    camera.json — the same dark/clear night combined-brightness overlays.
+    Returns None if no reference is pinned or the stack isn't on disk."""
+    refs = cfg.get("reference_nights") or []
+    if not refs:
+        return None
+    night = refs[0]
+    # Layout (eclipticam, night_layout=percam): the per-night stacks live
+    # directly in <frames_root>/night/<night>/ with a <subcam>_ prefix, e.g.
+    # v3w_max.fits.fz. (The <subcam>/ subdir there holds raw frames.) Single-
+    # cam layouts have no prefix. Try prefixed, then bare.
+    subcam = (cfg.get("name", "").split("-", 1) + [""])[1]
+    nd = cfg.frames_root / "night" / night
+    cands = []
+    if subcam:
+        cands.append(nd / f"{subcam}_max.fits.fz")
+    cands += [nd / "max.fits.fz", nd / subcam / "max.fits.fz"]
+    for cand in cands:
+        if cand.exists():
+            return cand
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--image", type=Path, required=True,
-                    help="deliverable to overlay on (FITS or image)")
+    ap.add_argument("--image", type=Path, default=None,
+                    help="deliverable to overlay on (FITS or image). "
+                         "Default: the camera's reference-night max-stack "
+                         "(reference_nights[0]) as a fixed backdrop.")
     ap.add_argument("--net", type=Path, default=None,
                     help="moon-net.json (default: <camera>/moon-net.json)")
     ap.add_argument("--camera", default="eclipticam-v3w")
@@ -63,14 +90,33 @@ def main():
     ap.add_argument("--extend", action="store_true",
                     help="extend each thread as a smooth curve across the "
                          "whole frame (not just between marked points)")
+    ap.add_argument("--publish", action="store_true",
+                    help="upload to S3 as <camera>/moon-net.png (one fixed "
+                         "key, no per-night prefix — like combined-brightness)")
     args = ap.parse_args()
 
-    net_path = args.net or (Path(__file__).resolve().parent.parent
-                            / args.camera / "moon-net.json")
+    repo_root = Path(__file__).resolve().parent.parent
+    from astro.config import CameraConfig
+    cfg = CameraConfig.load(args.camera)
+
+    net_path = args.net or (repo_root / args.camera / "moon-net.json")
+    if not net_path.exists():
+        print(f"no moon net for {args.camera} ({net_path.name} absent) — "
+              "nothing to overlay; skipping")
+        return 0
     net = json.loads(net_path.read_text())
+    if not net.get("threads"):
+        print(f"moon net for {args.camera} has no threads yet — skipping")
+        return 0
     fullW, fullH = net.get("capture_full_res", [4608, 2592])
 
-    im = load_image(args.image)
+    backdrop = args.image or _reference_stack(repo_root, cfg)
+    if backdrop is None:
+        print(f"no backdrop for {args.camera}: pass --image or pin "
+              "reference_nights[0] with its max.fits.fz on disk — skipping")
+        return 0
+
+    im = load_image(backdrop)
     W, H = im.size
     sx, sy = W / fullW, H / fullH   # full-res -> target scale
     draw = ImageDraw.Draw(im)
@@ -105,10 +151,37 @@ def main():
         drawn += 1
 
     draw.text((8, 8), f"moon net: {drawn} thread(s)", fill=(0, 255, 80))
-    out = args.out or args.image.with_name(args.image.stem + "_moon-net.png")
+
+    # Privacy crop: the backdrop is a real max-stack (camera pixels), so any
+    # internet-reachable copy must be cropped to the published region. The net
+    # points share the backdrop's full-res, top-anchored coordinate space, so
+    # cropping AFTER drawing keeps every kept pixel at its original y. (The
+    # v3w moon trails sit at y~1059-1293 of 2592 — inside the top-82% keep.)
+    from astro.present import privacy as P
+    spec = P.entry_for(cfg)
+    if spec is not None:
+        keep = spec["publish_keep_top_px"]
+        spec_h = spec["frame_size_px"][1]
+        if H != spec_h:
+            keep = int(round(keep * H / spec_h))
+        im = im.crop((0, 0, W, keep))
+
+    out = args.out or (repo_root / args.camera / "moon-net.png")
+    out.parent.mkdir(parents=True, exist_ok=True)
     im.save(out)
+    if spec is not None:
+        P.mark_ok(out)   # cropped through the publication spec
     print(f"wrote {out}  ({drawn} threads on {W}x{H} image, "
-          f"scaled x{sx:.3f})")
+          f"scaled x{sx:.3f}{', privacy-cropped' if spec else ''})")
+
+    if args.publish:
+        import boto3
+        bucket = cfg.s3["bucket"]
+        cam_prefix = cfg.s3["prefix"].removesuffix("/nights")
+        key = f"{cam_prefix}/moon-net.png"
+        boto3.client("s3").upload_file(
+            str(out), bucket, key, ExtraArgs={"ContentType": "image/png"})
+        print(f"uploaded s3://{bucket}/{key}")
     return 0
 
 
