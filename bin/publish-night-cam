@@ -135,10 +135,9 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     # Force a fresh render unless --reuse-frames (backfill: keep valid frames).
     [[ "$REUSE_FRAMES" -eq 0 ]] && common_args+=(--force)
 
-    # Two sweeps share the same auto-start/end window: colour for the
-    # pretty side, mono for the science-leaning side. Both get the
-    # BST/stops burn-in. Filename suffixes distinguish them.
-    for mode in mono colour; do
+    # Colour sweep (the pretty/hero one). The mono sweep was dropped from
+    # deliverables 2026-06-28 — colour + diff + detrans cover the science.
+    for mode in colour; do
         sweep_dir="${night_dir}/sweep-${mode}"
         mkdir -p "$sweep_dir"
         mode_args=("${common_args[@]}" --out-dir "$sweep_dir")
@@ -233,7 +232,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             -vf "select=eq(n\,$n)" -frames:v 1 -q:v 4 "$2" \
             && echo "wrote $2 (mid frame $n of $(basename "$1"))"
     }
-    for s in colour mono diff detrans detrans-deep; do
+    for s in colour diff detrans detrans-deep; do
         extract_mid "${night_dir}/sweep-${s}.mp4" \
                     "${night_dir}/poster-${s}.jpg"
     done
@@ -262,7 +261,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             echo "web encode FAILED for $(basename "$1"); continuing"
         fi
     }
-    for s in colour mono diff detrans detrans-deep; do
+    for s in colour diff detrans detrans-deep; do
         make_web "${night_dir}/sweep-${s}.mp4" \
                  "${night_dir}/sweep-${s}-web.mp4"
     done
@@ -290,12 +289,10 @@ names = [
     "derot.jpg",
     "thumb.jpg",
     "poster-colour.jpg",
-    "poster-mono.jpg",
     "poster-diff.jpg",
     "poster-detrans.jpg",
     "poster-detrans-deep.jpg",
     # web-delivery versions (what the website actually serves: loop+fullscreen)
-    "sweep-mono-web.mp4",
     "sweep-colour-web.mp4",
     "sweep-diff-web.mp4",
     "sweep-detrans-web.mp4",
@@ -306,33 +303,38 @@ names = [
 # only the new web mp4s + posters go up. A normal run uploads them.
 if not web_only:
     names += [
-        "sweep-mono.mp4", "sweep-colour.mp4", "sweep-diff.mp4",
+        "sweep-colour.mp4", "sweep-diff.mp4",
         "sweep-detrans.mp4", "sweep-detrans-deep.mp4",
     ]
+# Deliverables dropped from publishing — delete their stale S3 keys if present.
+# (mono sweep dropped 2026-06-28: colour+diff+detrans cover the science.)
+RETIRED = ["sweep-mono.mp4", "sweep-mono-web.mp4", "poster-mono.jpg"]
 files = [nd/n for n in names if (nd/n).exists()]
 missing = [n for n in names if not (nd/n).exists()]
 # Videos and the thumb come out of privacy-cropped frames; mark them
 # OK so publish's privacy guard doesn't refuse them.
 if getattr(cfg, "privacy", None):
-    for n in ("sweep-mono.mp4", "sweep-colour.mp4",
+    for n in ("sweep-colour.mp4",
               "sweep-diff.mp4", "sweep-detrans.mp4",
               "sweep-detrans-deep.mp4",
-              "sweep-mono-web.mp4", "sweep-colour-web.mp4",
+              "sweep-colour-web.mp4",
               "sweep-diff-web.mp4", "sweep-detrans-web.mp4",
               "sweep-detrans-deep-web.mp4", "thumb.jpg",
-              "poster-colour.jpg", "poster-mono.jpg",
+              "poster-colour.jpg",
               "poster-diff.jpg", "poster-detrans.jpg",
               "poster-detrans-deep.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
-# Sweep stale S3 keys for deliverables that no longer exist locally.
-if missing:
+# Sweep stale S3 keys: deliverables that no longer exist locally, plus
+# RETIRED ones we deliberately stopped publishing (e.g. dropped mono).
+stale = missing + RETIRED
+if stale:
     import boto3
     s3 = boto3.client("s3")
     bucket = cfg.s3["bucket"]
     prefix = cfg.s3["prefix"].strip("/")
-    for n in missing:
+    for n in stale:
         key = f"{prefix}/$NIGHT/{n}"
         try:
             s3.head_object(Bucket=bucket, Key=key)
@@ -353,4 +355,14 @@ echo "--- combined brightness (multi-night)"
 # moon-net.json (e.g. eclipticam-v1) or no reference stack on disk.
 echo "--- moon net (accumulated moon threads)"
 "$PY" "$HERE/moon-overlay" --camera "$CAMERA" --extend --publish || true
+
+# Refresh the calendar manifest at the PUBLIC camera prefix so the website
+# renders its per-night index from one S3 object (no per-night list/get/presign
+# in the Lambda). This camera may be a sub-camera (eclipticam-v3w) of a public
+# camera (eclipticam); strip the sensor suffix to get the public name and
+# rebuild the full v3w+v1 union. Idempotent — running it from either sub-camera
+# leg produces the same manifest.
+PUBLIC_CAMERA="${CAMERA%-v3w}"; PUBLIC_CAMERA="${PUBLIC_CAMERA%-v1}"
+echo "--- calendar index (public camera: ${PUBLIC_CAMERA})"
+"$PY" "$HERE/build-calendar-index" --camera "$PUBLIC_CAMERA" --publish || true
 echo "=== done ==="
