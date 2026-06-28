@@ -40,6 +40,7 @@ from astropy.io import fits
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
+from astro.present import privacy as privacy_mod
 
 # eclipticam-v3w calibration (binned 1152x648) — fallback defaults;
 # the real values are read from camera.json (distortion + detrans blocks).
@@ -128,6 +129,12 @@ def main():
     args = ap.parse_args()
 
     cfg = CameraConfig.load(args.camera)
+    # Publication privacy crop (e.g. eclipticam-v3w drops the bottom rows
+    # with neighbours' windows). The other sweeps go through
+    # privacy.crop_for_publication via window-stack; detrans must too, or it
+    # publishes the uncropped frame (it was emitting full 2304x1296 vs the
+    # cropped 2304x1064 of mono/colour/diff — a privacy leak).
+    privacy_spec = privacy_mod.entry_for(cfg)
     # Calibration from camera.json (distortion + detrans blocks), with
     # CLI overrides and the module fallbacks. A camera with no `detrans`
     # block isn't a detrans candidate — skip cleanly so the pipeline can
@@ -234,6 +241,8 @@ def main():
                                    flags=cv2.INTER_LINEAR)
                 acc = w if acc is None else np.maximum(acc, w)
             out8 = stretch_u8(acc)
+        # Apply the publication privacy crop (no-op if the camera has none).
+        out8 = privacy_mod.crop_for_publication(out8, privacy_spec)
         cv2.imwrite(str(tmpdir / f"f{wi:04d}.png"), out8)
         # Bound the cache: the next window starts at starts[wi]+step_s, so any
         # frame before that is no longer reachable — evict it. Keeps the cache
