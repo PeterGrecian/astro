@@ -54,6 +54,82 @@ from astro.present.render import (
 )
 
 
+# --- trail line-filter (--line-filter) --------------------------------------
+# Keep the star trails, suppress the dense single-pixel dots (noise/hot pixels)
+# and the non-linear fuzzy cloud — both make the mp4 noisy + high-bandwidth.
+# Per-pixel oriented morphological open ALONG the analytic local trail
+# direction, minus the open ACROSS it:
+#   trails  -> bright along, dark across  -> survive
+#   dots    -> smaller than the kernel    -> erased by the open at any angle
+#   cloud   -> isotropic                  -> along ~= across -> cancels
+# The local trail direction is ANALYTIC (from k1,k2 + the detrans motion
+# angle), NOT estimated — diff-sweep frames are distorted binned, so the
+# barrel distortion bends the uniform sky-motion into a per-pixel curved
+# field. See design/trail-line-filter.md.
+def trail_angle_field(H, W, k1, k2, motion_angle_deg):
+    """Per-pixel star-trail orientation (deg, mod 180) in the DISTORTED frame:
+    the undistort map's inverse Jacobian applied to the motion unit vector."""
+    cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+    Rn = 0.5 * np.hypot(W, H)
+
+    def undistort(X, Y):
+        dx, dy = X - cx, Y - cy
+        rt = np.sqrt(dx * dx + dy * dy) / Rn
+        s = np.ones_like(rt)
+        for _ in range(12):
+            rd = rt / s
+            s = 1 + k1 * rd * rd + k2 * rd ** 4
+        return cx + dx / s, cy + dy / s
+
+    ys, xs = np.mgrid[0:H, 0:W].astype(np.float64)
+    eps = 2.0
+    ux0, uy0 = undistort(xs, ys)
+    uxx, uyx = undistort(xs + eps, ys)
+    uxy, uyy = undistort(xs, ys + eps)
+    a = (uxx - ux0) / eps; b = (uxy - ux0) / eps
+    c = (uyx - uy0) / eps; d = (uyy - uy0) / eps
+    det = a * d - b * c
+    det[np.abs(det) < 1e-9] = 1e-9
+    th0 = np.radians(motion_angle_deg)
+    u0, u1 = np.cos(th0), np.sin(th0)
+    # distorted dir = inv(J_undist) . motion
+    vx = (d * u0 - b * u1) / det
+    vy = (-c * u0 + a * u1) / det
+    return np.degrees(np.arctan2(vy, vx)) % 180.0
+
+
+def _oriented_open(gray_u8, angle_deg, L):
+    import cv2
+    k = np.zeros((L, L), np.uint8)
+    cv2.line(k, (0, L // 2), (L - 1, L // 2), 1, 1)
+    kr = cv2.warpAffine(k, cv2.getRotationMatrix2D((L / 2, L / 2), angle_deg, 1.0),
+                        (L, L))
+    return cv2.morphologyEx(gray_u8, cv2.MORPH_OPEN, kr.astype(np.uint8)).astype(np.float32)
+
+
+def line_filter(img, angle_field, L=7, nang=12, thresh=25):
+    """Suppress dots + non-linear cloud, keep trails. img: float HxW (or HxWx3).
+    angle_field: per-pixel trail orientation (deg) at img's resolution."""
+    import cv2
+    # operate on a single luminance channel; reapply to colour at the end
+    is_rgb = img.ndim == 3
+    lum = img.max(axis=2) if is_rgb else img
+    lo, hi = float(lum.min()), float(lum.max())
+    u8 = np.clip((lum - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
+    H, W = u8.shape
+    bins = np.arange(0, 180, 180 / nang)
+    opens = np.stack([_oriented_open(u8, a, L) for a in bins])  # (nang, H, W)
+    idx = (np.round(angle_field / (180 / nang)).astype(int)) % nang
+    perp = (idx + nang // 2) % nang
+    ii, jj = np.indices((H, W))
+    along = opens[idx, ii, jj]
+    across = opens[perp, ii, jj]
+    mask = np.clip(along - across, 0, 255)
+    mask[mask < thresh] = 0
+    keep = (mask > 0).astype(np.float32)
+    return img * (keep[..., None] if is_rgb else keep)
+
+
 def parse_hhmm_to_utc(night: str, hhmm: str) -> datetime:
     nd = datetime.strptime(night, "%Y-%m-%d").date()
     h, m = (int(x) for x in hhmm.split(":"))
@@ -92,7 +168,8 @@ def load_fits_binned(path, rgb_pattern):
 def close_window(idx, w_start, w_end, recent, rgb_pattern,
                  frames_dir, rotate_180,
                  noise_floor_mult=0.0, mean_mult=1.0,
-                 signed=False, neg_blue=False):
+                 signed=False, neg_blue=False,
+                 line_field=None, line_L=7):
     """Find the frames in [w_start, w_end), compute (max - k·mean)
     optionally minus a noise floor, render."""
     in_win = [(t, f) for (t, f) in recent if w_start <= t < w_end]
@@ -114,6 +191,9 @@ def close_window(idx, w_start, w_end, recent, rgb_pattern,
         out_img = out_img - floor
     if not signed:
         np.maximum(out_img, 0, out=out_img)
+    # Trail line-filter: keep linear star trails, suppress dots + cloud.
+    if line_field is not None:
+        out_img = line_filter(out_img, line_field, L=line_L)
     out_path = frames_dir / f"frame_{idx:05d}.jpg"
     if signed or neg_blue:
         if rgb_pattern is not None:
@@ -163,6 +243,14 @@ def main() -> int:
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--no-mp4", action="store_true")
     ap.add_argument("--synthetic", type=int, default=0, metavar="N")
+    ap.add_argument("--line-filter", action="store_true",
+                    help="keep star trails, suppress dots + non-linear cloud "
+                         "via a per-pixel oriented open along the analytic "
+                         "(k1,k2 + detrans angle) trail direction. Cleaner, "
+                         "lower-bandwidth diff mp4. Needs distortion+detrans "
+                         "in camera.json.")
+    ap.add_argument("--line-L", type=int, default=7,
+                    help="line-filter kernel length (px, ~trail length).")
     args = ap.parse_args()
     if args.neg_blue:
         args.signed = True
@@ -207,10 +295,36 @@ def main() -> int:
     pending = list(windows)
     recent = deque()  # (t, binned_frame)
 
+    # Trail line-filter setup: build the analytic per-pixel orientation field
+    # once from camera.json (distortion k1,k2 + detrans motion angle). Built
+    # lazily on the first frame so we know the binned (H, W).
+    line_field = None
+    line_ready = [False]  # mutable flag for the lazy build
+
+    def ensure_line_field(frame):
+        if line_ready[0] or not args.line_filter:
+            return line_field
+        dist = (cfg.get("distortion") or {}) if not args.synthetic else {}
+        detr = (cfg.get("detrans") or {}) if not args.synthetic else {}
+        if not dist or "angle_deg" not in detr:
+            print("--line-filter: camera has no distortion+detrans block; "
+                  "skipping the filter", file=sys.stderr)
+            line_ready[0] = True
+            return None
+        h, w = frame.shape[:2]
+        field = trail_angle_field(h, w, dist["k1"], dist["k2"],
+                                  detr["angle_deg"])
+        print(f"line-filter: analytic orientation field {w}x{h} "
+              f"(angle {detr['angle_deg']}deg, k1={dist['k1']})")
+        line_ready[0] = True
+        return field
+
     n = 0
     for t, frame in frames_iter:
         recent.append((t, frame))
         n += 1
+        if args.line_filter and not line_ready[0]:
+            line_field = ensure_line_field(frame)
 
         # Close every window whose end has passed.
         while pending and pending[0][2] <= t:
@@ -219,7 +333,8 @@ def main() -> int:
                          frames_dir, rotate_180,
                          noise_floor_mult=args.noise_floor_mult,
                          mean_mult=args.mean_mult,
-                         signed=args.signed, neg_blue=args.neg_blue)
+                         signed=args.signed, neg_blue=args.neg_blue,
+                         line_field=line_field, line_L=args.line_L)
 
         # Prune deque: drop frames older than the oldest still-open
         # window's start.
@@ -237,7 +352,8 @@ def main() -> int:
         close_window(idx, ws, we, recent, rgb_pattern,
                      frames_dir, rotate_180,
                      noise_floor_mult=args.noise_floor_mult,
-                     signed=args.signed, neg_blue=args.neg_blue)
+                     signed=args.signed, neg_blue=args.neg_blue,
+                     line_field=line_field, line_L=args.line_L)
 
     print(f"diff-sweep: {n} frames in, {len(windows)} JPEGs written")
 
