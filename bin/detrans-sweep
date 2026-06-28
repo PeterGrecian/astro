@@ -47,6 +47,18 @@ K1, K2 = -0.636, 0.311
 V_PXS = 0.040
 V_ANGLE_DEG = 7.8
 
+# Crop fractions to trim the barrel-undistort black border, per edge
+# (left, right, top, bottom). Established by hand in GIMP from a real
+# detrans frame (peter@pip 2026-06-28). The two modes differ only on the
+# RIGHT edge: deep trims more of the busy ghost/streak region on the right
+# for a tidier ~1.84 frame; max keeps it wider (~2.31). yuv420p/libx264
+# needs even dims — the slice below rounds down to even.
+CROP_FRAC = {
+    #          left,   right,  top,    bottom
+    "max":  (0.142, 0.155, 0.189, 0.270),   # 2.31 aspect
+    "deep": (0.142, 0.299, 0.189, 0.270),   # 1.84 aspect
+}
+
 
 def epoch_ms(p):
     return int(Path(p).name.split(".")[0])
@@ -234,6 +246,18 @@ def main():
                                    flags=cv2.INTER_LINEAR)
                 acc = w if acc is None else np.maximum(acc, w)
             out8 = stretch_u8(acc)
+        # Crop the barrel-undistort black border (per-edge, mode-specific —
+        # see CROP_FRAC). Undistorting k1=-0.636 leaves a lens-shaped valid
+        # region inside black wedges; a full black-free crop would discard
+        # most of the frame, so trim a hand-tuned inset. Fractional =>
+        # resolution-independent.
+        fl, fr, ft, fb = CROP_FRAC[args.mode]
+        ch, cw = out8.shape[:2]
+        x0, x1 = int(cw * fl), cw - int(cw * fr)
+        y0, y1 = int(ch * ft), ch - int(ch * fb)
+        out8 = out8[y0:y1, x0:x1]
+        # yuv420p / libx264 needs even dimensions — drop a last row/col if odd.
+        out8 = out8[:out8.shape[0] // 2 * 2, :out8.shape[1] // 2 * 2]
         cv2.imwrite(str(tmpdir / f"f{wi:04d}.png"), out8)
         # Bound the cache: the next window starts at starts[wi]+step_s, so any
         # frame before that is no longer reachable — evict it. Keeps the cache
