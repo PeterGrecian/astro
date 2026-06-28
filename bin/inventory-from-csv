@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""inventory-from-csv — backfill the astro-storage-inventory DynamoDB table
+from whereisallthedata.csv.
+
+The CSV (`~/astro/whereisallthedata.csv`) is the legacy source of truth for
+where each camera-night's data physically lives. We're moving that registry
+to DynamoDB so the mywebsite Lambda can read it (it can't reach a CSV on a
+workstation) — see astro/design/storage-status-and-inventory.md.
+
+This is a one-shot/idempotent loader: each row becomes one item keyed by
+(night, loc) where loc = "<camera>#<host>#<path>". Re-running upserts, so it's
+safe to run after the CSV changes until cold-archive-night writes Dynamo
+directly.
+
+    inventory-from-csv            # load ~/astro/whereisallthedata.csv
+    inventory-from-csv --dry-run  # show what would be written
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+from pathlib import Path
+
+import boto3
+
+CSV_PATH = Path.home() / "astro" / "whereisallthedata.csv"
+TABLE = "astro-storage-inventory"
+REGION = "eu-west-1"
+
+# CSV byte columns -> short keys in the item's `bytes` map.
+BYTE_COLS = {
+    "raw_bayer_bytes": "raw_bayer",
+    "binned_bytes": "binned",
+    "raw_sum8_bytes": "raw_sum8",
+    "binned_sum2_bytes": "binned_sum2",
+    "tarball_bytes": "tarball",
+}
+
+
+def row_to_item(r: dict) -> dict:
+    night = (r.get("night") or "").strip()
+    camera = (r.get("camera") or "starcam").strip()  # legacy rows: starcam
+    host = (r.get("host") or "?").strip()
+    path = (r.get("path") or "?").strip()
+    storage_class = (r.get("storage_class") or "local").strip()
+
+    sizes = {}
+    for col, key in BYTE_COLS.items():
+        try:
+            v = int(r.get(col) or 0)
+        except ValueError:
+            v = 0
+        if v:
+            sizes[key] = v
+
+    return {
+        "night": night,
+        "loc": f"{camera}#{host}#{path}",
+        "camera": camera,
+        "host": host,
+        "path": path,
+        "storage_class": storage_class,
+        "online": storage_class == "local",
+        "bytes": sizes,
+        "notes": (r.get("notes") or "").strip(),
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--csv", type=Path, default=CSV_PATH)
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    if not args.csv.is_file():
+        print(f"no CSV at {args.csv}")
+        return 1
+
+    with args.csv.open(newline="") as f:
+        rows = [row for row in csv.DictReader(f) if (row.get("night") or "").strip()]
+
+    print(f"{len(rows)} rows from {args.csv}")
+    if args.dry_run:
+        for r in rows:
+            it = row_to_item(r)
+            print(f"  {it['night']}  {it['loc']}  [{it['storage_class']}]  {it['bytes']}")
+        return 0
+
+    table = boto3.resource("dynamodb", region_name=REGION).Table(TABLE)
+    with table.batch_writer() as bw:
+        for r in rows:
+            bw.put_item(Item=row_to_item(r))
+    print(f"wrote {len(rows)} items to {TABLE}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
