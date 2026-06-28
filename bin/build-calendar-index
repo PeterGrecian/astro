@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""build-calendar-index — write a precomputed calendar manifest for a
+camera so the website renders the per-night index from ONE S3 object.
+
+Why: the astro calendar page used to do, per night, a list_objects_v2 +
+get_object(summary.json) + presign — ~3 S3 round-trips × N nights, all
+serial in the Lambda. It got slower every night. This lands a single
+`<camera>/index.json` at the camera prefix root (the same place
+combined-brightness drops brightness-combined.png and moon-overlay drops
+moon-net.png), so the Lambda reads one object and presigns thumb keys
+locally.
+
+For multi-sensor cameras (eclipticam = v3w + v1) the union of nights is
+merged HERE — one manifest per public camera — so the request path stays
+a single get. Source prefixes are derived by convention: a camera whose
+public camera.json has a `subcams` map fans out to `<public>-<subcam>`;
+otherwise the camera is its own only source. The first source listed is
+the primary (night) camera whose thumb/summary drive each card; a night
+present only in a secondary source still gets a (thumb-less) card.
+
+The manifest is authoritative against S3 (what the website actually
+serves), not the local frames tree — a reprocessed or swept night is
+reflected on the next run. Listing is one paginated sweep per source
+prefix (O(pages), not O(nights) round-trips).
+
+Schema:
+  {"schema": 1, "camera": "eclipticam", "generated_utc": "...",
+   "nights": [{"night": "YYYY-MM-DD", "thumb_key": "<key>"|null,
+               "n_frames": N|null, "n_stacked": N|null,
+               "verdict": "clear"|... |null}, ...]}   # newest first
+
+Usage:
+    build-calendar-index --camera eclipticam [--publish] [--out PATH]
+"""
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+# Card thumbnail preference: the colour-sweep mid-frame stack, else the
+# all-night max (legacy nights without a sweep). Mirrors the Lambda.
+THUMB_NAMES = ("thumb.jpg", "max.jpg")
+
+
+def source_prefixes(cfg):
+    """Yield S3 prefixes (no trailing slash, no '/nights') for every
+    sub-camera that feeds this public camera, primary first.
+
+    A camera with a `subcams` map (eclipticam) fans out to
+    `<name>-<subcam>`; a plain camera is its own only source. The order
+    is the camera.json subcams order — the first is treated as primary
+    (its thumbs/summaries drive each card). eclipticam lists v3w (the
+    night camera) before v1, so keep that order in camera.json.
+    """
+    subcams = cfg.get("subcams")
+    if subcams:
+        for sub in subcams:
+            yield f"{cfg.name}-{sub}"
+    else:
+        yield cfg.name
+
+
+def list_nights(s3, bucket, src_prefix):
+    """Return {night: {name: key}} for one source prefix in one paginated
+    sweep. `name` is the basename (summary.json, thumb.jpg, ...)."""
+    nights = {}
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket,
+                                   Prefix=f"{src_prefix}/nights/"):
+        for item in page.get("Contents", []) or []:
+            key = item["Key"]
+            parts = key.split("/")
+            # <src>/nights/<night>/<name>
+            if len(parts) < 4:
+                continue
+            night, name = parts[-2], parts[-1]
+            if not name:  # the "<night>/" folder marker
+                continue
+            nights.setdefault(night, {})[name] = key
+    return nights
+
+
+def read_summary(s3, bucket, key):
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return json.loads(obj["Body"].read())
+    except Exception:
+        return None
+
+
+def build(cfg):
+    import boto3
+    bucket = cfg.s3["bucket"]
+    s3 = boto3.client("s3")
+
+    # Per source prefix: one paginated listing. Primary source first so its
+    # thumb/summary win when a night exists in several sources.
+    srcs = list(source_prefixes(cfg))
+    listings = [(src, list_nights(s3, bucket, src)) for src in srcs]
+
+    all_nights = set()
+    for _src, nl in listings:
+        all_nights.update(nl)
+
+    nights_meta = []
+    for night in sorted(all_nights, reverse=True):
+        thumb_key = None
+        summary = None
+        # Walk sources in priority order; first one with a thumb/summary wins.
+        for _src, nl in listings:
+            names = nl.get(night) or {}
+            if thumb_key is None:
+                for tn in THUMB_NAMES:
+                    if tn in names:
+                        thumb_key = names[tn]
+                        break
+            if summary is None and "summary.json" in names:
+                summary = read_summary(s3, bucket, names["summary.json"])
+            if thumb_key is not None and summary is not None:
+                break
+        s = summary or {}
+        nights_meta.append({
+            "night": night,
+            "thumb_key": thumb_key,
+            "n_frames": s.get("n_frames"),
+            "n_stacked": s.get("n_stacked"),
+            "verdict": s.get("verdict"),
+        })
+
+    return {
+        "schema": 1,
+        "camera": cfg.name,
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "nights": nights_meta,
+    }, bucket
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True,
+                    help="public camera name (astrocam, eclipticam)")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="also write the manifest to this local path")
+    ap.add_argument("--publish", action="store_true",
+                    help="upload to s3://<bucket>/<camera>/index.json "
+                         "(one stable key at the camera prefix root)")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    manifest, bucket = build(cfg)
+    n = len(manifest["nights"])
+    n_thumb = sum(1 for x in manifest["nights"] if x["thumb_key"])
+    print(f"{cfg.name}: {n} nights, {n_thumb} with thumbnails")
+
+    body = json.dumps(manifest, indent=2)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(body)
+        print(f"wrote {args.out}")
+
+    if args.publish:
+        import boto3
+        # cfg.s3.prefix is "<camera>/nights"; strip "/nights" so the manifest
+        # sits at "<camera>/index.json" — one key, like brightness-combined.png.
+        cam_prefix = cfg.s3["prefix"].removesuffix("/nights")
+        key = f"{cam_prefix}/index.json"
+        s3 = boto3.client("s3")
+        s3.put_object(Bucket=bucket, Key=key,
+                      Body=body.encode("utf-8"),
+                      ContentType="application/json")
+        print(f"uploaded s3://{bucket}/{key}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
