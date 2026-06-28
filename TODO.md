@@ -6,6 +6,25 @@ load-bearing choices; delete done items (per the
 
 ## Now
 
+- [ ] **NEXT BIG: eclipticam-moon orientation lock.** Lock camera pointing
+      from known fiducials — moon (eclipticam day) + Polaris (astrocam
+      night): known position + known time → absolute WCS. Mostly assembly
+      (`wcs-from-anchors`, `fit-pole`, `orient-check`, `overlay-gaia2`
+      exist). The one new piece: a **multi-anchor LSQ WCS fit**
+      (`wcs-from-anchors` only takes 1–2; the moon-net is over-determined).
+      eclipticam-moon first. Foundation for star-ID → limiting mag → Neptune.
+      See memory `project-astro-orientation-lock`.
+- [ ] **Verify astrocam→muppet night write** (switched 2026-06-28). astrocam
+      writes ~11 GB/night over NFS to muppet via a USB2-capped, ~74 ms link.
+      Day-probe write works; confirm a full night didn't stutter capture.
+- [ ] **Relocate muppet's ASIX ethernet (+ bigdisk) to a USB3/TB4 bus.**
+      Currently on a USB2 port → GbE capped to ~280 Mbps. An empty USB3 bus
+      sits idle (no dock needed). Matters more now astrocam writes there.
+      (Details in ansible `host_vars/muppet.yml`.)
+- [ ] **Land the host-shuffle ansible commits.** The muppet network +
+      astrocam-export reconciliation sit on branch `monitor-smart-probe`
+      (an unrelated SMART-probe feature), not main — cherry-pick or merge.
+
 - [ ] **Migrate eclipticam capture writers to canonical layout.**
       Today `eclipticam/capture.py` (v1) and `eclipticam/v3w_uploader.py`
       (v3w) still write `~/eclipticam-frames/night/<date>/<v1|v3w>/HH/...`
@@ -37,10 +56,12 @@ load-bearing choices; delete done items (per the
 
 ## Four-stage migration (per DECISIONS.md 2026-06-16)
 
-Stage 1 (`astro-state`) and stage 3 (`astro-process`) landed
-2026-06-16 and are now deployed + enabled on both the eclipticam and
-astrocam Pis (2026-06-20); the old publish-* timers are retired.
-Remaining:
+Stage 1 (`astro-state`) and stage 3 (`astro-process`) landed 2026-06-16;
+old publish-* timers retired. Processing hosts settled 2026-06-28:
+**eclipticam** processes on its own Pi (local SSD, self-sufficient);
+**astrocam** processes on **muppet** (captures→muppet NFS); **puppy** =
+skycam only. (Not the Pi for astrocam — its 1600-frame nights want the
+laptop.) Remaining:
 
 1. [ ] **`bin/astro-capture` daemon.** Generic `picamera2` loop driven
       by `camera.json` modes (see `design/capture-unification.md`).
@@ -81,11 +102,11 @@ Cross-cutting:
       mode only. Capture schema in `design/capture-unification.md`
       already covers a `sun` mode.
 - [ ] **Lighten astrocam's nightly sweep render.** astrocam's all-night
-      ~1600 frames → 351 sweep windows; the colour+mono+diff render is
-      ~66 min/night even on puppy (vs eclipticam's ~150 windows). Now
-      that astrocam processes nightly on puppy (2026-06-20), that cost
-      recurs every night. Options: coarser `--step-min`, fewer sweep
-      variants for astrocam, or skip a sweep. Not urgent.
+      ~1600 frames → 351 sweep windows. astrocam now captures→muppet (NFS)
+      and processes on **muppet** (2026-06-28; puppy=skycam only). muppet
+      is 8c/7.5G so it copes, but the cost recurs nightly. Mono is now
+      dropped (2026-06-28), which helps. Further options: coarser
+      `--step-min`, fewer sweep variants for astrocam. Not urgent.
 
 ## Deliverables (website)
 
