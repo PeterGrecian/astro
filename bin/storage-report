@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""storage-report — scan this host's astro data and report it to DynamoDB.
+
+Walks each camera's frames (via the layout-aware astro.locate, so it finds
+data whether it's in the canonical YYYY/MM/DD tree or the flat YYYY-MM-DD
+tree), measures per-night disk usage, detects whether a night has been
+shrunk (squashed sum8/sum2 products present per COLD_STORAGE.md), and
+upserts one inventory item per (night x this-host-path) into
+astro-storage-inventory. Also reports this host's disk capacity for the
+relevant filesystems into astro-host-capacity.
+
+Run on each host (puppy, muppet, eclipticam) — typically from cron. The
+mywebsite /astro/storage page reads these tables. See
+astro/design/storage-status-and-inventory.md.
+
+    storage-report                 # scan + write to DynamoDB
+    storage-report --dry-run       # print what would be written
+    storage-report --cameras astrocam eclipticam-v3w   # subset
+"""
+from __future__ import annotations
+
+import argparse
+import shutil
+import socket
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from astro.config import CameraConfig          # noqa: E402
+from astro import locate                       # noqa: E402
+
+REGION = "eu-west-1"
+INVENTORY_TABLE = "astro-storage-inventory"
+CAPACITY_TABLE = "astro-host-capacity"
+
+# Cameras to scan when --cameras isn't given. starcam is cold-archived
+# (its rows come from the CSV), so skip it by default.
+DEFAULT_CAMERAS = ["astrocam", "eclipticam-v1", "eclipticam-v3w"]
+
+
+def du_bytes(path: Path) -> int:
+    """Total bytes under path (follows the tree; skips broken symlinks)."""
+    total = 0
+    for p in path.rglob("*"):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def is_shrunk(path: Path) -> bool:
+    """A night is 'shrunk' if it carries squashed per-frame products —
+    HH-sumN / HHb-sumN dirs (COLD_STORAGE.md naming)."""
+    for d in path.rglob("*-sum*"):
+        if d.is_dir():
+            return True
+    return False
+
+
+def scan_host(cameras, host):
+    """Yield inventory item dicts for every resolvable night on this host."""
+    for cam in cameras:
+        try:
+            cfg = CameraConfig.load(cam)
+        except FileNotFoundError:
+            continue
+        for night, loc in locate.list_nights(cfg):
+            # Only report nights that physically live here (online/local);
+            # registry-only (USB/cold) rows are owned by cold-archive-night.
+            if not loc.online or not loc.path.is_dir():
+                continue
+            size = du_bytes(loc.path)
+            # Skip empty resolutions: when both a canonical metadata-only dir
+            # and a real flat/percam copy exist, locate can land on the empty
+            # one. A night with zero frame bytes is such a shadow, not data.
+            if size == 0:
+                continue
+            yield {
+                "night": night,
+                "loc": f"{cam}#{host}#{loc.path}",
+                "camera": cam,
+                "host": host,
+                "path": str(loc.path),
+                "storage_class": "local",
+                "online": True,
+                "layout": loc.layout,
+                "bytes": {"on_disk": size},
+                "shrunk": is_shrunk(loc.path),
+                "updated_at": int(time.time()),
+            }
+
+
+def scan_capacity(host, paths):
+    """Capacity items for the filesystems backing the given paths (dedup by
+    device). Always includes '/'."""
+    seen = {}
+    check = [Path("/")] + [Path(p).expanduser() for p in paths]
+    for p in check:
+        try:
+            st_dev = p.stat().st_dev
+            usage = shutil.disk_usage(p)
+        except OSError:
+            continue
+        if st_dev in seen:
+            continue
+        gb = 1 << 30
+        seen[st_dev] = {
+            "host": host,
+            "fs": str(p),
+            "size_gb": usage.total // gb,
+            "used_gb": usage.used // gb,
+            "avail_gb": usage.free // gb,
+            "pct": round(100 * usage.used / usage.total) if usage.total else 0,
+            "updated_at": int(time.time()),
+        }
+    return list(seen.values())
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--cameras", nargs="+", default=DEFAULT_CAMERAS)
+    ap.add_argument("--host", default=socket.gethostname().split(".")[0])
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    inv = list(scan_host(args.cameras, args.host))
+    # capacity: the roots each camera searches, plus '/'
+    roots = []
+    for cam in args.cameras:
+        try:
+            roots += [str(r) for r in CameraConfig.load(cam).search_roots]
+        except FileNotFoundError:
+            pass
+    cap = scan_capacity(args.host, roots)
+
+    print(f"host={args.host}: {len(inv)} night-locations, {len(cap)} filesystems")
+    if args.dry_run:
+        for it in inv:
+            sz = it["bytes"]["on_disk"]
+            print(f"  {it['night']}  {it['camera']:14} {it['layout']:9} "
+                  f"{sz/(1<<30):6.2f} GB  shrunk={it['shrunk']}  {it['path']}")
+        for c in cap:
+            print(f"  CAP {c['fs']:22} {c['used_gb']}/{c['size_gb']} GB ({c['pct']}%)")
+        return 0
+
+    import boto3
+    ddb = boto3.resource("dynamodb", region_name=REGION)
+    it_tbl = ddb.Table(INVENTORY_TABLE)
+    cap_tbl = ddb.Table(CAPACITY_TABLE)
+    with it_tbl.batch_writer() as bw:
+        for it in inv:
+            # DynamoDB wants ints, not the floats du could produce.
+            it["bytes"] = {k: int(v) for k, v in it["bytes"].items()}
+            bw.put_item(Item=it)
+    with cap_tbl.batch_writer() as bw:
+        for c in cap:
+            bw.put_item(Item=c)
+    print(f"wrote {len(inv)} inventory + {len(cap)} capacity items")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
