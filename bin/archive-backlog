@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""archive-backlog — push warm-only astro nights to S3 Deep Archive,
+oldest first, treating each NIGHT as the atomic unit.
+
+Policy (decided 2026-06-29, see project-deep-archive-backlog memory):
+  - Deep Archive is the default cold tier; archive RAW frames.
+  - EXCEPT nights whose summary.json verdict == "cloudy": squash first
+    (pair-sum sum8/sum2) and archive the squashed tree — little signal to
+    lose, saves local space. verdict in (clear|no-data|missing) => raw.
+  - One tar per (camera, mode): cold/<camera>/<mode>/<night>/...tar
+    (matches the existing convention + astro.locate registry). A night's
+    cameras are archived together as one batch.
+  - After Deep Archive is verified, freeing the local/puppy copy is a
+    SEPARATE step (free-puppy / trash) — this tool only archives.
+
+Run on muppet (bigdisk is local there). Dry-run by default.
+
+    archive-backlog                       # dry-run, show the plan
+    archive-backlog --limit 2 --go        # archive the 2 oldest, for real
+    archive-backlog --night 2026-06-22 --go
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import boto3
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+from astro.config import CameraConfig          # noqa: E402
+from astro import locate                        # noqa: E402
+
+REGION = "eu-west-1"
+BUCKET = "astro-berrylands-eu-west-1"
+INV_TABLE = "astro-storage-inventory"
+CAMERAS = ["astrocam", "eclipticam-v1", "eclipticam-v3w"]
+COLD_ARCHIVE = str(REPO / "bin" / "cold-archive-night")
+
+
+def verdict_of(night_dir: Path) -> str:
+    """clear | cloudy | no-data | unknown — from summary.json if present."""
+    f = night_dir / "summary.json"
+    if not f.is_file():
+        return "unknown"
+    try:
+        return (json.load(f.open()).get("verdict") or "unknown").lower()
+    except Exception:
+        return "unknown"
+
+
+def mode_of(camera: str, night_dir: Path) -> str:
+    """night vs day — astro raw lives under HH/ (we archive the night dir as
+    a whole). Mode here just names the S3 key; default 'night'."""
+    return "night"
+
+
+def already_cold(s3, camera: str, mode: str, night: str) -> bool:
+    key = f"cold/{camera}/{mode}/{night}/{camera}-{mode}-{night}.tar"
+    try:
+        s3.head_object(Bucket=BUCKET, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def warm_only_nights():
+    """[(night, [(camera, Located), ...])] for nights with real local data
+    not yet in Deep Archive, oldest first. Uses the inventory table to know
+    what's already cold."""
+    s3 = boto3.client("s3", region_name=REGION)
+    by_night = {}
+    for cam in CAMERAS:
+        try:
+            cfg = CameraConfig.load(cam)
+        except FileNotFoundError:
+            continue
+        for night, loc in locate.list_nights(cfg):
+            if not loc.online or not loc.path.is_dir():
+                continue
+            # real data only (skip empty shadows)
+            try:
+                size = sum(p.stat().st_size for p in loc.path.rglob("*")
+                           if p.is_file())
+            except OSError:
+                size = 0
+            if size < 50 * (1 << 20):
+                continue
+            if already_cold(s3, cam, mode_of(cam, loc.path), night):
+                continue
+            by_night.setdefault(night, []).append((cam, loc, size))
+    return sorted(by_night.items())
+
+
+def squash_night(night_dir: Path) -> Path:
+    """Run pair-sum over each HH/ (sum8) and HHb/ (sum2) dir; return a
+    sibling <dir>-squashed tree to archive. (cloudy-night path.)"""
+    out = night_dir.parent / (night_dir.name + "-squashed")
+    out.mkdir(parents=True, exist_ok=True)
+    pair_sum = str(REPO / "bin" / "pair-sum")
+    for hh in sorted(night_dir.glob("[0-9][0-9]")):
+        subprocess.run([pair_sum, str(hh), "--n", "8",
+                        "--out", str(out / (hh.name + "-sum8"))], check=True)
+    for hhb in sorted(night_dir.glob("[0-9][0-9]b")):
+        subprocess.run([pair_sum, str(hhb), "--n", "2",
+                        "--out", str(out / (hhb.name + "-sum2"))], check=True)
+    return out
+
+
+def archive_one(camera, mode, night, src, go):
+    cmd = [sys.executable, COLD_ARCHIVE, night,
+           "--camera", camera, "--mode", mode, "--src", str(src)]
+    if go:
+        cmd.append("--go")
+    print(f"  $ {' '.join(cmd)}")
+    return subprocess.run(cmd).returncode == 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--limit", type=int, default=None,
+                    help="archive only the N oldest nights")
+    ap.add_argument("--night", default=None, help="just this night")
+    ap.add_argument("--go", action="store_true",
+                    help="actually squash/upload (default dry-run)")
+    args = ap.parse_args()
+
+    nights = warm_only_nights()
+    if args.night:
+        nights = [(n, locs) for n, locs in nights if n == args.night]
+    if args.limit:
+        nights = nights[:args.limit]
+
+    if not nights:
+        print("nothing to archive — backlog clear (or all already cold).")
+        return 0
+
+    GB = 1 << 30
+    print(f"=== {len(nights)} night(s) to archive, oldest first ===")
+    for night, locs in nights:
+        total = sum(s for _, _, s in locs) / GB
+        # verdict from the first camera that has a summary (astrocam usually)
+        verdicts = {cam: verdict_of(loc.path) for cam, loc, _ in locs}
+        cloudy = any(v == "cloudy" for v in verdicts.values())
+        action = "SQUASH+archive" if cloudy else "archive RAW"
+        print(f"\n{night}  [{action}]  {total:.1f}G  "
+              f"verdicts={verdicts}")
+        for cam, loc, size in locs:
+            mode = mode_of(cam, loc.path)
+            src = loc.path
+            if cloudy and verdicts.get(cam) == "cloudy":
+                if args.go:
+                    print(f"  squashing {cam} {night} ...")
+                    src = squash_night(loc.path)
+                else:
+                    print(f"  would squash {cam} {night} → "
+                          f"{loc.path.name}-squashed, then archive that")
+            ok = archive_one(cam, mode, night, src, args.go)
+            print(f"  {cam}/{mode}: {'ok' if ok else 'FAILED'}")
+    if not args.go:
+        print("\nDRY RUN — pass --go to squash/upload.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

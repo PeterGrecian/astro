@@ -245,13 +245,22 @@ def main() -> int:
     ap.add_argument("--camera", default="starcam")
     ap.add_argument("--mode", default="night")
     ap.add_argument("--stick", default=str(DEFAULT_STICK))
+    ap.add_argument("--src", default=None,
+                    help="archive THIS directory directly (e.g. a bigdisk "
+                         "night dir) instead of the stick path; implies "
+                         "--skip-verify (no MANIFEST needed — sha is computed "
+                         "during the tar stream)")
     ap.add_argument("--bucket", default=DEFAULT_BUCKET)
     ap.add_argument("--region", default=REGION)
     ap.add_argument("--go", action="store_true", help="actually upload (default is dry-run)")
     ap.add_argument("--skip-verify", action="store_true", help="skip MANIFEST.sha256 check")
     args = ap.parse_args()
 
-    night_dir = Path(args.stick) / args.camera / args.mode / args.night
+    if args.src:
+        night_dir = Path(args.src).expanduser()
+        args.skip_verify = True  # no MANIFEST on bigdisk; sha from tar stream
+    else:
+        night_dir = Path(args.stick) / args.camera / args.mode / args.night
     if not night_dir.is_dir():
         die(f"not a directory: {night_dir}")
 
