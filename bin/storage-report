@@ -41,6 +41,14 @@ CAPACITY_TABLE = "astro-host-capacity"
 # (its rows come from the CSV), so skip it by default.
 DEFAULT_CAMERAS = ["astrocam", "eclipticam-v1", "eclipticam-v3w"]
 
+# Non-astro streams with no astro CameraConfig (gardencam/skycam). We scan
+# their top-level dirs directly for dated subdirs so they're VISIBLE on the
+# storage page (skycam raw is GC-bound, ~40G on puppy — worth tracking).
+# camera-name -> list of root dirs (globbed, ~ expanded).
+EXTRA_STREAMS = {
+    "skycam": ["~/skycam-frames", "~/skycam-processed", "~/skycam-rerender"],
+}
+
 
 def du_bytes(path: Path) -> int:
     """Total bytes under path (follows the tree; skips broken symlinks)."""
@@ -114,6 +122,45 @@ def scan_host(cameras, host):
             if v:
                 item["verdict"] = v
             yield item
+
+
+import re as _re
+
+_DATED = _re.compile(r"(\d{4}-\d{2}-\d{2})$")
+
+
+def scan_extra_streams(host):
+    """Yield inventory items for non-astro streams (skycam) by finding dated
+    subdirs under their roots. One item per (stream, night, root) so the
+    storage page shows them. Aggregated per night across the flat YYYY-MM-DD
+    dirs; the canonical YYYY/MM/DD tree is summed too."""
+    import glob as _glob
+    for stream, roots in EXTRA_STREAMS.items():
+        for root in roots:
+            for rp in _glob.glob(Path(root).expanduser().as_posix()):
+                rootp = Path(rp)
+                if not rootp.is_dir():
+                    continue
+                # flat dated dirs: <root>/YYYY-MM-DD
+                for d in rootp.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"):
+                    if not d.is_dir():
+                        continue
+                    size = du_bytes(d)
+                    if size == 0:
+                        continue
+                    yield {
+                        "night": d.name,
+                        "loc": f"{stream}#{host}#{d}",
+                        "camera": stream,
+                        "host": host,
+                        "path": str(d),
+                        "storage_class": "local",
+                        "online": True,
+                        "layout": f"flat:{rootp.name}",
+                        "bytes": {"on_disk": size},
+                        "shrunk": False,
+                        "updated_at": int(time.time()),
+                    }
 
 
 def mount_point_of(path: Path) -> Path:
@@ -198,6 +245,7 @@ def main() -> int:
     args = ap.parse_args()
 
     inv = list(scan_host(args.cameras, args.host))
+    inv += list(scan_extra_streams(args.host))   # skycam etc.
     # capacity: the roots each camera searches (+ known astro mounts, see
     # scan_capacity); NFS-mounted remote disks are excluded.
     roots = []
