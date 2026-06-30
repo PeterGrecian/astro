@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""archive-backlog — push warm-only astro nights to S3 Deep Archive,
-oldest first, treating each NIGHT as the atomic unit.
+"""archive-backlog — push KEEPER astro nights to S3 Deep Archive, raw,
+oldest first.
 
-Policy (decided 2026-06-29, see project-deep-archive-backlog memory):
+Policy (project-deep-archive-backlog memory, refined 2026-06-30):
   - Deep Archive is the default cold tier; archive RAW frames.
-  - EXCEPT nights whose summary.json verdict == "cloudy": squash first
-    (pair-sum sum8/sum2) and archive the squashed tree — little signal to
-    lose, saves local space. verdict in (clear|no-data|missing) => raw.
+  - Only KEEPERS go to Glacier: the clearest CLEAR night of each ISO week,
+    per camera (same rule as the /astro/storage page). Weeks with no clear
+    night get no keeper. Non-keeper nights stay local raw on bigdisk until
+    it's under pressure, then squashed LOCALLY (a separate step, not here).
   - One tar per (camera, mode): cold/<camera>/<mode>/<night>/...tar
-    (matches the existing convention + astro.locate registry). A night's
-    cameras are archived together as one batch.
-  - After Deep Archive is verified, freeing the local/puppy copy is a
-    SEPARATE step (free-puppy / trash) — this tool only archives.
+    (matches the existing convention + astro.locate registry).
+  - Archiving only; freeing the local/puppy copy is a SEPARATE step.
 
 Run on muppet (bigdisk is local there). Dry-run by default.
 
-    archive-backlog                       # dry-run, show the plan
-    archive-backlog --limit 2 --go        # archive the 2 oldest, for real
-    archive-backlog --night 2026-06-22 --go
+    archive-backlog                       # dry-run: the keeper plan
+    archive-backlog --limit 1 --go        # archive the oldest keeper, for real
+    archive-backlog --night 2026-06-09 --go
+    archive-backlog --all                 # (rare) every warm-only night
 """
 from __future__ import annotations
 
@@ -110,6 +110,34 @@ def squash_night(night_dir: Path) -> Path:
     return out
 
 
+def keeper_nights(by_night):
+    """Per camera, the clearest CLEAR night of each ISO week is a keeper
+    (raw → Glacier). Weeks with verdicts but no clear night get no keeper;
+    weeks with no verdict info fall back to biggest. Returns a set of
+    (camera, night) keeper pairs. Mirrors the /astro/storage page rule.
+
+    by_night: {night: [(camera, Located, size), ...]}
+    """
+    import datetime as _dt
+    from collections import defaultdict
+    per_cam_week = defaultdict(list)  # (camera, isoweek) -> [(night, size, verdict)]
+    for night, locs in by_night.items():
+        try:
+            wk = _dt.date.fromisoformat(night).isocalendar()[:2]
+        except ValueError:
+            continue
+        for cam, loc, size in locs:
+            per_cam_week[(cam, wk)].append((night, size, verdict_of(loc.path)))
+    keepers = set()
+    for (cam, wk), nights in per_cam_week.items():
+        clear = [n for n in nights if n[2] == "clear"]
+        if clear:
+            keepers.add((cam, max(clear, key=lambda n: n[1])[0]))
+        elif not any(n[2] for n in nights):
+            keepers.add((cam, max(nights, key=lambda n: n[1])[0]))
+    return keepers
+
+
 def archive_one(camera, mode, night, src, go):
     cmd = [sys.executable, COLD_ARCHIVE, night,
            "--camera", camera, "--mode", mode, "--src", str(src)]
@@ -122,46 +150,53 @@ def archive_one(camera, mode, night, src, go):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--limit", type=int, default=None,
-                    help="archive only the N oldest nights")
+                    help="archive only the N oldest (camera,night) keepers")
     ap.add_argument("--night", default=None, help="just this night")
+    ap.add_argument("--all", action="store_true",
+                    help="archive ALL warm-only nights, not just keepers "
+                         "(the old behaviour; rarely wanted under the keeper "
+                         "policy)")
     ap.add_argument("--go", action="store_true",
-                    help="actually squash/upload (default dry-run)")
+                    help="actually upload (default dry-run)")
     args = ap.parse_args()
 
-    nights = warm_only_nights()
+    nights = dict(warm_only_nights())  # {night: [(cam, loc, size), ...]}
     if args.night:
-        nights = [(n, locs) for n, locs in nights if n == args.night]
-    if args.limit:
-        nights = nights[:args.limit]
+        nights = {n: v for n, v in nights.items() if n == args.night}
 
     if not nights:
         print("nothing to archive — backlog clear (or all already cold).")
         return 0
 
-    GB = 1 << 30
-    print(f"=== {len(nights)} night(s) to archive, oldest first ===")
-    for night, locs in nights:
-        total = sum(s for _, _, s in locs) / GB
-        # verdict from the first camera that has a summary (astrocam usually)
-        verdicts = {cam: verdict_of(loc.path) for cam, loc, _ in locs}
-        cloudy = any(v == "cloudy" for v in verdicts.values())
-        action = "SQUASH+archive" if cloudy else "archive RAW"
-        print(f"\n{night}  [{action}]  {total:.1f}G  "
-              f"verdicts={verdicts}")
+    # Policy default: archive only KEEPERS (raw → Glacier). The clearest
+    # clear night per ISO week per camera. Non-keepers stay local raw until
+    # bigdisk is under pressure (then squashed locally — a separate step).
+    keepers = keeper_nights(nights)
+
+    # Build the per-(camera,night) work list, oldest first.
+    work = []  # (night, cam, loc, size)
+    for night, locs in sorted(nights.items()):
         for cam, loc, size in locs:
-            mode = mode_of(cam, loc.path)
-            src = loc.path
-            if cloudy and verdicts.get(cam) == "cloudy":
-                if args.go:
-                    print(f"  squashing {cam} {night} ...")
-                    src = squash_night(loc.path)
-                else:
-                    print(f"  would squash {cam} {night} → "
-                          f"{loc.path.name}-squashed, then archive that")
-            ok = archive_one(cam, mode, night, src, args.go)
-            print(f"  {cam}/{mode}: {'ok' if ok else 'FAILED'}")
+            if args.all or (cam, night) in keepers:
+                work.append((night, cam, loc, size))
+    if args.limit:
+        work = work[:args.limit]
+
+    if not work:
+        print("no keepers to archive (use --all to archive everything).")
+        return 0
+
+    GB = 1 << 30
+    mode_word = "ALL warm-only" if args.all else "KEEPER"
+    print(f"=== {len(work)} {mode_word} (camera,night) tar(s), oldest first ===")
+    for night, cam, loc, size in work:
+        mode = mode_of(cam, loc.path)
+        vd = verdict_of(loc.path) or "?"
+        print(f"\n{night}  {cam}/{mode}  {size/GB:.1f}G  verdict={vd}")
+        ok = archive_one(cam, mode, night, loc.path, args.go)
+        print(f"  {'ok' if ok else 'FAILED'}")
     if not args.go:
-        print("\nDRY RUN — pass --go to squash/upload.")
+        print("\nDRY RUN — pass --go to upload.")
     return 0
 
 
