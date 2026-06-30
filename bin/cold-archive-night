@@ -5,8 +5,9 @@ Scope (v1, run on muppet):
   - Reads /mnt/astrobackup/<camera>/<mode>/<night>/ (must contain MANIFEST.sha256).
   - Verifies the manifest.
   - Streams `tar c` of that dir to s3://<bucket>/cold/<camera>/<mode>/<night>/<camera>-<mode>-<night>.tar
-    with StorageClass=DEEP_ARCHIVE, sha256 in object Metadata, and a STANDARD-class
-    .sha256 sidecar next to it.
+    with StorageClass=DEEP_ARCHIVE and a STANDARD-class .sha256 sidecar next
+    to it (the sidecar is the canonical hash record; we upload straight to
+    the final key — no copy_object, which caps source at 5 GiB).
   - Updates ~/astro/whereisallthedata.csv (upsert the aws row).
 
 Idempotent: if the S3 object already exists with matching size, skips upload.
@@ -160,31 +161,26 @@ def upload_tar(
         max_concurrency=4,
     )
     stream = TarSourceStream(night_dir)
-    # We need the sha256 in object metadata, but we only know it after the
-    # full stream is read. Trick: upload to a temp key first with a placeholder,
-    # then copy-in-place setting the real metadata. Deep Archive copy is free.
-    tmp_key = key + ".uploading"
-    print(f"uploading to s3://{bucket}/{tmp_key} (STANDARD, will transition)...")
+    # Upload STRAIGHT to the final key (multipart, DEEP_ARCHIVE). We compute
+    # the sha256 as the stream is read; it's recorded in the STANDARD .sha256
+    # SIDECAR (write_sha_sidecar), which is the canonical hash record.
+    #
+    # We deliberately do NOT stash the sha in S3 object *metadata*: that would
+    # require the old upload-temp-then-copy_object trick, and copy_object caps
+    # the source at 5 GiB — our night tars are ~14 GiB, so that path fails
+    # (InvalidRequest: copy source larger than 5368709120). The sidecar makes
+    # the in-metadata copy redundant anyway.
+    print(f"uploading to s3://{bucket}/{key} (DEEP_ARCHIVE)...")
     s3.upload_fileobj(
         stream,
         bucket,
-        tmp_key,
+        key,
         ExtraArgs={"StorageClass": "DEEP_ARCHIVE"},
         Config=cfg,
     )
     sha = stream.sha256
     size = stream.size
     print(f"tar size {size:,} bytes, sha256 {sha}")
-    print(f"copying to final key {key} with sha256 metadata...")
-    s3.copy_object(
-        Bucket=bucket,
-        Key=key,
-        CopySource={"Bucket": bucket, "Key": tmp_key},
-        Metadata={"sha256": sha},
-        MetadataDirective="REPLACE",
-        StorageClass="DEEP_ARCHIVE",
-    )
-    s3.delete_object(Bucket=bucket, Key=tmp_key)
     return sha, size
 
 
