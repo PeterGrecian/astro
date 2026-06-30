@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -126,18 +127,44 @@ def mount_point_of(path: Path) -> Path:
     return cur
 
 
-def scan_capacity(host, paths):
-    """Capacity items ONLY for the filesystems that actually hold astro data.
+# Local astro storage mounts to always report if present (in addition to
+# the camera roots). bigdisk2 holds no camera root yet but is astro warm
+# space; /mnt/ssd is eclipticam's astro disk. Globbed, so absent ones are
+# skipped silently.
+EXTRA_MOUNT_GLOBS = ["/mnt/bigdisk", "/mnt/bigdisk2", "/mnt/ssd"]
 
-    We do NOT report '/' unconditionally — on a Pi the root SD card isn't
-    astro storage (e.g. eclipticam keeps astro on /mnt/ssd, not /). For each
-    astro data path we find its real mount point and report THAT, keyed and
-    labelled by mount point (not device name), deduped so a filesystem holding
-    several camera roots appears once.
+# Filesystem types that belong to ANOTHER host — don't report them as this
+# host's capacity (e.g. muppet NFS-mounts puppy's starcam-frames; that disk
+# is puppy's and is reported under puppy).
+REMOTE_FSTYPES = {"nfs", "nfs4", "cifs", "smbfs", "fuse.sshfs"}
+
+
+def _fstype_of(mount: str) -> str:
+    try:
+        out = subprocess.run(["findmnt", "-no", "FSTYPE", mount],
+                             capture_output=True, text=True).stdout.strip()
+        return out
+    except Exception:
+        return ""
+
+
+def scan_capacity(host, paths):
+    """Capacity items for the LOCAL filesystems that hold astro data.
+
+    Reports the mount point (not device name) of each camera-root path, plus
+    the known astro mounts in EXTRA_MOUNT_GLOBS (bigdisk/bigdisk2/ssd), deduped
+    by mount point. Excludes:
+      - '/' unless a camera root actually lives on it (a Pi root SD card is
+        not astro storage),
+      - REMOTE filesystems (NFS/CIFS) — that disk belongs to its origin host.
     """
+    import glob as _glob
     seen = {}  # mount-point str -> item
     gb = 1 << 30
-    for p in paths:
+    candidates = list(paths)
+    for g in EXTRA_MOUNT_GLOBS:
+        candidates += _glob.glob(g)
+    for p in candidates:
         p = Path(p).expanduser()
         try:
             if not p.exists():
@@ -149,6 +176,8 @@ def scan_capacity(host, paths):
         key = str(mp)
         if key in seen:
             continue
+        if _fstype_of(key) in REMOTE_FSTYPES:
+            continue  # remote disk — belongs to its origin host
         seen[key] = {
             "host": host,
             "fs": key,                      # mount point, not device
@@ -169,7 +198,8 @@ def main() -> int:
     args = ap.parse_args()
 
     inv = list(scan_host(args.cameras, args.host))
-    # capacity: the roots each camera searches, plus '/'
+    # capacity: the roots each camera searches (+ known astro mounts, see
+    # scan_capacity); NFS-mounted remote disks are excluded.
     roots = []
     for cam in args.cameras:
         try:
