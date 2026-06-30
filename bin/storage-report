@@ -62,6 +62,20 @@ def is_shrunk(path: Path) -> bool:
     return False
 
 
+def verdict_of(night_dir: Path) -> str:
+    """clear | cloudy | no-data | '' — from summary.json if present.
+    summary.json may sit at the night dir or one level up (canonical
+    <date>/<camera>/ vs flat <date>/). Check both."""
+    import json
+    for f in (night_dir / "summary.json", night_dir.parent / "summary.json"):
+        if f.is_file():
+            try:
+                return (json.load(f.open()).get("verdict") or "").lower()
+            except Exception:
+                return ""
+    return ""
+
+
 def scan_host(cameras, host):
     """Yield inventory item dicts for every resolvable night on this host."""
     for cam in cameras:
@@ -80,7 +94,7 @@ def scan_host(cameras, host):
             # one. A night with zero frame bytes is such a shadow, not data.
             if size == 0:
                 continue
-            yield {
+            item = {
                 "night": night,
                 "loc": f"{cam}#{host}#{loc.path}",
                 "camera": cam,
@@ -93,25 +107,51 @@ def scan_host(cameras, host):
                 "shrunk": is_shrunk(loc.path),
                 "updated_at": int(time.time()),
             }
+            # verdict (clear/cloudy/no-data) from summary.json drives the
+            # keeper policy on the web page; record it when present.
+            v = verdict_of(loc.path)
+            if v:
+                item["verdict"] = v
+            yield item
+
+
+def mount_point_of(path: Path) -> Path:
+    """The mount point of the filesystem holding `path` (walk up until the
+    device id changes). Resolves symlinks first."""
+    path = path.resolve()
+    dev = path.stat().st_dev
+    cur = path
+    while cur.parent != cur and cur.parent.stat().st_dev == dev:
+        cur = cur.parent
+    return cur
 
 
 def scan_capacity(host, paths):
-    """Capacity items for the filesystems backing the given paths (dedup by
-    device). Always includes '/'."""
-    seen = {}
-    check = [Path("/")] + [Path(p).expanduser() for p in paths]
-    for p in check:
+    """Capacity items ONLY for the filesystems that actually hold astro data.
+
+    We do NOT report '/' unconditionally — on a Pi the root SD card isn't
+    astro storage (e.g. eclipticam keeps astro on /mnt/ssd, not /). For each
+    astro data path we find its real mount point and report THAT, keyed and
+    labelled by mount point (not device name), deduped so a filesystem holding
+    several camera roots appears once.
+    """
+    seen = {}  # mount-point str -> item
+    gb = 1 << 30
+    for p in paths:
+        p = Path(p).expanduser()
         try:
-            st_dev = p.stat().st_dev
-            usage = shutil.disk_usage(p)
+            if not p.exists():
+                continue
+            mp = mount_point_of(p)
+            usage = shutil.disk_usage(mp)
         except OSError:
             continue
-        if st_dev in seen:
+        key = str(mp)
+        if key in seen:
             continue
-        gb = 1 << 30
-        seen[st_dev] = {
+        seen[key] = {
             "host": host,
-            "fs": str(p),
+            "fs": key,                      # mount point, not device
             "size_gb": usage.total // gb,
             "used_gb": usage.used // gb,
             "avail_gb": usage.free // gb,
