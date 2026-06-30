@@ -110,6 +110,22 @@ Cross-cutting:
 
 ## Deliverables (website)
 
+- [ ] **Tune the diff-sweep trail line-filter, then default it on.**
+      `bin/diff-sweep --line-filter` (built 2026-06-30, flag-gated, default
+      OFF) extracts star trails and suppresses the noise dots + non-linear
+      cloud via a per-pixel oriented open along the ANALYTIC trail direction
+      (`trail_angle_field`, from k1,k2 + detrans angle). Big bandwidth win
+      (~26× smaller on a real 06-24 frame) but currently OVER-SUPPRESSES in
+      the pipeline — the fixed threshold runs on the raw max−mean float, wrong
+      scale. Fixes needed before defaulting on for eclipticam-v3w:
+      - **noise-relative threshold** (per-frame, e.g. k·σ of the diff), not
+        the current absolute `thresh`.
+      - mask/handle the foreground (trees, rooftops) so its edges don't pass.
+      - **WRITE A SPLAY TUNING PLUGIN** for this — interactive parameter sweep
+        (threshold, line-L, nang) on real frames beats blind guessing. splay
+        has the app system (`PARAMS`, live tuning, save-to-sidecar); model on
+        `~/splay/apps/distortion.py` (same k1/k2 domain). 
+      See `design/trail-line-filter.md`; examples in `~/tmp/linefilter-test/`.
 - [ ] **Per-day calendar view for eclipticam** on the website, mirroring
       the starcam calendar. Each day shows the colour sweep MP4 (story
       of the night) and the brightness curve. The skycam calendar is
