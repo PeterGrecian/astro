@@ -184,6 +184,33 @@ def upload_tar(
     return sha, size
 
 
+def upsert_inventory_row(night, camera, mode, s3_uri, size, sha, region):
+    """Record the deep-archive copy in the astro-storage-inventory DynamoDB
+    table, so the /astro/storage page shows it as cold (not 'no cold copy').
+    Mirrors the storage-report schema; loc = camera#aws#<s3_uri>."""
+    try:
+        import boto3 as _b
+        tbl = _b.resource("dynamodb", region_name=region).Table(
+            "astro-storage-inventory")
+        tbl.put_item(Item={
+            "night": night,
+            "loc": f"{camera}#aws#{s3_uri}",
+            "camera": camera,
+            "host": "aws",
+            "path": s3_uri,
+            "storage_class": "deep-archive",
+            "online": False,
+            "bytes": {"tarball": int(size)},
+            "sha256": sha,
+            "notes": f"{mode} tar in Deep Archive",
+        })
+        print(f"dynamodb: recorded deep-archive row for {camera} {night}")
+    except Exception as e:
+        # Non-fatal: the S3 object + CSV + sidecar are the durable records;
+        # the DynamoDB row is just for the web page.
+        print(f"warning: could not write DynamoDB inventory row: {e}")
+
+
 def write_sha_sidecar(s3, bucket: str, key: str, sha: str, night: str) -> None:
     sidecar_key = key + ".sha256"
     body = f"{sha}  {Path(key).name}\n".encode()
@@ -290,6 +317,8 @@ def main() -> int:
     sha, size = upload_tar(s3, args.bucket, key, night_dir)
     write_sha_sidecar(s3, args.bucket, key, sha, args.night)
     upsert_csv_row(args.night, s3_uri, size, sha, camera=args.camera)
+    upsert_inventory_row(args.night, args.camera, args.mode, s3_uri, size,
+                         sha, args.region)
     print("done.")
     return 0
 
