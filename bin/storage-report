@@ -156,7 +156,7 @@ def scan_extra_streams(host):
                 # count puppy's data under muppet. That disk belongs to puppy.
                 try:
                     mp = mount_point_of(rootp)
-                    if _fstype_of(str(mp)) in REMOTE_FSTYPES:
+                    if _is_remote(str(mp)):
                         continue
                 except OSError:
                     continue
@@ -201,17 +201,22 @@ EXTRA_MOUNT_GLOBS = ["/mnt/bigdisk", "/mnt/bigdisk2", "/mnt/ssd"]
 
 # Filesystem types that belong to ANOTHER host — don't report them as this
 # host's capacity (e.g. muppet NFS-mounts puppy's starcam-frames; that disk
-# is puppy's and is reported under puppy).
+# is puppy's and is reported under puppy). "autofs" isn't itself remote but
+# it typically fronts an NFS mount, which findmnt reports as a second line.
 REMOTE_FSTYPES = {"nfs", "nfs4", "cifs", "smbfs", "fuse.sshfs"}
 
 
-def _fstype_of(mount: str) -> str:
+def _is_remote(mount: str) -> bool:
+    """True if the filesystem(s) at `mount` are remote. findmnt can return
+    MULTIPLE fstypes for a stacked mount (e.g. 'autofs\\nnfs4' when autofs
+    fronts NFS) — treat it as remote if ANY line is a remote type."""
     try:
         out = subprocess.run(["findmnt", "-no", "FSTYPE", mount],
-                             capture_output=True, text=True).stdout.strip()
-        return out
+                             capture_output=True, text=True).stdout
+        types = {t.strip() for t in out.split() if t.strip()}
+        return bool(types & REMOTE_FSTYPES) or "autofs" in types
     except Exception:
-        return ""
+        return False
 
 
 def scan_capacity(host, paths):
@@ -240,7 +245,7 @@ def scan_capacity(host, paths):
             usage = shutil.disk_usage(mp)
         except OSError:
             continue
-        if _fstype_of(str(mp)) in REMOTE_FSTYPES:
+        if _is_remote(str(mp)):
             continue  # remote disk — belongs to its origin host
         # Same physical filesystem reached via >1 path (e.g. eclipticam's
         # ~/eclipticam-frames is a bind mount of /mnt/ssd) — dedup by device.
