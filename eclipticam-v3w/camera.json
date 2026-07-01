@@ -3,9 +3,10 @@
   "host": "eclipticam",
   "sensor": "IMX708",
   "bayer": "SRGGB10",
-  "resolution": [2304, 1296],
+  "resolution": [4608, 2592],
+  "resolution_notes": "FULL-RES native IMX708 (4608x2592) — this is what the night daemon actually captures since 2026-06-22 (v3w_night_daemon sensor_size=(4608,2592)); was [2304,1296] binned. ⚠️ CALIBRATION-BASIS MISMATCH: pedestal, plate_scale_deg_px, and distortion k1/k2 below were all derived on the OLD BINNED geometry (2304x1296 / 1152x648 / 648) and have NOT been re-fitted to full-res. Until they are (see v3w_night_daemon.py comment): pedestal ~4x too high for full-res un-binned (binned sums 4 px); plate_scale is per-BINNED-px (full-res ≈ 0.02215 deg/px, half); distortion rho is normalised so scale-invariant but re-fit anyway on in-focus full-res. Do NOT trust the derived numbers as full-res without re-derivation.",
   "pedestal": 4380,
-  "pedestal_notes": "Sensor black level in libcamera's 16-bit container — measured 2026-06-12 as the minimum mean across deep-night (00:00-03:00 UTC) frames from 3 nights of v3w data. Slightly above the documented IMX708 black level (~4096) due to dark current. Use as fixed zero point so 'stops above pedestal' is comparable across nights.",
+  "pedestal_notes": "BINNED-BASIS black level (2x2 sum) — measured 2026-06-12 on binned frames. See resolution_notes: full-res un-binned black level is ~1/4 of this (~1095). Re-measure from full-res deep-night frames. Sensor black level in libcamera's 16-bit container; use as fixed zero point so 'stops above pedestal' is comparable across nights.",
   "capture": {
     "night_exposure_us": 59900000,
     "night_gain": 1.0,
