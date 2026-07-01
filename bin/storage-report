@@ -206,7 +206,7 @@ def scan_capacity(host, paths):
       - REMOTE filesystems (NFS/CIFS) — that disk belongs to its origin host.
     """
     import glob as _glob
-    seen = {}  # mount-point str -> item
+    seen = {}  # device id -> item  (dedup by DEVICE, so bind mounts collapse)
     gb = 1 << 30
     candidates = list(paths)
     for g in EXTRA_MOUNT_GLOBS:
@@ -217,17 +217,24 @@ def scan_capacity(host, paths):
             if not p.exists():
                 continue
             mp = mount_point_of(p)
+            dev = mp.stat().st_dev
             usage = shutil.disk_usage(mp)
         except OSError:
             continue
-        key = str(mp)
-        if key in seen:
-            continue
-        if _fstype_of(key) in REMOTE_FSTYPES:
+        if _fstype_of(str(mp)) in REMOTE_FSTYPES:
             continue  # remote disk — belongs to its origin host
-        seen[key] = {
+        # Same physical filesystem reached via >1 path (e.g. eclipticam's
+        # ~/eclipticam-frames is a bind mount of /mnt/ssd) — dedup by device.
+        # Prefer a canonical /mnt/... name over a home-dir path for display.
+        existing = seen.get(dev)
+        fs = str(mp)
+        if existing:
+            if fs.startswith("/mnt/") and not existing["fs"].startswith("/mnt/"):
+                existing["fs"] = fs      # upgrade to the nicer mount name
+            continue
+        seen[dev] = {
             "host": host,
-            "fs": key,                      # mount point, not device
+            "fs": fs,                       # mount point, not device
             "size_gb": usage.total // gb,
             "used_gb": usage.used // gb,
             "avail_gb": usage.free // gb,
@@ -267,18 +274,54 @@ def main() -> int:
         return 0
 
     import boto3
+    from boto3.dynamodb.conditions import Attr
     ddb = boto3.resource("dynamodb", region_name=REGION)
     it_tbl = ddb.Table(INVENTORY_TABLE)
     cap_tbl = ddb.Table(CAPACITY_TABLE)
+
+    for it in inv:
+        # DynamoDB wants ints, not the floats du could produce.
+        it["bytes"] = {k: int(v) for k, v in it["bytes"].items()}
+
+    # PRUNE stale rows: any LOCAL row for THIS host that we didn't emit this
+    # run represents a path that has moved or vanished (layout churn, data
+    # deleted, stream removed). Delete it so the page reflects reality.
+    # Only touch this host's local rows — never other hosts' or cold/USB rows.
+    fresh_locs = {it["loc"] for it in inv}
+    resp = it_tbl.scan(FilterExpression=Attr("host").eq(args.host)
+                       & Attr("storage_class").eq("local"))
+    existing = resp.get("Items", [])
+    while "LastEvaluatedKey" in resp:
+        resp = it_tbl.scan(FilterExpression=Attr("host").eq(args.host)
+                           & Attr("storage_class").eq("local"),
+                           ExclusiveStartKey=resp["LastEvaluatedKey"])
+        existing += resp.get("Items", [])
+    stale = [e for e in existing if e["loc"] not in fresh_locs]
+
     with it_tbl.batch_writer() as bw:
         for it in inv:
-            # DynamoDB wants ints, not the floats du could produce.
-            it["bytes"] = {k: int(v) for k, v in it["bytes"].items()}
             bw.put_item(Item=it)
+        for e in stale:
+            bw.delete_item(Key={"night": e["night"], "loc": e["loc"]})
+
+    # Same for capacity: drop this host's mount rows we no longer report.
+    fresh_fs = {c["fs"] for c in cap}
+    cresp = cap_tbl.scan(FilterExpression=Attr("host").eq(args.host))
+    cexisting = cresp.get("Items", [])
+    while "LastEvaluatedKey" in cresp:
+        cresp = cap_tbl.scan(FilterExpression=Attr("host").eq(args.host),
+                             ExclusiveStartKey=cresp["LastEvaluatedKey"])
+        cexisting += cresp.get("Items", [])
+    cstale = [c for c in cexisting if c["fs"] not in fresh_fs]
+
     with cap_tbl.batch_writer() as bw:
         for c in cap:
             bw.put_item(Item=c)
-    print(f"wrote {len(inv)} inventory + {len(cap)} capacity items")
+        for c in cstale:
+            bw.delete_item(Key={"host": c["host"], "fs": c["fs"]})
+
+    print(f"wrote {len(inv)} inventory + {len(cap)} capacity items; "
+          f"pruned {len(stale)} stale inventory + {len(cstale)} capacity")
     return 0
 
 
