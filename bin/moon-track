@@ -72,8 +72,13 @@ def _frame_dt(path, mode):
 def _load_grey(path, mode):
     if mode == "day":
         from PIL import Image
+        # Full native-res decode (no draft downscale): the auto-centroid and
+        # the seeded fit are in the camera's full-res pixel space, which is
+        # per-camera (v1 2592x1944, v3w 4608x2592). draft() only ever
+        # downscales, so asking for the native size is a safe no-op that
+        # documents the intent.
         im = Image.open(path)
-        im.draft("RGB", (4608, 2592))
+        im.draft("RGB", im.size)
         return np.asarray(im.convert("L")).astype(np.float32)
     from astropy.io import fits
     return np.asarray(fits.open(path)[1].data).astype(np.float32)
@@ -90,10 +95,18 @@ def main():
     ap.add_argument("--min-bright", type=float, default=15.0,
                     help="min blob brightness over local bg to accept "
                          "(skip = moon too faint / cloud)")
+    ap.add_argument("--max-off", type=float, default=None,
+                    help="reject detections farther than this many px from the "
+                         "seeded prediction (cloud-latches, not the moon). "
+                         "Good for a faint daytime moon; try 20-30.")
     ap.add_argument("--step", type=int, default=1,
                     help="process every Nth frame")
     ap.add_argument("--append", action="store_true",
                     help="append auto points to the thread (source=auto)")
+    ap.add_argument("--frames-root", type=Path, default=None,
+                    help="override cfg.frames_root (dev/test) — e.g. when the "
+                         "night's frames live outside the canonical buffer "
+                         "(~/tmp/<night>/<subcam>/)")
     args = ap.parse_args()
 
     import ephem
@@ -128,8 +141,19 @@ def main():
     az_lo, az_hi = az.min(), az.max()
     print(f"seeded from {len(seeds)} hand-marks, az {az_lo:.1f}-{az_hi:.1f}")
 
-    # frames
-    base = cfg.frames_root / args.mode / args.night / "v3w"
+    # frames. The legacy percam layout is <root>/<mode>/<night>/<subcam>/HH/…
+    # where <subcam> is the trailing token of the camera name
+    # (eclipticam-v1 -> v1, eclipticam-v3w -> v3w). Deriving it from the
+    # camera keeps this tool camera-agnostic (was hardcoded to v3w).
+    subcam = args.camera.rsplit("-", 1)[-1]
+    # --frames-root points DIRECTLY at the <...>/<subcam>/ dir holding the
+    # HH/ subdirs (e.g. ~/tmp/<night>/<subcam>), since off-buffer copies
+    # don't carry the canonical <mode>/<night>/ prefix. Default builds the
+    # canonical path.
+    if args.frames_root is not None:
+        base = args.frames_root
+    else:
+        base = cfg.frames_root / args.mode / args.night / subcam
     ext = "*.jpg" if args.mode == "day" else "*.fits.fz"
     fs = glob.glob(str(base / "*" / ext))
     fs = sorted((f for f in fs if _frame_dt(f, args.mode)),
@@ -140,7 +164,7 @@ def main():
 
     marked = {p["frame"] for p in thread["points"]}
     auto = []
-    n_skip_faint = n_skip_range = 0
+    n_skip_faint = n_skip_range = n_skip_off = 0
     for f in fs:
         dt = _frame_dt(f, args.mode)
         a, alt = _moon_azalt(obs, dt)
@@ -169,7 +193,10 @@ def main():
         ys, xs = np.where(resid > thr)
         wx = (x0 + xs.mean()); wy = (y0 + ys.mean())
         off = np.hypot(wx - px, wy - py)
-        frame_id = f.split("/v3w/")[-1]
+        if args.max_off is not None and off > args.max_off:
+            n_skip_off += 1
+            continue
+        frame_id = f.split(f"/{subcam}/")[-1]
         tag = "(marked)" if frame_id in marked else ""
         auto.append({"frame": frame_id,
                      "utc": dt.isoformat(),
@@ -182,6 +209,7 @@ def main():
               f"off={off:.0f}px {tag}")
 
     print(f"\n{len(auto)} auto-detected; {n_skip_faint} skipped (too faint), "
+          f"{n_skip_off} skipped (off prediction), "
           f"{n_skip_range} out of az range")
 
     if args.append and auto:

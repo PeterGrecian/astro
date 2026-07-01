@@ -1,0 +1,61 @@
+{
+  "_comment": "Accumulated moon-track threads for eclipticam-v1 (OV5647, day-mode). Each thread = one night's marked moon points (a curve of known sky positions). Coords are full-res 2592x1944 pixels (moon-overlay auto-scales to the target image). Add a thread per clear night; non-parallel threads (different declinations) pin pointing/scale/distortion. Marked via splay p-probe (native full-res, see the p-probe RES= tag) -> mark-moon-net.",
+  "capture_full_res": [
+    2592,
+    1944
+  ],
+  "threads": [
+    {
+      "night": "2026-06-25",
+      "dec_deg": -23.2,
+      "phase_pct": 85,
+      "points": [
+        {
+          "frame": "20/0032.jpg",
+          "utc": "2026-06-25T21:31:09",
+          "x": 45,
+          "y": 1888,
+          "az": 190.51,
+          "alt": 14.74,
+          "mark_note": "recovered from probe log (frame deleted before ingest)"
+        },
+        {
+          "frame": "20/0037.jpg",
+          "utc": "2026-06-25T21:36:09",
+          "x": 104,
+          "y": 1892,
+          "az": 191.66,
+          "alt": 14.58,
+          "mark_note": "recovered from probe log (frame deleted before ingest)"
+        },
+        {
+          "frame": "20/0045.jpg",
+          "utc": "2026-06-25T21:44:09",
+          "x": 198,
+          "y": 1901,
+          "az": 193.49,
+          "alt": 14.29,
+          "mark_note": "recovered from probe log (frame deleted before ingest)"
+        },
+        {
+          "frame": "20/0055.jpg",
+          "utc": "2026-06-25T21:54:13",
+          "x": 313,
+          "y": 1915,
+          "az": 195.79,
+          "alt": 13.88,
+          "mark_note": "recovered from probe log (frame deleted before ingest)"
+        },
+        {
+          "frame": "20/0060.jpg",
+          "utc": "2026-06-25T21:59:09",
+          "x": 371,
+          "y": 1924,
+          "az": 196.9,
+          "alt": 13.66,
+          "mark_note": "recovered from probe log (frame deleted before ingest)"
+        }
+      ]
+    }
+  ]
+}

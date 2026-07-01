@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""mark-moon-net — turn splay p-probes into a moon-net thread.
+
+The hand-marking workflow is: open a night's frames in splay, press `p`
+on the moon in each frame. Every `p` appends a line to
+~/.splay-probes.log (native full-res coords, tagged RES=WxH — see splay's
+p-probe). This tool ingests those probe lines for one camera+night and
+writes them as a proper thread in that camera's moon-net.json:
+
+  * matches each probe to a frame of THIS camera+night (by resolved path),
+  * derives the frame's UTC (EXIF for day JPEGs, epoch_ms for night FITS),
+  * computes moon az/alt at that UTC from location.json,
+  * rescales any probe whose RES tag != the camera's capture_full_res
+    (defends against pre-fix half-scale probes),
+  * writes/updates the thread, deduped by frame — idempotent, so you can
+    re-run after marking a few more.
+
+EVERY probe is accounted for in the summary: accepted / duplicate /
+skipped (and why). Nothing is silently dropped.
+
+After marking >=3 points, seed the auto-tracker: `moon-track --append`.
+
+Usage:
+    mark-moon-net --camera eclipticam-v1 --night 2026-06-25 --mode day
+    mark-moon-net --camera eclipticam-v3w --night 2026-06-24 --mode night \\
+        --dec -19.1 --phase 78
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+
+# Frame-time + moon az/alt — same conventions as bin/moon-track, so
+# hand-marked and auto points share one time + coordinate basis.
+def _frame_dt(path, mode):
+    if mode == "day":
+        from PIL import Image
+        from PIL.ExifTags import TAGS
+        try:
+            ex = Image.open(path)._getexif() or {}
+        except (FileNotFoundError, OSError):
+            return None
+        s = {TAGS.get(k): v for k, v in ex.items()}.get("DateTimeOriginal")
+        return (datetime.datetime.strptime(s, "%Y:%m:%d %H:%M:%S")
+                if s else None)
+    # night FITS: epoch_ms filename
+    try:
+        ms = int(Path(path).name.split(".")[0])
+        return datetime.datetime.fromtimestamp(
+            ms / 1000, datetime.timezone.utc).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _moon_azalt(obs, dt):
+    import ephem
+    obs.date = dt
+    m = ephem.Moon(obs)
+    return (float(m.az) * 180 / np.pi, float(m.alt) * 180 / np.pi)
+
+
+PROBE_RE = re.compile(
+    r"PROBE\s+(?P<path>\S+)\s+(?P<x>\d+)\s+(?P<y>\d+)"
+    r"(?:\s+RES=(?P<rw>\d+)x(?P<rh>\d+))?"
+    r"(?:\s+CAP=(?P<cap>\S+))?")
+# The log line is prefixed with the probe's wall-clock ISO time.
+LINE_TS_RE = re.compile(r"^(?P<ts>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)\s")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--night", required=True)
+    ap.add_argument("--mode", choices=("day", "night"), default="day")
+    ap.add_argument("--log", type=Path,
+                    default=Path.home() / ".splay-probes.log")
+    ap.add_argument("--since", default=None,
+                    help="only probes logged at/after this ISO time "
+                         "(e.g. 2026-07-01T10:00) — filters out stray older "
+                         "marks that happen to match the same night")
+    ap.add_argument("--require-res", action="store_true",
+                    help="only accept probes carrying a RES= tag (i.e. taken "
+                         "after the splay full-res p-probe fix) — rejects "
+                         "old possibly-half-scale marks")
+    ap.add_argument("--dec", type=float, default=None,
+                    help="thread declination (deg), for the net metadata")
+    ap.add_argument("--phase", type=int, default=None,
+                    help="moon illuminated fraction (%%), metadata only")
+    ap.add_argument("--net", type=Path, default=None)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="show what would be written, change nothing")
+    args = ap.parse_args()
+
+    import ephem
+
+    cfg = CameraConfig.load(args.camera)
+    subcam = args.camera.rsplit("-", 1)[-1]
+    fullW, fullH = cfg.resolution  # native full-res for THIS camera
+    # v3w day frames are full-sensor 4608x2592 even though camera.json
+    # resolution (the binned night mode) is 2304x1296 — prefer the net's
+    # declared capture_full_res when present.
+    net_path = args.net or (Path(__file__).resolve().parent.parent
+                            / args.camera / "moon-net.json")
+    net = (json.loads(net_path.read_text()) if net_path.exists()
+           else {"_comment": f"moon-net for {args.camera}",
+                 "capture_full_res": [fullW, fullH], "threads": []})
+    fullW, fullH = net.get("capture_full_res", [fullW, fullH])
+
+    loc_path = (Path(__file__).resolve().parent.parent / args.camera
+                / "location.json")
+    loc = json.loads(loc_path.read_text())
+    obs = ephem.Observer()
+    obs.lat = str(loc["lat_deg"]); obs.lon = str(loc["lon_deg"])
+    obs.elevation = loc.get("height_m", 0); obs.pressure = 0
+
+    if not args.log.exists():
+        sys.stderr.write(f"no probe log at {args.log}\n")
+        return 2
+
+    # A probe belongs to this camera+night when its resolved path sits under
+    # <mode>/<night>/<subcam>/. Probe paths in the log vary (dayframes/, tmp/,
+    # eclipticam-frames/) so we match on the /<subcam>/ tail, not a fixed root.
+    tail = f"/{subcam}/"
+    accepted, dup, skipped = [], [], []
+    seen_frames = set()
+    for line in args.log.read_text().splitlines():
+        m = PROBE_RE.search(line)
+        if not m:
+            continue
+        p = m.group("path")
+        if tail not in p:
+            continue
+        # frame_id = everything after /<subcam>/  ->  HH/NNNN.jpg
+        frame_id = p.split(tail, 1)[1]
+        rw, rh = m.group("rw"), m.group("rh")
+        # --since: skip probes logged before the given wall-clock time.
+        if args.since:
+            tsm = LINE_TS_RE.match(line)
+            if tsm and tsm.group("ts") < args.since:
+                skipped.append((frame_id, f"before --since {args.since}"))
+                continue
+        # --require-res: skip untagged (pre-fix, possibly half-scale) probes.
+        if args.require_res and not rw:
+            skipped.append((frame_id, "no RES tag (--require-res)"))
+            continue
+        # Capture time: prefer the CAP= tag splay wrote at probe time (works
+        # even after the frame is deleted), else fall back to reading the
+        # frame's EXIF/epoch_ms.
+        cap = m.group("cap")
+        dt = None
+        if cap:
+            try:
+                dt = datetime.datetime.fromisoformat(cap)
+            except ValueError:
+                dt = None
+        if dt is None:
+            dt = _frame_dt(p, args.mode)
+        if dt is None:
+            skipped.append((frame_id, "no timestamp (no CAP tag, "
+                            "frame missing/no EXIF)"))
+            continue
+        x, y = int(m.group("x")), int(m.group("y"))
+        # Rescale to full-res if the probe carried a RES tag that disagrees
+        # (old half-scale probes taken before the splay p-probe fix).
+        note = None
+        if rw and (int(rw), int(rh)) != (fullW, fullH):
+            sx, sy = fullW / int(rw), fullH / int(rh)
+            x, y = int(round(x * sx)), int(round(y * sy))
+            note = f"rescaled from {rw}x{rh}"
+        elif not rw:
+            note = "no RES tag (assumed full-res — verify zoom was 1x)"
+        a, alt = _moon_azalt(obs, dt)
+        rec = {"frame": frame_id, "utc": dt.isoformat(),
+               "x": x, "y": y, "az": round(a, 2), "alt": round(alt, 2)}
+        if note:
+            rec["mark_note"] = note
+        if frame_id in seen_frames:
+            dup.append((frame_id, "duplicate probe (kept last)"))
+            # keep the latest probe for a frame
+            accepted = [r for r in accepted if r["frame"] != frame_id]
+        seen_frames.add(frame_id)
+        accepted.append(rec)
+
+    accepted.sort(key=lambda r: r["utc"])
+
+    print(f"camera {args.camera}  night {args.night}  mode {args.mode}  "
+          f"full-res {fullW}x{fullH}")
+    print(f"probe log: {args.log}")
+    print(f"  {len(accepted)} points accepted, {len(dup)} duplicates "
+          f"collapsed, {len(skipped)} skipped")
+    for r in accepted:
+        n = f"   [{r['mark_note']}]" if "mark_note" in r else ""
+        print(f"    {r['frame']:14} {r['utc'][11:19]}  ({r['x']:5},{r['y']:5})"
+              f"  az={r['az']:6.1f} alt={r['alt']:5.1f}{n}")
+    for f, why in skipped:
+        print(f"    SKIP {f}: {why}")
+
+    if len(accepted) < 3:
+        sys.stderr.write("\n<3 usable points — mark more before this thread "
+                         "is useful for a fit\n")
+
+    if args.dry_run:
+        print("\n[dry-run] nothing written")
+        return 0
+    if not accepted:
+        return 1
+
+    # upsert the thread for this night
+    thread = next((t for t in net["threads"] if t["night"] == args.night),
+                  None)
+    if thread is None:
+        thread = {"night": args.night}
+        net["threads"].append(thread)
+    if args.dec is not None:
+        thread["dec_deg"] = args.dec
+    if args.phase is not None:
+        thread["phase_pct"] = args.phase
+    thread["points"] = accepted
+    net["threads"].sort(key=lambda t: t["night"])
+    net_path.write_text(json.dumps(net, indent=2) + "\n")
+    print(f"\nwrote {len(accepted)} points to the {args.night} thread "
+          f"in {net_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
