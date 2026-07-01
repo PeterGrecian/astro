@@ -37,9 +37,11 @@ REGION = "eu-west-1"
 INVENTORY_TABLE = "astro-storage-inventory"
 CAPACITY_TABLE = "astro-host-capacity"
 
-# Cameras to scan when --cameras isn't given. starcam is cold-archived
-# (its rows come from the CSV), so skip it by default.
-DEFAULT_CAMERAS = ["astrocam", "eclipticam-v1", "eclipticam-v3w"]
+# Cameras scanned via locate.list_nights (flat/canonical single-dir-per-night
+# layouts) when --cameras isn't given. starcam is cold-archived (rows from the
+# CSV). eclipticam-v1/v3w are NOT here — they use the <mode>/<date>/ layout and
+# are scanned by scan_mode_dated instead (locate would undercount them).
+DEFAULT_CAMERAS = ["astrocam"]
 
 # Non-astro streams with no astro CameraConfig (gardencam/skycam). We scan
 # their top-level dirs directly for dated subdirs so they're VISIBLE on the
@@ -48,6 +50,16 @@ DEFAULT_CAMERAS = ["astrocam", "eclipticam-v1", "eclipticam-v3w"]
 EXTRA_STREAMS = {
     "skycam": ["~/skycam-frames", "~/skycam-processed", "~/skycam-rerender"],
 }
+
+# Cameras whose frames live in a <root>/<mode>/<date>/... tree (day AND night
+# modes, possibly with v1/v3w subcams below). locate.list_nights only resolves
+# ONE dir per night (night/<date>/<subcam>), so it misses the day/ mode and the
+# date-level deliverables — undercounting the disk. For these we scan the whole
+# <mode>/<date>/ subtree per night instead. camera -> root dirs (globbed).
+MODE_DATED_STREAMS = {
+    "eclipticam": ["~/eclipticam-frames"],
+}
+MODES = ("day", "night")
 
 # A "night" must hold at least this many bytes of real data to be inventoried.
 # Excludes the metadata-only stubs of the incomplete hierarchical migration:
@@ -182,6 +194,51 @@ def scan_extra_streams(host):
                     }
 
 
+def scan_mode_dated(host):
+    """Yield inventory items for cameras stored as <root>/<mode>/<date>/...
+    (eclipticam: day+night, v1/v3w subcams). One row per (camera, mode, night)
+    summing the whole <mode>/<date>/ subtree — captures day mode and the
+    date-level deliverables that locate.list_nights misses."""
+    for cam, roots in MODE_DATED_STREAMS.items():
+        for root in roots:
+            rootp = Path(root).expanduser()
+            if not rootp.is_dir():
+                continue
+            try:
+                if _is_remote(str(mount_point_of(rootp))):
+                    continue
+            except OSError:
+                continue
+            for mode in MODES:
+                mdir = rootp / mode
+                if not mdir.is_dir():
+                    continue
+                for d in sorted(mdir.glob(
+                        "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]")):
+                    if not d.is_dir():
+                        continue
+                    size = du_bytes(d)
+                    if size < MIN_REAL_BYTES:
+                        continue
+                    item = {
+                        "night": d.name,
+                        "loc": f"{cam}#{host}#{d}",
+                        "camera": cam,
+                        "host": host,
+                        "path": str(d),
+                        "storage_class": "local",
+                        "online": True,
+                        "layout": f"mode:{mode}",
+                        "bytes": {"on_disk": size},
+                        "shrunk": is_shrunk(d),
+                        "updated_at": int(time.time()),
+                    }
+                    v = verdict_of(d)
+                    if v:
+                        item["verdict"] = v
+                    yield item
+
+
 def mount_point_of(path: Path) -> Path:
     """The mount point of the filesystem holding `path` (walk up until the
     device id changes). Resolves symlinks first."""
@@ -277,6 +334,7 @@ def main() -> int:
 
     inv = list(scan_host(args.cameras, args.host))
     inv += list(scan_extra_streams(args.host))   # skycam etc.
+    inv += list(scan_mode_dated(args.host))      # eclipticam day+night
     # capacity: the roots each camera searches (+ known astro mounts, see
     # scan_capacity); NFS-mounted remote disks are excluded.
     roots = []
