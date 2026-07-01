@@ -1,0 +1,11 @@
+[Unit]
+Description=astro: report this host's storage inventory + capacity to DynamoDB
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=peter
+ExecStart=/home/peter/astro/services/storage-report-run.sh
+StandardOutput=journal
+StandardError=journal
