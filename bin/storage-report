@@ -49,6 +49,14 @@ EXTRA_STREAMS = {
     "skycam": ["~/skycam-frames", "~/skycam-processed", "~/skycam-rerender"],
 }
 
+# A "night" must hold at least this many bytes of real data to be inventoried.
+# Excludes the metadata-only stubs of the incomplete hierarchical migration:
+# the canonical YYYY/MM/DD/<camera>/ dirs currently hold only brightness.csv +
+# state.json (~500 B) while the real frames live in the flat YYYY-MM-DD tree.
+# Smallest real night observed is ~36 MB; canonical stubs are <25 KB — 1 MB
+# cleanly separates them. (Revisit at "the day of the great migration".)
+MIN_REAL_BYTES = 1 << 20  # 1 MiB
+
 
 def du_bytes(path: Path) -> int:
     """Total bytes under path (follows the tree; skips broken symlinks)."""
@@ -98,10 +106,12 @@ def scan_host(cameras, host):
             if not loc.online or not loc.path.is_dir():
                 continue
             size = du_bytes(loc.path)
-            # Skip empty resolutions: when both a canonical metadata-only dir
-            # and a real flat/percam copy exist, locate can land on the empty
-            # one. A night with zero frame bytes is such a shadow, not data.
-            if size == 0:
+            # Skip stubs/shadows: when both a canonical metadata-only dir and a
+            # real flat/percam copy exist, locate can land on the metadata one.
+            # The incomplete hierarchical-migration stubs (canonical
+            # YYYY/MM/DD/<camera>/ holding just brightness.csv + state.json,
+            # ~500 B) are not data — require real frame bytes. See MIN_REAL_BYTES.
+            if size < MIN_REAL_BYTES:
                 continue
             item = {
                 "night": night,
@@ -146,7 +156,7 @@ def scan_extra_streams(host):
                     if not d.is_dir():
                         continue
                     size = du_bytes(d)
-                    if size == 0:
+                    if size < MIN_REAL_BYTES:
                         continue
                     yield {
                         "night": d.name,
