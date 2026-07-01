@@ -195,11 +195,14 @@ def scan_extra_streams(host):
 
 
 def scan_mode_dated(host):
-    """Yield inventory items for cameras stored as <root>/<mode>/<date>/...
-    (eclipticam: day+night, v1/v3w subcams). One row per (camera, mode, night)
-    summing the whole <mode>/<date>/ subtree — captures day mode and the
-    date-level deliverables that locate.list_nights misses."""
-    for cam, roots in MODE_DATED_STREAMS.items():
+    """Yield inventory items for cameras stored as
+    <root>/<mode>/<date>/<subcam>/... (eclipticam: day+night, v1/v3w subcams).
+
+    One row per (subcam, mode, night): the subcam becomes a distinct camera
+    (e.g. 'eclipticam-v1', 'eclipticam-v3w'), so the page shows the v1/v3w
+    split — including that v1 is day-only while v3w runs day+night. Captures
+    the day mode + deliverables that locate.list_nights misses."""
+    for stem, roots in MODE_DATED_STREAMS.items():
         for root in roots:
             rootp = Path(root).expanduser()
             if not rootp.is_dir():
@@ -217,26 +220,52 @@ def scan_mode_dated(host):
                         "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]")):
                     if not d.is_dir():
                         continue
-                    size = du_bytes(d)
-                    if size < MIN_REAL_BYTES:
-                        continue
-                    item = {
-                        "night": d.name,
-                        "loc": f"{cam}#{host}#{d}",
-                        "camera": cam,
-                        "host": host,
-                        "path": str(d),
-                        "storage_class": "local",
-                        "online": True,
-                        "layout": f"mode:{mode}",
-                        "bytes": {"on_disk": size},
-                        "shrunk": is_shrunk(d),
-                        "updated_at": int(time.time()),
-                    }
-                    v = verdict_of(d)
-                    if v:
-                        item["verdict"] = v
-                    yield item
+                    subcam_bytes = 0
+                    # Real subcams are named v1, v3w, v<N>... — NOT the
+                    # deliverable frame dirs (sweep-colour, sweep-diff, ...).
+                    for sub in sorted(d.glob("v[0-9]*")):
+                        if not sub.is_dir():
+                            continue
+                        cam = f"{stem}-{sub.name}"   # eclipticam-v1 / -v3w
+                        size = du_bytes(sub)
+                        subcam_bytes += size
+                        if size < MIN_REAL_BYTES:
+                            continue
+                        item = {
+                            "night": d.name,
+                            "loc": f"{cam}#{host}#{sub}",
+                            "camera": cam,
+                            "host": host,
+                            "path": str(sub),
+                            "storage_class": "local",
+                            "online": True,
+                            "layout": f"mode:{mode}",
+                            "bytes": {"on_disk": size},
+                            "shrunk": is_shrunk(sub),
+                            "updated_at": int(time.time()),
+                        }
+                        v = verdict_of(sub) or verdict_of(d)
+                        if v:
+                            item["verdict"] = v
+                        yield item
+                    # Date-level deliverables (sweep mp4s, posters) live at
+                    # <mode>/<date>/ outside the subcam dirs — don't lose them.
+                    date_total = du_bytes(d)
+                    remainder = date_total - subcam_bytes
+                    if remainder >= MIN_REAL_BYTES:
+                        yield {
+                            "night": d.name,
+                            "loc": f"{stem}-deliverables#{host}#{d}",
+                            "camera": f"{stem}-deliverables",
+                            "host": host,
+                            "path": str(d),
+                            "storage_class": "local",
+                            "online": True,
+                            "layout": f"mode:{mode}",
+                            "bytes": {"on_disk": remainder},
+                            "shrunk": False,
+                            "updated_at": int(time.time()),
+                        }
 
 
 def mount_point_of(path: Path) -> Path:
