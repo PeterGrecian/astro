@@ -151,6 +151,15 @@ def scan_extra_streams(host):
                 rootp = Path(rp)
                 if not rootp.is_dir():
                     continue
+                # Skip roots on a REMOTE filesystem — e.g. muppet NFS-mounts
+                # puppy's ~/skycam-processed, so scanning it here would double-
+                # count puppy's data under muppet. That disk belongs to puppy.
+                try:
+                    mp = mount_point_of(rootp)
+                    if _fstype_of(str(mp)) in REMOTE_FSTYPES:
+                        continue
+                except OSError:
+                    continue
                 # flat dated dirs: <root>/YYYY-MM-DD
                 for d in rootp.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"):
                     if not d.is_dir():
