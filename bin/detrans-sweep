@@ -48,15 +48,17 @@ V_PXS = 0.040
 V_ANGLE_DEG = 7.8
 
 # Crop fractions to trim the barrel-undistort black border, per edge
-# (left, right, top, bottom). Established by hand in GIMP from a real detrans
-# frame (peter@pip 2026-06-28). Peter preferred the CLOSER crop (the "version
-# 2" framing, ~1.84 aspect — trims more of the busy ghost/streak region on the
-# right), so both modes use it. yuv420p/libx264 needs even dims — the slice
-# below rounds down to even.
+# (left, right, top, bottom). Established by hand in GIMP from a real
+# detrans frame (peter@pip 2026-06-28). The two modes differ only on the
+# RIGHT edge: deep uses the closer "version 2" framing (~1.84 aspect),
+# trimming more of the busy ghost/streak region on the right; max keeps it
+# wider (~2.31). yuv420p/libx264 needs even dims — the slice below rounds
+# down to even.
 _CLOSE_CROP = (0.142, 0.299, 0.189, 0.270)   # L, R, T, B -> ~1.84 aspect
 CROP_FRAC = {
-    "max":  _CLOSE_CROP,
-    "deep": _CLOSE_CROP,
+    #          left,   right,  top,    bottom
+    "max":  (0.142, 0.155, 0.189, 0.270),   # 2.31 aspect (wider)
+    "deep": _CLOSE_CROP,                     # 1.84 aspect (closer, deep only)
 }
 
 
