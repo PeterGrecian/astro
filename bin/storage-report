@@ -322,7 +322,11 @@ def main() -> int:
         cresp = cap_tbl.scan(FilterExpression=Attr("host").eq(args.host),
                              ExclusiveStartKey=cresp["LastEvaluatedKey"])
         cexisting += cresp.get("Items", [])
-    cstale = [c for c in cexisting if c["fs"] not in fresh_fs]
+    # Never prune removable-media rows (USB sticks): they're written
+    # statically (the stick is usually unplugged, so the reporter can't read
+    # its capacity) and must survive runs when the stick is absent.
+    cstale = [c for c in cexisting
+              if c["fs"] not in fresh_fs and not c.get("removable")]
 
     with cap_tbl.batch_writer() as bw:
         for c in cap:
