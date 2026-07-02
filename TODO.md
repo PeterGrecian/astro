@@ -24,6 +24,16 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
 - [ ] **Derot central region → plate-solve** (2026-07-02, in progress).
       Max-stack won't solve (stars are arcs). Derot to point sources, then
       solve-field (on PIP — Tycho-2 indices 10-19 there; NOT on muppet).
+      PROGRESS 2026-07-02: PROVED the method — hand-rolled binned-space derot
+      about a grid-SEARCHED pole (1171,501, refined from 1171,506) registered
+      **230 sources (129 within 20°)**, stars sharp near pole. BUT residual
+      radial smear (arcs grow with radius) = OMEGA (rate) error — the 3rd fit
+      dim. My hand-rolled omega scan was too noisy (boundary result 7.0e-5 vs
+      sidereal 7.2921e-5; crude scorer). NEXT: use REAL `fit-pole` for the 3D
+      (pole+omega) fit — needs astrocam frames prepped as a binned dir with
+      EPOCH_MS headers + a candidates.csv. Scratch on
+      `muppet:~/tmp/psf-work/` (fitpole2.py, derot_final.py, fit_omega.py,
+      derot-fitted.npy = the 230-source stack).
       **USE THE PROVEN PIPELINE** — the starcam v1 derots
       (petergrecian.co.uk/starcam/night/2026-05-27, "pole spread 146px") come
       from `bin/pipeline-night`, which is the known-good recipe:
