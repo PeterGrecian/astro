@@ -24,18 +24,23 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
 - [ ] **Derot central region → plate-solve** (2026-07-02, in progress).
       Max-stack won't solve (stars are arcs). Derot to point sources, then
       solve-field (on PIP — Tycho-2 indices 10-19 there; NOT on muppet).
-      **USE THE PROVEN TOOLING** — many successful derots exist; geometry
-      just needs care. Recipe: (1) `fit-pole <binned-frames-dir> --pole-x
-      1171 --pole-y 506 --refine --omega <sign>` optimises the pole by
-      maximising derot sharpness (finds the pole that actually registers
-      stars — do NOT hand-compute it). (2) `derot-stack` with the fitted
-      pole → point sources. (3) for plate-solve resolution apply the fitted
-      geometry to a DEMOSAICED full-res derot (raw-mosaic derot = CFA grid;
-      see [[project-bayer-presentation-decision]]).
-      My hand-rolled `muppet:~/tmp/psf-work/derot_demosaic.py` left concentric
-      arcs — wrong pole geometry (used full-res ×2 of a binned pole; a star
-      1hr apart missed by 675px under rotation). That was MY setup error, not
-      the method — fit-pole avoids it. Hot-mask works:
+      **USE THE PROVEN PIPELINE** — the starcam v1 derots
+      (petergrecian.co.uk/starcam/night/2026-05-27, "pole spread 146px") come
+      from `bin/pipeline-night`, which is the known-good recipe:
+      (A) bin each hour to `HHb/` (2×2 binned); (E) per-hour bootstrap
+      `fit-pole` (3D: pole_x,pole_y,omega) → `fit-geometry` → `derot-patches`
+      → `find-candidates`, darkest hour first, converged pole seeds the next
+      hour; result `<HHb>/final/derot.fits.fz`, combined by `derot-night`.
+      Invoke: `pipeline-night <night-dir> --pole-x 1171 --pole-y 506`
+      (BINNED-px seed — starcam's own pole_prior is [910,40] binned, note
+      warns "NOT full-res pixels", exactly the trap below).
+      CRITICAL: the pipeline works in **2×2-binned coords**. My error was
+      hand-rolling a full-res demosaic derot with a ×2 pole (2342,1012):
+      concentric arcs, a star 1hr apart missed by 675px. MY setup error, not
+      the method. For plate-solve resolution, port the *converged* geometry
+      to a demosaiced full-res derot afterward. `pipeline-night` is on the
+      legacy-delete list (DECISIONS 2026-06-16) but is the working reference
+      — follow it or port its bootstrap into current tooling. Hot-mask:
       `muppet:~/tmp/psf-work/hotmask-fullres.npy`.
 - [ ] **Pull faintest stars** using the solved WCS; **estimate magnitudes**
       (calibrate flux against the identified Kochab/Pherkad/UMi stars).
