@@ -199,13 +199,25 @@ Cross-cutting:
       step before derot for the whole-frame deliverable. `bin/fit-k1`
       already sweeps k1 and scores derot peakiness; productionise.
 - [ ] **Hot-pixel mask v2.** Two independent tests, both from 2026-07-02
-      near-pole work (automated star-finding kept returning hot pixels):
-      (1) **single-channel test** — a real star is coherent across ALL
-      Bayer channels (R,G,G,B) at the same sub-pixel; a hot pixel is a
-      SINGLE-pixel spike in ONE channel only. Flag any source bright in
-      one of R/G/B but absent in the others. (2) **motion test** from the
-      derot/max stack — real stars trace arcs, hot pixels stay pixel-fixed.
-      More selective than thresholding the raw sum.
+      near-pole work (automated star-finding kept returning hot pixels).
+      **Detect on the RAW MOSAIC, before demosaic** — verified 2026-07-02:
+      each hot pixel is a clean SINGLE-photosite spike vs its same-colour
+      neighbours (e.g. +5244 amid ±20 floor); trivial to find. After
+      demosaic they BLOOM into shape artifacts that are much harder to
+      distinguish from real features — green → diagonal (2 G photosites/tile
+      on a diagonal lattice), red/blue → L/plus (bilinear spreads the sparse
+      R/B photosite to orthogonal neighbours). So mask pre-demosaic and the
+      bloom never happens. **Fix at BOTH levels** (peter, "tiny tetris"):
+      (a) RAW — single-photosite spike, replace with same-colour neighbour
+      median before demosaic; (b) INTERPOLATED — for already-demosaiced
+      products (deliverables, cached stacks) the bloom is a KNOWN per-channel
+      template (green=diagonal, R/B=L/plus) anchored at badpixel-mask
+      locations, so template-match + repair the tetris footprint there too.
+      (1) **single-channel test** — real star is coherent across ALL Bayer
+      channels (R,G,G,B) at the same sub-pixel; a hot pixel is a single
+      spike in ONE channel. (2) **motion test** from the derot/max stack —
+      real stars trace arcs, hot pixels stay pixel-fixed. More selective
+      than thresholding the raw sum.
 - [ ] **Dark master per (sensor, gain, exposure)** — capture procedure
       + apply step. Hook into `astro.process.badpix` or a new
       `astro.process.dark`.
