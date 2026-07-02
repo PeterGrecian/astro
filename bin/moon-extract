@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""moon-extract — crop the moon out of a night's frames into JPEGs.
+
+Production sibling of `moon-crops` (which makes small PNG verification
+crops with a cross). This makes a big, generous JPEG crop that reliably
+CONTAINS the moon, for inspection / a moon montage / an HDR-detail
+sequence. Runs on eclipticam (the capture Pi) against its local SSD
+frames.
+
+How it finds the moon, per frame:
+  1. ephemeris -> moon (az,alt) at the frame's capture UTC;
+  2. project to a pixel via the camera's gnomonic + k1/k2 model
+     (same math as moon-crops; boresight/focal defaults per camera);
+  3. REFINE: search a box around the prediction for the brightest blob
+     and re-centre on it (the moon saturates at night, so it's the
+     brightest thing in the box). Makes the crop well-centred even when
+     the pointing model is a few px off, and gives a "found/faint" flag.
+  4. crop CROP px around the (refined) centre, render, save JPEG.
+
+Camera scope: eclipticam-v3w works today (night FITS, pointing model).
+eclipticam-v1 has NO reliable pointing model yet (the v1<->v3w pose only
+holds in a 6deg az patch) and no night FITS — so --camera eclipticam-v1
+requires --boresight-az/--alt/--focal explicitly and is unvalidated. See
+design/v1-night-hdr.md.
+
+Usage:
+    moon-extract --camera eclipticam-v3w --night 2026-06-30 --mode night \\
+        --out ~/tmp/moon-v3w-0630
+    # bigger/smaller crop, tune search:
+    moon-extract ... --crop 800 --search 200 --min-bright 200
+"""
+from __future__ import annotations
+
+import argparse
+import datetime
+import glob
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+# Per-camera default pointing (boresight az/alt, roll, focal px, surface).
+# v3w: the 2026-06-23 daytime-moon fit (same as moon-crops). v1: none —
+# must be supplied on the CLI.
+CAM_DEFAULTS = {
+    "eclipticam-v3w": dict(az=186.0, alt=30.0, roll=-32.0, focal=2600.0,
+                           surface=(4608, 2592)),
+    "eclipticam-v1": dict(az=None, alt=None, roll=0.0, focal=None,
+                          surface=(2592, 1944)),
+}
+
+
+def _observer(loc):
+    import ephem
+    o = ephem.Observer()
+    o.lat = str(loc["lat_deg"]); o.lon = str(loc["lon_deg"])
+    o.elevation = loc.get("height_m", 0); o.pressure = 0
+    return o
+
+
+def _frame_utc(path, mode):
+    if mode == "day":
+        from PIL.ExifTags import TAGS
+        try:
+            ex = Image.open(path)._getexif() or {}
+        except (OSError, FileNotFoundError):
+            return None
+        s = {TAGS.get(k): v for k, v in ex.items()}.get("DateTimeOriginal")
+        return (datetime.datetime.strptime(s, "%Y:%m:%d %H:%M:%S")
+                if s else None)
+    try:
+        ms = int(Path(path).name.split(".")[0])
+        return datetime.datetime.fromtimestamp(
+            ms / 1000, datetime.timezone.utc).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _moon_azalt(obs, dt):
+    import ephem
+    obs.date = dt
+    m = ephem.Moon(obs)
+    return float(m.az), float(m.alt)   # radians
+
+
+def _load_rgb(path, mode):
+    """Return an (H,W,3) uint16-ish float RGB array at native scale.
+    Day: JPEG straight. Night: debayer the FITS to colour."""
+    if mode == "day":
+        return np.asarray(Image.open(path).convert("RGB")).astype(np.float32)
+    from astropy.io import fits
+    raw = np.asarray(fits.open(path)[1].data).astype(np.float32)
+    # cheap 2x2 debayer to RGB at HALF resolution (RGGB): good enough for a
+    # viewable moon crop; keeps colour. Downsampled crop is still generous.
+    r = raw[0::2, 0::2]
+    g = 0.5 * (raw[0::2, 1::2] + raw[1::2, 0::2])
+    b = raw[1::2, 1::2]
+    return np.dstack([r, g, b])
+
+
+def project(az, alt, az0, alt0, roll, f, cx, cy, k1, k2, Rdiag):
+    cosc = (np.sin(alt0) * np.sin(alt)
+            + np.cos(alt0) * np.cos(alt) * np.cos(az - az0))
+    if cosc <= 0:
+        return None                       # behind the camera
+    xi = np.cos(alt) * np.sin(az - az0) / cosc
+    eta = (np.cos(alt0) * np.sin(alt)
+           - np.sin(alt0) * np.cos(alt) * np.cos(az - az0)) / cosc
+    u = f * (xi * np.cos(roll) + eta * np.sin(roll))
+    v = f * (-xi * np.sin(roll) + eta * np.cos(roll))
+    px, py = cx + u, cy + v
+    dx, dy = px - cx, py - cy
+    rho2 = (dx * dx + dy * dy) / (Rdiag * Rdiag)
+    s = 1 + k1 * rho2 + k2 * rho2 * rho2
+    return cx + dx * s, cy + dy * s
+
+
+def refine(gray, px, py, search, min_bright, full=False):
+    """Locate the saturated moon disc and return (cx, cy, peak), or None.
+
+    Centroids on ABSOLUTE brightness near the peak, NOT residual contrast.
+    The moon disc saturates and is FLAT-TOPPED, so a high-pass residual is
+    LOW on the disc and HIGH on cloud-glow/halo edges — the old
+    residual-centroid landed on glow, not the moon (peak there ~4k while
+    the real disc was ~60k). Here: find the brightest pixels (>= peak_frac
+    x sub.max()) and centroid them; the largest such connected blob is the
+    disc. Searches a box around (px,py); full=True searches the whole frame.
+    min_bright is the accept floor on the peak (a truly moonless frame's
+    peak stays low)."""
+    from scipy.ndimage import label
+    H, W = gray.shape
+    if full:
+        x0, y0, sub = 0, 0, gray
+    else:
+        x0 = int(np.clip(px - search, 0, W - 1)); x1 = int(np.clip(px + search, 0, W))
+        y0 = int(np.clip(py - search, 0, H - 1)); y1 = int(np.clip(py + search, 0, H))
+        sub = gray[y0:y1, x0:x1]
+    if sub.size == 0:
+        return None
+    peak = float(sub.max())
+    if peak < min_bright:
+        return None
+    # bright mask near the peak; pick the LARGEST connected component (the
+    # disc), so a stray hot pixel or a small glint doesn't pull the centroid.
+    mask = sub >= peak * 0.85
+    lab, n = label(mask)
+    if n == 0:
+        return None
+    sizes = np.bincount(lab.ravel())[1:]
+    biggest = int(sizes.argmax()) + 1
+    ys, xs = np.where(lab == biggest)
+    return (x0 + xs.mean(), y0 + ys.mean(), peak)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", default="eclipticam-v3w")
+    ap.add_argument("--night", required=True, help="YYYY-MM-DD")
+    ap.add_argument("--mode", choices=("day", "night"), default="night")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--crop", type=int, default=700,
+                    help="output crop size px (generous, moon well inside)")
+    ap.add_argument("--search", type=int, default=320,
+                    help="refine search half-box px around the prediction "
+                         "(generous: the day-fitted boresight leaves ~250px "
+                         "residual on night frames)")
+    ap.add_argument("--min-bright", type=float, default=None,
+                    help="min blob residual brightness to accept the moon "
+                         "(default: 8000 night on the 16-bit debayered scale "
+                         "— a real moon is ~40-50k residual, noise <~2k; "
+                         "12 day on the 8-bit JPEG scale)")
+    ap.add_argument("--no-refine", action="store_true",
+                    help="crop at the raw prediction, skip blob search")
+    ap.add_argument("--no-fallback-full", action="store_true",
+                    help="don't fall back to a whole-frame brightest-blob "
+                         "search when the boxed search misses (night only)")
+    ap.add_argument("--min-alt", type=float, default=8.0,
+                    help="skip frames where the moon is below this altitude "
+                         "(deg) — below ~8 it's out of v3w's useful field and "
+                         "the fallback can latch onto foreground lights")
+    ap.add_argument("--no-pred-flip", "--no-night-flip", action="store_true",
+                    dest="no_pred_flip",
+                    help="don't point-reflect the night PREDICTION. The night "
+                         "FITS is NOT rotated (moon at low alt sits low in the "
+                         "array -> array-top = sky-top). But the day-fitted "
+                         "boresight/roll defaults project with the wrong sign, "
+                         "so the predicted pixel is point-reflected vs the real "
+                         "moon; we reflect the PREDICTION (not the image) to "
+                         "match. The crop pixels stay sky-up.")
+    ap.add_argument("--delete-missing", action="store_true",
+                    help="TRASH the source frame when the moon is not present "
+                         "(below horizon / off-frame / not found by refine) — "
+                         "moves it to ~/.trash via super/bin/trash, never rm. "
+                         "Requires refine (won't run with --no-refine).")
+    ap.add_argument("--boresight-az", type=float, default=None)
+    ap.add_argument("--boresight-alt", type=float, default=None)
+    ap.add_argument("--roll", type=float, default=None)
+    ap.add_argument("--focal", type=float, default=None)
+    ap.add_argument("--frames-root", type=Path, default=None,
+                    help="override: dir holding the HH/ subdirs directly")
+    ap.add_argument("--quality", type=int, default=90, help="JPEG quality")
+    args = ap.parse_args()
+
+    d = CAM_DEFAULTS.get(args.camera, {})
+    az0d = args.boresight_az if args.boresight_az is not None else d.get("az")
+    alt0d = args.boresight_alt if args.boresight_alt is not None else d.get("alt")
+    roll = args.roll if args.roll is not None else d.get("roll", 0.0)
+    focal = args.focal if args.focal is not None else d.get("focal")
+    if az0d is None or alt0d is None or focal is None:
+        sys.stderr.write(
+            f"{args.camera} has no default pointing — supply --boresight-az "
+            "--boresight-alt --focal (only eclipticam-v3w is calibrated; see "
+            "design/v1-night-hdr.md)\n")
+        return 2
+    surface = d.get("surface", (4608, 2592))
+    # min_bright is now an ABSOLUTE peak floor (refine centroids on absolute
+    # brightness, not residual). The saturated moon peaks ~55-65k on the 16-bit
+    # debayered scale; cloud-glow/lights stay well below ~40k. Day JPEGs are
+    # 0-255 so use a low floor there.
+    min_bright = (args.min_bright if args.min_bright is not None
+                  else (40000.0 if args.mode == "night" else 120.0))
+
+    cfg = CameraConfig.load(args.camera)
+    loc = json.loads((Path(__file__).resolve().parent.parent / args.camera
+                      / "location.json").read_text())
+    obs = _observer(loc)
+    dist = cfg.get("distortion") or {}
+    k1 = float(dist.get("k1", 0.0)); k2 = float(dist.get("k2", 0.0))
+
+    W, H = surface
+    cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+    Rdiag = 0.5 * np.hypot(W, H)
+    az0 = np.radians(az0d); alt0 = np.radians(alt0d); rollr = np.radians(roll)
+
+    if args.delete_missing and args.no_refine:
+        sys.stderr.write("--delete-missing needs refine (can't confirm the "
+                         "moon is absent with --no-refine)\n")
+        return 2
+
+    def _trash(path):
+        """Move a moon-less source frame to the trash (GLOBAL.md: never rm
+        data). Uses super/bin/trash; best-effort."""
+        import subprocess
+        trash = Path.home() / "super" / "bin" / "trash"
+        try:
+            if trash.exists():
+                subprocess.run([str(trash), path], check=True,
+                               capture_output=True)
+            else:
+                # fallback: dated trash dir by hand, still not rm
+                td = Path.home() / ".trash" / datetime.date.today().isoformat()
+                td.mkdir(parents=True, exist_ok=True)
+                Path(path).rename(td / Path(path).name)
+            return True
+        except Exception as e:
+            sys.stderr.write(f"trash failed for {path}: {e}\n")
+            return False
+
+    subcam = args.camera.rsplit("-", 1)[-1]
+    if args.frames_root is not None:
+        base = args.frames_root
+    else:
+        base = cfg.frames_root / args.mode / args.night / subcam
+    ext = "*.jpg" if args.mode == "day" else "*.fits.fz"
+    fs = sorted((f for f in glob.glob(str(base / "*" / ext))
+                 if _frame_utc(f, args.mode)), key=lambda f: _frame_utc(f, args.mode))
+    if not fs:
+        sys.stderr.write(f"no {args.mode} frames under {base}\n")
+        return 2
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    print(f"{args.camera} {args.night} {args.mode}: {len(fs)} frames  "
+          f"boresight az={az0d} alt={alt0d} roll={roll} focal={focal} "
+          f"crop={args.crop}")
+    made = n_below = n_off = n_faint = n_trashed = 0
+    C = args.crop
+    for f in fs:
+        dt = _frame_utc(f, args.mode)
+        az, alt = _moon_azalt(obs, dt)
+        # Altitude floor: below this the moon is at/under the horizon or too
+        # low to be usefully in v3w's field — and letting alt~3deg frames
+        # through lets the full-frame fallback grab bright foreground lights.
+        if np.degrees(alt) < args.min_alt:
+            n_below += 1
+            if args.delete_missing and _trash(f): n_trashed += 1
+            continue
+        pred = project(az, alt, az0, alt0, rollr, focal, cx, cy, k1, k2, Rdiag)
+        if pred is None:
+            n_off += 1
+            if args.delete_missing and _trash(f): n_trashed += 1
+            continue
+        rgb = _load_rgb(f, args.mode)
+        # the debayered night RGB is half-res of the FITS; pointing model is
+        # on the full surface -> scale the prediction to the image shape.
+        sy = rgb.shape[0] / H
+        sx = rgb.shape[1] / W
+        px, py = pred[0] * sx, pred[1] * sy
+        # POINT-REFLECT THE PREDICTION (not the image). The night FITS is NOT
+        # rotated — a low-altitude moon sits low in the array, so array-top =
+        # sky-top (confirmed; camera.json brightness_roi_notes agrees). But the
+        # day-fitted boresight/roll defaults project the moon to the point-
+        # reflected pixel, so we reflect the PREDICTION to land on the real
+        # moon (y-error ~700px -> ~13px). The crop pixels are untouched and
+        # sky-up. This is a pointing-model sign quirk, not an image rotation.
+        if args.mode == "night" and not args.no_pred_flip:
+            px = rgb.shape[1] - 1 - px
+            py = rgb.shape[0] - 1 - py
+        note = "pred"
+        if not args.no_refine:
+            gray = rgb.mean(axis=2)
+            r = refine(gray, px, py, int(args.search * sx), min_bright)
+            # Fallback: the day-fitted pointing model drifts up to ~550px
+            # across the FOV/week — past the search box. At night the moon is
+            # the brightest saturated object, so a whole-frame search finds it
+            # regardless of the prediction. (Only for night; day has bright
+            # cloud that would fool a full search.)
+            if r is None and args.mode == "night" and not args.no_fallback_full:
+                # refine already gates on peak >= min_bright (the saturated
+                # moon), so a whole-frame hit is the moon, not dim cloud-glow.
+                # The --min-alt gate removed the out-of-FOV frames upstream.
+                r = refine(gray, px, py, 0, min_bright, full=True)
+                if r is not None:
+                    note = "full-frame"
+            if r is None:
+                n_faint += 1
+                if args.delete_missing and _trash(f): n_trashed += 1
+                continue
+            px, py, _ = r
+            if note == "pred":
+                note = "refined"
+        x0 = int(round(px)) - C // 2
+        y0 = int(round(py)) - C // 2
+        # clamp the crop to stay in-frame (still 'contains the moon')
+        x0 = int(np.clip(x0, 0, rgb.shape[1] - C))
+        y0 = int(np.clip(y0, 0, rgb.shape[0] - C))
+        if rgb.shape[1] < C or rgb.shape[0] < C:
+            n_off += 1
+            continue
+        box = rgb[y0:y0 + C, x0:x0 + C]
+        lo, hi = float(np.percentile(box, 1)), float(box.max())
+        u8 = np.clip((box - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype("uint8")
+        fr = Path(f).name.split(".")[0]
+        out_img = Image.fromarray(u8, "RGB")
+        # Self-describing crop (filename is then cosmetic): EXIF carries the
+        # source frame's capture UTC (DateTimeOriginal) + a UserComment JSON
+        # with the crop origin, the scale to full-res, and the source frame.
+        # mark-moon-net reads these; robust to renames.
+        exif = out_img.getexif()
+        exif[0x9003] = dt.strftime("%Y:%m:%d %H:%M:%S")   # DateTimeOriginal
+        full_scale = W / rgb.shape[1]                      # crop-px -> full-res
+        exif[0x9286] = json.dumps({                        # UserComment
+            "origin": [x0, y0], "scale": full_scale,
+            "src": Path(f).name, "camera": args.camera, "mode": args.mode,
+            # crops are NOT rotated: array-top = sky-top (low-alt moon sits
+            # low in the frame). The night-mode prediction sign-fix reflects
+            # only the PREDICTED pixel, never the image.
+            "orientation": "sky-up"})
+        out_img.save(args.out / f"moon_{fr}_x{x0}_y{y0}.jpg",
+                     quality=args.quality, exif=exif)
+        made += 1
+    print(f"wrote {made} JPEGs to {args.out}  "
+          f"({n_below} moon below horizon, {n_faint} not found/faint, "
+          f"{n_off} off-frame)")
+    if args.delete_missing:
+        print(f"  trashed {n_trashed} moon-less source frames "
+              f"(to ~/.trash, recoverable)")
+    if made:
+        print(f"  view: splay {args.out}/moon_*.jpg")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

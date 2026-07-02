@@ -69,12 +69,45 @@ def _moon_azalt(obs, dt):
     return (float(m.az) * 180 / np.pi, float(m.alt) * 180 / np.pi)
 
 
+def _read_crop_exif(path):
+    """If `path` is a moon-extract crop with our EXIF, return a dict:
+    {origin:[x0,y0], scale, src, src_ms, camera, mode}. Else None. The
+    UserComment carries the crop geometry; DateTimeOriginal the capture UTC.
+    Best-effort — never raises."""
+    from PIL import Image
+    import datetime as _d
+    try:
+        ex = Image.open(path)._getexif() or {}
+    except Exception:
+        return None
+    uc = ex.get(0x9286)   # UserComment
+    if isinstance(uc, bytes):
+        uc = uc.decode("utf-8", "ignore")
+    if not uc or "origin" not in str(uc):
+        return None
+    try:
+        meta = json.loads(uc)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    dto = ex.get(0x9003)  # DateTimeOriginal -> epoch ms for src_ms
+    if dto:
+        try:
+            t = _d.datetime.strptime(dto, "%Y:%m:%d %H:%M:%S")
+            meta["src_ms"] = int(t.replace(
+                tzinfo=_d.timezone.utc).timestamp() * 1000)
+        except ValueError:
+            pass
+    return meta
+
+
 PROBE_RE = re.compile(
     r"PROBE\s+(?P<path>\S+)\s+(?P<x>\d+)\s+(?P<y>\d+)"
     r"(?:\s+RES=(?P<rw>\d+)x(?P<rh>\d+))?"
     r"(?:\s+CAP=(?P<cap>\S+))?")
 # The log line is prefixed with the probe's wall-clock ISO time.
 LINE_TS_RE = re.compile(r"^(?P<ts>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)\s")
+# moon-extract crop filenames: moon_<epoch_ms>_x<X0>_y<Y0>.jpg
+CROP_RE = re.compile(r"moon_(?P<ms>\d+)_x(?P<x0>\d+)_y(?P<y0>\d+)\.")
 
 
 def main():
@@ -97,6 +130,13 @@ def main():
     ap.add_argument("--phase", type=int, default=None,
                     help="moon illuminated fraction (%%), metadata only")
     ap.add_argument("--net", type=Path, default=None)
+    ap.add_argument("--replace", action="store_true",
+                    help="replace the thread's points entirely (default: merge "
+                         "+ dedup by frame, so day/night points accumulate)")
+    ap.add_argument("--no-render", action="store_true",
+                    help="don't re-render moon-net.png after writing "
+                         "(default: re-render so the cumulative view stays "
+                         "current on every ingest)")
     ap.add_argument("--dry-run", action="store_true",
                     help="show what would be written, change nothing")
     args = ap.parse_args()
@@ -138,10 +178,30 @@ def main():
         if not m:
             continue
         p = m.group("path")
-        if tail not in p:
+        # moon-extract crop? filename moon_<epoch_ms>_x<X0>_y<Y0>.jpg — the
+        # probe coords are crop-local; recover full-frame by adding the origin.
+        # Crops live in an OUTPUT dir (no /<subcam>/ tail), and carry their own
+        # identity (the source frame's epoch_ms), so this check comes BEFORE the
+        # subcam-tail filter. Crops are DEBAYERED HALF-RES (2304x1296 v3w);
+        # origin+coord are half-res, scaled to full-res below. Time = the ms.
+        crop_meta = _read_crop_exif(p)          # EXIF: {origin, scale, src, ...}
+        crop_m = CROP_RE.search(Path(p).name)   # fallback: filename encoding
+        crop_origin = crop_scale = crop_ms = None
+        if crop_meta is not None:
+            crop_origin = tuple(crop_meta["origin"])
+            crop_scale = crop_meta.get("scale", 2.0)
+            crop_ms = crop_meta.get("src_ms")   # set from DateTimeOriginal path
+            frame_id = crop_meta.get("src") or Path(p).name
+        elif crop_m:
+            crop_origin = (int(crop_m.group("x0")), int(crop_m.group("y0")))
+            crop_scale = 2.0                     # filename-only: assume half-res
+            crop_ms = crop_m.group("ms")
+            frame_id = crop_ms
+        elif tail not in p:
             continue
-        # frame_id = everything after /<subcam>/  ->  HH/NNNN.jpg
-        frame_id = p.split(tail, 1)[1]
+        else:
+            # normal frame: frame_id = everything after /<subcam>/
+            frame_id = p.split(tail, 1)[1]
         rw, rh = m.group("rw"), m.group("rh")
         # --since: skip probes logged before the given wall-clock time.
         if args.since:
@@ -158,7 +218,16 @@ def main():
         # frame's EXIF/epoch_ms.
         cap = m.group("cap")
         dt = None
-        if cap:
+        if crop_origin is not None and crop_ms is not None:
+            # crop of a night FITS: time is the source frame's epoch_ms
+            # (from EXIF DateTimeOriginal, or the filename ms fallback).
+            try:
+                dt = datetime.datetime.fromtimestamp(
+                    int(crop_ms) / 1000,
+                    datetime.timezone.utc).replace(tzinfo=None)
+            except (ValueError, OverflowError):
+                dt = None
+        if dt is None and cap:
             try:
                 dt = datetime.datetime.fromisoformat(cap)
             except ValueError:
@@ -170,10 +239,18 @@ def main():
                             "frame missing/no EXIF)"))
             continue
         x, y = int(m.group("x")), int(m.group("y"))
+        note = None
+        if crop_origin is not None:
+            # crop-local -> full-res. (origin + click) are in the crop's own
+            # pixel space (debayered half-res for v3w night); crop_scale maps
+            # that to full-res (2.0 for half-res crops; from EXIF when present).
+            x = int(round((crop_origin[0] + x) * crop_scale))
+            y = int(round((crop_origin[1] + y) * crop_scale))
+            note = (f"crop origin {crop_origin} +click x{crop_scale:g} "
+                    f"({'EXIF' if crop_meta else 'filename'})")
         # Rescale to full-res if the probe carried a RES tag that disagrees
         # (old half-scale probes taken before the splay p-probe fix).
-        note = None
-        if rw and (int(rw), int(rh)) != (fullW, fullH):
+        elif rw and (int(rw), int(rh)) != (fullW, fullH):
             sx, sy = fullW / int(rw), fullH / int(rh)
             x, y = int(round(x * sx)), int(round(y * sy))
             note = f"rescaled from {rw}x{rh}"
@@ -225,11 +302,38 @@ def main():
         thread["dec_deg"] = args.dec
     if args.phase is not None:
         thread["phase_pct"] = args.phase
-    thread["points"] = accepted
+    # MERGE (append + dedup by frame), don't replace — so a re-run, or night
+    # points added to an existing day thread, accumulate instead of wiping the
+    # thread. New points win on a frame collision. --replace forces the old
+    # wipe behaviour.
+    if args.replace:
+        merged = accepted
+    else:
+        new_frames = {r["frame"] for r in accepted}
+        kept = [p for p in thread.get("points", [])
+                if p["frame"] not in new_frames]
+        merged = kept + accepted
+        merged.sort(key=lambda r: r["utc"])
+    n_added = len(merged) - len(thread.get("points", [])) \
+        if not args.replace else len(merged)
+    thread["points"] = merged
     net["threads"].sort(key=lambda t: t["night"])
     net_path.write_text(json.dumps(net, indent=2) + "\n")
-    print(f"\nwrote {len(accepted)} points to the {args.night} thread "
+    print(f"\n{args.night} thread now {len(merged)} points "
+          f"({'replaced' if args.replace else f'+{len(accepted)} merged'}) "
           f"in {net_path}")
+
+    # Keep the cumulative render fresh: re-draw moon-net.png whenever the net
+    # changes (--no-render to skip). moon-overlay auto-finds a backdrop.
+    if not args.no_render:
+        import subprocess
+        overlay = Path(__file__).resolve().parent / "moon-overlay"
+        r = subprocess.run(
+            [sys.executable, str(overlay), "--camera", args.camera,
+             "--extend"], capture_output=True, text=True)
+        line = (r.stdout.strip().splitlines() or [""])[-1]
+        print(f"render: {line}" if r.returncode == 0
+              else f"render skipped ({r.stderr.strip().splitlines()[-1:] or ['?'][0]})")
     return 0
 
 

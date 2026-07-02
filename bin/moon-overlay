@@ -57,23 +57,34 @@ def _reference_stack(repo_root, cfg):
     backdrop for the accumulating moon net). Uses reference_nights[0] from
     camera.json — the same dark/clear night combined-brightness overlays.
     Returns None if no reference is pinned or the stack isn't on disk."""
-    refs = cfg.get("reference_nights") or []
-    if not refs:
-        return None
-    night = refs[0]
-    # Layout (eclipticam, night_layout=percam): the per-night stacks live
-    # directly in <frames_root>/night/<night>/ with a <subcam>_ prefix, e.g.
-    # v3w_max.fits.fz. (The <subcam>/ subdir there holds raw frames.) Single-
-    # cam layouts have no prefix. Try prefixed, then bare.
     subcam = (cfg.get("name", "").split("-", 1) + [""])[1]
-    nd = cfg.frames_root / "night" / night
-    cands = []
-    if subcam:
-        cands.append(nd / f"{subcam}_max.fits.fz")
-    cands += [nd / "max.fits.fz", nd / subcam / "max.fits.fz"]
-    for cand in cands:
-        if cand.exists():
-            return cand
+
+    def _stack_for(night):
+        # Layout (eclipticam, night_layout=percam): per-night stacks live in
+        # <frames_root>/night/<night>/ with a <subcam>_ prefix (v3w_max.fits.fz)
+        # or bare (max.fits.fz); the <subcam>/ subdir holds raw frames.
+        nd = cfg.frames_root / "night" / night
+        cands = []
+        if subcam:
+            cands.append(nd / f"{subcam}_max.fits.fz")
+        cands += [nd / "max.fits.fz", nd / subcam / "max.fits.fz"]
+        return next((c for c in cands if c.exists()), None)
+
+    # Prefer the pinned reference night (a fixed dark/clear backdrop).
+    for night in (cfg.get("reference_nights") or []):
+        s = _stack_for(night)
+        if s:
+            return s
+    # Fallback for reliable automated rendering: the pinned reference may not
+    # be on disk (retention / predates capture). Use the MOST RECENT available
+    # max-stack so the daily render always has a backdrop.
+    ndir = cfg.frames_root / "night"
+    if ndir.exists():
+        for night in sorted((p.name for p in ndir.iterdir() if p.is_dir()),
+                            reverse=True):
+            s = _stack_for(night)
+            if s:
+                return s
     return None
 
 

@@ -1,5 +1,9 @@
 # astro — TODO
 
+moon-net refresh daily
+moon crops daily on eclipticam
+detrans is undertranslated almost certainly because hte resolution has changed
+
 Live work list. Move items to DECISIONS.md once they crystallise into
 load-bearing choices; delete done items (per the
 [delete-done feedback memory](file:///home/peter/.claude/projects/-home-peter/memory/feedback_todos_delete_done.md)).
