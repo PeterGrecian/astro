@@ -7,6 +7,31 @@ Live work list. Move items to DECISIONS.md once they crystallise into
 load-bearing choices; delete done items (per the
 [delete-done feedback memory](file:///home/peter/.claude/projects/-home-peter/memory/feedback_todos_delete_done.md)).
 
+## Astrocam orientation lock — near-pole outward (2026-07-02)
+
+Program: solve orientation where distortion is ~zero, then work outward.
+Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
+(see memory `project-astrocam-wcs-2026-07-01`). Steps:
+
+- [x] **Near-pole local solution.** Pole + scale + roll from Kochab+Pherkad
+      (2-star similarity fit, resid 4px). Pole (1177,510)bin, scale
+      0.0419 deg/binpx, roll −149.5°. Camera had MOVED ~20° from the stale
+      prior; edge-arc pole was distortion-biased ~3°.
+- [ ] **Refine roll from the near-pole trio** (Yildun/2UMi/HD66368 region,
+      ~3.4° out, ~120° apart, mag 4.3–5.2) — a 120° baseline pins roll far
+      tighter than the 8° Kochab–Pherkad pair. Polaris currently lands
+      "not quite" right → trio fit should fix it.
+- [ ] **Pull faintest stars** using the solved WCS; **estimate magnitudes**
+      (calibrate flux against the identified Kochab/Pherkad/UMi stars).
+- [ ] **Work outward, fit the plate** — extend from near-pole to the full
+      frame, fitting distortion (k1/k2) as radius grows. Ties into
+      "Barrel-distortion correction" below.
+- [ ] **Write solved WCS into `astrocam/camera.json`** (pole, plate_scale)
+      once confirmed on a clean night with a wide anchor — currently a
+      manual result only.
+- [ ] **Deliverables** — full "final" astrocam derot/orientation products;
+      then **backfill** and **archive to Glacier**.
+
 ## Now
 
 - [ ] **NEXT BIG: eclipticam-moon orientation lock.** Lock camera pointing
@@ -160,12 +185,27 @@ Cross-cutting:
 
 ## Pipeline foundations
 
+- [ ] **Bin vs interp (demosaic) — resolve per PSF.** Decided 2026-07-02:
+      NEVER geometrically transform the raw Bayer mosaic (cross-channel
+      interpolation → colour moiré). Choose bin vs demosaic by the PSF
+      (matched filter): bin TO the resolution the PSF actually supports —
+      seeing/atmospherics-limited — don't interp beyond what we can resolve.
+      astrocam PSF is near-point (Polaris ~1.4px, undersampled → bin-friendly);
+      v3w cross-trail ~2.5px full-res; the open question per camera is
+      bin depth = PSF FWHM (both bin and demosaic avoid moiré).
+      detrans already binned
+      via fraction-of-width v. Revisit for the final astrocam res choice.
 - [ ] **Barrel-distortion correction** as a published `bin/undistort-frame`
       step before derot for the whole-frame deliverable. `bin/fit-k1`
       already sweeps k1 and scores derot peakiness; productionise.
-- [ ] **Hot-pixel mask v2** from the derot stack — real stars are
-      points, hot pixels trace arcs. More selective than thresholding
-      the raw sum.
+- [ ] **Hot-pixel mask v2.** Two independent tests, both from 2026-07-02
+      near-pole work (automated star-finding kept returning hot pixels):
+      (1) **single-channel test** — a real star is coherent across ALL
+      Bayer channels (R,G,G,B) at the same sub-pixel; a hot pixel is a
+      SINGLE-pixel spike in ONE channel only. Flag any source bright in
+      one of R/G/B but absent in the others. (2) **motion test** from the
+      derot/max stack — real stars trace arcs, hot pixels stay pixel-fixed.
+      More selective than thresholding the raw sum.
 - [ ] **Dark master per (sensor, gain, exposure)** — capture procedure
       + apply step. Hook into `astro.process.badpix` or a new
       `astro.process.dark`.
