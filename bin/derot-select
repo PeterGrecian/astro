@@ -149,7 +149,17 @@ def main():
     lo, hi = np.percentile(flat, 40), np.percentile(flat, 99.7)
     u8 = np.clip((flat - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
     cv2.imwrite(str(args.out / "derot.jpg"), u8)
-    print(f"wrote {args.out}/derot.{{fits.fz,jpg}} + derot-scores.csv")
+
+    # sensitivity summary for summary.json's derot block (limiting_mag is
+    # filled by the plate-solve/anchor step; n_sources is the yardstick).
+    import json
+    info = {"pole_xy": [args.pole_x, args.pole_y],
+            "n_sources": int(nsrc), "best_window_frames": int(wlen),
+            "best_start_frame": int(start),
+            "k1": args.k1 or None, "k2": args.k2 or None}
+    (args.out / "derot-info.json").write_text(json.dumps(info, indent=2))
+    print(f"wrote {args.out}/derot.{{fits.fz,jpg}} + derot-scores.csv "
+          "+ derot-info.json")
     return 0
 
 

@@ -12,8 +12,14 @@ summary.yaml, which stays untouched until Phase 4):
   "first_frame_utc": "...", "last_frame_utc": "...",
   "hours": [{"hh": "23", "n_frames": 360, "mean_brightness": 31.2}, ...],
   "badpix": {"n_hot": ..., "n_cold": ..., "bad_pct": ...},
-  "derot": {"pole_xy": [x, y], "pole_source": "prior|fit",
-            "window_utc": [start, end], "n_frames": N} | null,
+  "derot": {"pole_xy": [x, y], "pole_source": "prior|fit|solved",
+            "window_utc": [start, end], "n_frames": N,
+            # sensitivity yardstick (from derot-select / plate solve):
+            "n_sources": N,          # registered point sources in the stack
+            "limiting_mag": V,       # ~limiting V mag (anchored, e.g. Polaris)
+            "best_window_frames": N, # winning interval length
+            "k1": k1, "k2": k2       # fitted distortion (null if unfitted)
+            } | null,
   "outputs": {"max_jpg": "max.jpg", "derot_jpg": "derot.jpg",
               "brightness_png": "brightness.png", ...}
 }
