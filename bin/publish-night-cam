@@ -218,6 +218,19 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     fi
   fi  # end render block (skipped when WEB_ONLY: reuse existing sweep mp4s)
 
+    # --- moon crops: extract the moon from the night's frames into
+    # <night_dir>/moon/*.jpg (EXIF-tagged, only in-FOV frames). Self-
+    # contained (bin/moon-extract); night-mode only; self-skips a camera
+    # with no pointing defaults. Runs outside the render block so it also
+    # produces on WEB_ONLY re-runs. Gets swept to S3 by the publish step
+    # below. The cumulative moon-net.png render is redrawn+published on its
+    # own cadence (moon-overlay --publish), not here. See
+    # design/moon-daily-delivery.md.
+    echo "--- moon-extract"
+    "$PY" "$HERE/moon-extract" --camera "$CAMERA" --night "$NIGHT" \
+        --mode night --out "${night_dir}/moon" \
+        || echo "moon-extract produced nothing; continuing"
+
     # Per-video poster thumbnails: the middle frame of EACH sweep, so the
     # website previews each clip with a frame from itself (not a shared
     # colour-sweep thumb). poster-<name>.jpg next to <name>.mp4. The

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# moon-deliver — the nightly moon deliverable for a camera/night.
+#
+# Self-contained so it can be called from publish-night-cam (one line) OR
+# run standalone / from a timer. Does NOT touch the rest of the pipeline.
+#
+#   1. moon-extract : crop the moon from the night's frames -> EXIF-tagged
+#      JPEGs under <night_dir>/moon/  (only in-FOV frames; skips the rest).
+#   2. moon-overlay --publish : redraw moon-net.png (cumulative net on the
+#      most-recent max-stack) and upload to s3://<bucket>/<camera>/moon-net.png
+#
+# Crop *delivery* form (montage / mp4 / tarball) is TBD — see
+# design/moon-daily-delivery.md. For now we produce the crops locally and
+# publish the cumulative render; add crop upload once the form is chosen.
+#
+# Usage:
+#   moon-deliver --camera eclipticam-v3w --night 2026-06-30
+#   moon-deliver --camera eclipticam-v3w --night 2026-06-30 --no-publish
+#   moon-deliver --camera eclipticam-v3w --night 2026-06-30 --mode day
+set -euo pipefail
+
+CAMERA=""; NIGHT=""; MODE="night"; NO_PUBLISH=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --camera)     CAMERA="$2";   shift 2;;
+        --night)      NIGHT="$2";    shift 2;;
+        --mode)       MODE="$2";     shift 2;;
+        --no-publish) NO_PUBLISH=1;  shift;;
+        *) echo "moon-deliver: unknown arg $1" >&2; exit 2;;
+    esac
+done
+[[ -n "$CAMERA" && -n "$NIGHT" ]] || {
+    echo "usage: moon-deliver --camera <cam> --night YYYY-MM-DD [--mode night|day] [--no-publish]" >&2
+    exit 2; }
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+PY="${ASTRO_VENV_PY:-$REPO/.venv/bin/python}"
+
+echo "=== moon-deliver ${CAMERA} ${NIGHT} (${MODE}) ==="
+
+# Locate the night dir from config (same resolution publish-night-cam uses).
+night_dir="$("$PY" - "$CAMERA" "$NIGHT" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[0]))
+from astro.config import CameraConfig
+cam, night = sys.argv[1], sys.argv[2]
+cfg = CameraConfig.load(cam)
+subcam = cam.rsplit("-", 1)[-1]
+print(cfg.frames_root / "night" / night)
+PY
+)"
+moon_dir="${night_dir}/moon"
+
+# --- 1. extract the moon crops ---------------------------------------
+echo "--- moon-extract"
+if ! "$PY" "$HERE/moon-extract" --camera "$CAMERA" --night "$NIGHT" \
+        --mode "$MODE" --out "$moon_dir"; then
+    echo "moon-extract produced nothing for ${CAMERA} ${NIGHT}; "\
+"continuing to render (the net may still have older threads)"
+fi
+
+# --- 2. redraw + publish the cumulative moon-net render ---------------
+echo "--- moon-overlay"
+overlay_args=(--camera "$CAMERA" --extend)
+[[ "$NO_PUBLISH" -eq 0 ]] && overlay_args+=(--publish)
+"$PY" "$HERE/moon-overlay" "${overlay_args[@]}" || \
+    echo "moon-overlay skipped (no backdrop / no threads)"
+
+echo "=== moon-deliver done: crops in ${moon_dir} ==="
