@@ -198,6 +198,11 @@ def main():
         # legacy percam tree: <root>/night/<night>/v3w/HH/*.fits.fz
         base = cfg.frames_root / "night" / args.night / "v3w"
         fs = glob.glob(str(base / "*" / "*.fits.fz"))
+    # Keep only timestamp-named frames (basename before the first "." is
+    # all digits, an epoch_ms). Older nights carry squash derivatives
+    # (max/min/sum.fits.fz under a "00b"-style derivative dir) that also
+    # match the glob; epoch_ms("max.fits.fz") would raise ValueError.
+    fs = [p for p in fs if Path(p).name.split(".")[0].isdigit()]
     if not fs:
         sys.stderr.write("no frames found\n")
         return 2
