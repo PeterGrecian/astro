@@ -7,6 +7,26 @@ Live work list. Move items to DECISIONS.md once they crystallise into
 load-bearing choices; delete done items (per the
 [delete-done feedback memory](file:///home/peter/.claude/projects/-home-peter/memory/feedback_todos_delete_done.md)).
 
+## Pipeline: derot + sensitivity (branch pipeline-derot-sensitivity, 2026-07-02)
+
+Banked this session (branch `pipeline-derot-sensitivity`, needs merge + a
+production night test):
+- [x] **Hot-pixel single-channel detect** — `astro.process.badpix.
+  single_channel_hot()` (raw-mosaic spike, the tiny-tetris ones), OR'd into
+  `nightly-cam`'s badpixel.fits. `derot_stack` already applies the mask.
+- [x] **`bin/derot-select`** — sweeps derot windows, scores by registered
+  source count, emits best as derot.{fits.fz,jpg} + derot-scores.csv +
+  derot-info.json. Validated (454-495 sources/20-frame window).
+- [x] **summary.json derot block** — n_sources/limiting_mag/best_window/k1/k2
+  documented; derot-select emits derot-info.json to populate it.
+- [ ] **WIRE IN**: publish-night-cam currently runs nightly-cam --no-derot.
+  Replace with: fit-pole per night (or use solved pole) → derot-select →
+  fold derot-info.json into summary. Needs a reliable per-night pole (the
+  camera moved; pole_prior is stale — see solved WCS below). Then publish
+  derot.jpg as a deliverable. TEST on a production night before merge.
+- [ ] k1/k2 remap path in derot-select is slow (full per-frame remap);
+  optimise (precompute combined map) before enabling for full nights.
+
 ## Astrocam orientation lock — near-pole outward (2026-07-02)
 
 Program: solve orientation where distortion is ~zero, then work outward.
