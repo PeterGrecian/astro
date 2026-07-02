@@ -80,6 +80,21 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
       field → plate solve. `pipeline-night` (legacy-delete list, DECISIONS
       2026-06-16) is the working reference. Hot-mask:
       `muppet:~/tmp/psf-work/hotmask-fullres.npy`.
+- [~] **Sensitivity / completeness stats** (STARTED 2026-07-02, working).
+      Frequency-vs-magnitude on the plate-solved frame-center 6-min window:
+      solve-field's source extractor (`.axy`) gives 932 detections with FLUX
+      → instrumental mag. **log-N vs mag is a clean completeness curve: rises
+      ~Euclidean then TURNS OVER at +5.0 mag below the brightest** (peak 214/
+      bin → cliff to 1). So this window reaches ~5 mag dynamic range to the
+      detection limit, ~6.3 to the faintest. This is the reusable YARDSTICK —
+      turnover rises as we improve (longer windows, distortion corr, deeper).
+      Script: pip `~/tmp/psf-splay/` (loglogN from .axy FLUX; completeness2.py
+      for the catalog version). Plot: `~/tmp/psf-splay/loglogN.png`.
+      TODO to get ABSOLUTE V-mag: cross-match to Tycho-2 for zero-point.
+      BLOCKER: the solved field is 40° NEAR-POLE — Vizier cone search
+      misbehaves (row-cap returns global stars; 0 matches even for the .corr
+      index stars). FIX: use a smaller OFF-pole patch, or a proper Vizier
+      box/epoch query. astroquery now installed in the venv.
 - [ ] **Pull faintest stars** using the solved WCS; **estimate magnitudes**
       (calibrate flux against the identified Kochab/Pherkad/UMi stars).
 - [ ] **Work outward, fit the plate** — extend from near-pole to the full
