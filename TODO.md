@@ -85,16 +85,19 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
       solve-field's source extractor (`.axy`) gives 932 detections with FLUX
       → instrumental mag. **log-N vs mag is a clean completeness curve: rises
       ~Euclidean then TURNS OVER at +5.0 mag below the brightest** (peak 214/
-      bin → cliff to 1). So this window reaches ~5 mag dynamic range to the
-      detection limit, ~6.3 to the faintest. This is the reusable YARDSTICK —
-      turnover rises as we improve (longer windows, distortion corr, deeper).
-      Script: pip `~/tmp/psf-splay/` (loglogN from .axy FLUX; completeness2.py
-      for the catalog version). Plot: `~/tmp/psf-splay/loglogN.png`.
-      TODO to get ABSOLUTE V-mag: cross-match to Tycho-2 for zero-point.
-      BLOCKER: the solved field is 40° NEAR-POLE — Vizier cone search
-      misbehaves (row-cap returns global stars; 0 matches even for the .corr
-      index stars). FIX: use a smaller OFF-pole patch, or a proper Vizier
-      box/epoch query. astroquery now installed in the venv.
+      bin → cliff to 1). ANCHORED: the brightest detection IS Polaris
+      (flux 6138, pole-dist 0.8°, V=1.98) — so +5 mag → **limiting mag
+      V≈6.8-7.0 (naked-eye), faintest detection V≈8.3**. A 6-min window
+      reaches ~V7. Reusable YARDSTICK — turnover rises as we improve (longer
+      windows, distortion corr, deeper).
+      Caveat: Polaris may be slightly saturated (brightest; ratio to 2nd
+      only 1.17 → probably OK) → ±0.3 mag on absolute ZP; verify with an
+      unsaturated calibrator. RELATIVE +5 mag depth is solid.
+      Scripts: pip `~/tmp/psf-splay/` (loglogN from .axy FLUX; Polaris anchor
+      inline). Plot: `~/tmp/psf-splay/loglogN.png`.
+      Absolute-via-catalog (Tycho-2 ZP) BLOCKED: 40° near-pole field breaks
+      Vizier cone search (row-cap → global stars). FIX: off-pole patch.
+      astroquery installed. (Polaris anchor sidesteps this for now.)
 - [ ] **Pull faintest stars** using the solved WCS; **estimate magnitudes**
       (calibrate flux against the identified Kochab/Pherkad/UMi stars).
 - [ ] **Work outward, fit the plate** — extend from near-pole to the full
