@@ -22,6 +22,12 @@ WINDOW_MIN=10; STEP_MIN=1; FPS=60
 # --force") — only the mp4 re-encode + web version are redone. ~2x faster.
 REUSE_FRAMES=0
 AUTO_START_STOPS=12; AUTO_END_STOPS=13
+# detrans render resolution: n×n sum-bin of the (now full-res 4608×2592)
+# capture. Full res is ~4h/night on the Pi and shows undistort moiré on
+# uniform sky; 2×2 is ~4× faster (~1h/night), high-res, and cleaner. The
+# detrans velocity scales automatically with resolution (fraction-of-width),
+# so this is purely a speed/quality knob. Override with DETRANS_BIN env.
+DETRANS_BIN="${DETRANS_BIN:-2}"
 
 # Sweep parallelism. Each window-stack worker holds a full-res frame stack
 # resident (~tens of MB), so the safe job count is bounded by RAM, not just
@@ -187,7 +193,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     if "$PY" "$HERE/detrans-sweep" \
             --camera "$CAMERA" --night "$NIGHT" --mode max \
             --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" \
-            --fps "$FPS" \
+            --bin "$DETRANS_BIN" --fps "$FPS" \
             --out "${night_dir}/sweep-detrans.mp4"; then
         [[ -s "${night_dir}/sweep-detrans.mp4" ]] \
             && echo "wrote ${night_dir}/sweep-detrans.mp4"
@@ -209,7 +215,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     elif "$PY" "$HERE/detrans-sweep" \
             --camera "$CAMERA" --night "$NIGHT" --mode deep \
             --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" \
-            --fps "$FPS" \
+            --bin "$DETRANS_BIN" --fps "$FPS" \
             --out "${night_dir}/sweep-detrans-deep.mp4"; then
         [[ -s "${night_dir}/sweep-detrans-deep.mp4" ]] \
             && echo "wrote ${night_dir}/sweep-detrans-deep.mp4"
