@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""sensitivity-plot — frequency-vs-magnitude completeness graph, a per-night
+sensitivity deliverable with named stars annotated.
+
+Takes a plate-solved field (astrometry.net .axy detections + .wcs + .corr
+matched catalog stars). Builds the log-N vs magnitude histogram, anchors the
+zero-point on the brightest identified star, marks the turnover (limiting
+magnitude), and points out named bright stars at their catalog magnitudes.
+
+The completeness turnover IS the sensitivity: it rises as the pipeline
+improves (longer windows, distortion correction, deeper stacks), so this
+graph is the yardstick, published per night.
+
+Usage
+-----
+    sensitivity-plot --solve-base <dir>/solve-window --out sensitivity.png
+        [--anchor-name Polaris --anchor-mag 1.98]
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS
+from astropy.coordinates import SkyCoord
+import astropy.units as u
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# Bright stars near the N celestial pole (name, RA_deg, Dec_deg, V). Used to
+# label detections by position. Extend as needed.
+NAMED = [
+    ("Polaris", 37.954, 89.264, 1.98),
+    ("Kochab", 222.676, 74.156, 2.07),
+    ("Pherkad", 230.182, 71.834, 3.00),
+    ("Yildun", 263.054, 86.586, 4.36),
+    ("Vega", 279.234, 38.784, 0.03),
+    ("Deneb", 310.358, 45.280, 1.25),
+    ("Capella", 79.172, 45.998, 0.08),
+    ("Mirfak", 51.081, 49.861, 1.79),
+]
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--solve-base", required=True,
+                    help="path prefix of solve products (.axy/.new/.wcs)")
+    ap.add_argument("--anchor-name", default=None,
+                    help="named star to anchor the zero-point (default: "
+                         "brightest detection that matches a NAMED star)")
+    ap.add_argument("--anchor-mag", type=float, default=None)
+    ap.add_argument("--title", default="astrocam sensitivity")
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    base = args.solve_base
+    wcs = WCS(fits.open(base + ".new")[0].header)
+    axy = fits.open(base + ".axy")[1].data
+    flux = np.asarray(axy["FLUX"], float)
+    ra, dec = wcs.all_pix2world(axy["X"], axy["Y"], 1)
+    det = SkyCoord(ra * u.deg, dec * u.deg)
+    inst = -2.5 * np.log10(flux)
+    print(f"{len(flux)} detections")
+
+    # match detections to the NAMED bright stars (for labels + anchor)
+    names = SkyCoord([n[1] for n in NAMED] * u.deg,
+                     [n[2] for n in NAMED] * u.deg)
+    idx, sep, _ = names.match_to_catalog_sky(det)
+    labelled = []  # (name, V, det_flux, det_inst)
+    for (nm, _, _, V), di, s in zip(NAMED, idx, sep):
+        if s < 5 * u.arcmin:
+            labelled.append((nm, V, flux[di], inst[di]))
+            print(f"  found {nm} (V={V}) flux={flux[di]:.0f}")
+
+    # zero-point: real = inst + ZP. Anchor on the chosen / brightest named.
+    if args.anchor_name and args.anchor_mag is not None:
+        anch = [l for l in labelled if l[0] == args.anchor_name]
+        if not anch:
+            print(f"anchor {args.anchor_name} not found in field",
+                  file=sys.stderr)
+            return 1
+        ZP = args.anchor_mag - anch[0][3]
+        anch_name, anch_V = args.anchor_name, args.anchor_mag
+    elif labelled:
+        # brightest named star anchors; ZP from all labelled (robust median)
+        ZP = np.median([V - i for (_, V, _, i) in labelled])
+        b = min(labelled, key=lambda l: l[1])
+        anch_name, anch_V = b[0], b[1]
+    else:
+        print("no named star in field; cannot anchor absolute mag",
+              file=sys.stderr)
+        return 1
+    realmag = inst + ZP
+    print(f"ZP={ZP:.2f} (anchored on {anch_name} V={anch_V})")
+
+    # histogram + turnover
+    bins = np.arange(np.floor(realmag.min()), realmag.max() + 0.5, 0.5)
+    bc = 0.5 * (bins[:-1] + bins[1:])
+    h, _ = np.histogram(realmag, bins=bins)
+    turnover = bc[np.argmax(h)]
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    ax.step(bc, np.maximum(h, 0.1), where="mid", lw=2, color="#007AFF")
+    ax.set_yscale("log", base=2)
+    ax.axvline(turnover, ls="--", color="#FF3B30")
+    ax.text(turnover + 0.1, h.max(), f"limit V≈{turnover:.1f}",
+            color="#FF3B30", fontweight="bold")
+    # annotate named stars at their magnitudes
+    for nm, V, _, i in sorted(labelled, key=lambda l: l[1]):
+        ax.axvline(V, ls=":", color="#8E8E93", alpha=0.7)
+        ax.annotate(nm, xy=(V, 1), xytext=(V, 0.3), ha="center",
+                    fontsize=8, color="#333",
+                    arrowprops=dict(arrowstyle="-", color="#8E8E93", lw=0.6))
+    ax.set_xlabel("V magnitude")
+    ax.set_ylabel("N detected / 0.5 mag")
+    ax.set_title(f"{args.title} — limiting V≈{turnover:.1f}, "
+                 f"faintest V≈{realmag.max():.1f}  ({len(flux)} stars)")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(args.out, dpi=110)
+    print(f"wrote {args.out}: limiting V≈{turnover:.1f}, "
+          f"faintest V≈{realmag.max():.1f}")
+
+    # machine-readable sidecar for summary.json
+    import json
+    args.out.with_suffix(".json").write_text(json.dumps({
+        "limiting_mag": round(float(turnover), 2),
+        "faintest_mag": round(float(realmag.max()), 2),
+        "n_detections": int(len(flux)),
+        "zero_point": round(float(ZP), 3),
+        "anchor": anch_name,
+        "named_stars": {nm: V for nm, V, _, _ in labelled},
+    }, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
