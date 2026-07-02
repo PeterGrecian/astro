@@ -70,8 +70,34 @@ CROP_FRAC = {
 }
 
 
+# Frames come in two on-disk naming schemes:
+#   - newer eclipticam capture: <epoch_ms>.fits.fz (13-digit UTC ms)
+#   - older nights (muppet):    HH/NNNN.fits.fz (per-hour sequential index),
+#     with the real time only in the FITS DATE-OBS header.
+# Windowing needs the true capture time, so resolve it from the filename when
+# it's a plausible epoch_ms, else from DATE-OBS. Cache so we read each header
+# at most once (the sort key + ts build would otherwise open it repeatedly).
+_EPOCH_MS_MIN = 1_000_000_000_000   # ~2001-09; anything smaller is an index
+_epoch_cache: dict = {}
+
+
 def epoch_ms(p):
-    return int(Path(p).name.split(".")[0])
+    key = str(p)
+    if key in _epoch_cache:
+        return _epoch_cache[key]
+    stem = Path(p).name.split(".")[0]
+    if stem.isdigit() and int(stem) >= _EPOCH_MS_MIN:
+        ms = int(stem)
+    else:
+        # Fall back to the FITS header timestamp (DATE-OBS, ISO-8601 UTC).
+        from datetime import datetime
+        hdr = fits.open(p)[1].header
+        iso = hdr.get("DATE-OBS") or hdr.get("DATE")
+        if not iso:
+            raise ValueError(f"{p}: no epoch_ms filename and no DATE-OBS header")
+        ms = int(datetime.fromisoformat(iso).timestamp() * 1000)
+    _epoch_cache[key] = ms
+    return ms
 
 
 def load_bin(p, n=1):
@@ -195,14 +221,13 @@ def main():
     if args.frames_glob:
         fs = glob.glob(args.frames_glob)
     else:
-        # legacy percam tree: <root>/night/<night>/v3w/HH/*.fits.fz
+        # legacy percam tree: <root>/night/<night>/v3w/HH/*.fits.fz.
+        # Restrict to purely-numeric hour dirs: older nights carry squash
+        # derivatives under a "00b"-style dir (holding max/min/sum.fits.fz),
+        # which are NOT capture frames and must be excluded from the window.
         base = cfg.frames_root / "night" / args.night / "v3w"
-        fs = glob.glob(str(base / "*" / "*.fits.fz"))
-    # Keep only timestamp-named frames (basename before the first "." is
-    # all digits, an epoch_ms). Older nights carry squash derivatives
-    # (max/min/sum.fits.fz under a "00b"-style derivative dir) that also
-    # match the glob; epoch_ms("max.fits.fz") would raise ValueError.
-    fs = [p for p in fs if Path(p).name.split(".")[0].isdigit()]
+        fs = [p for p in glob.glob(str(base / "*" / "*.fits.fz"))
+              if Path(p).parent.name.isdigit()]
     if not fs:
         sys.stderr.write("no frames found\n")
         return 2
