@@ -41,10 +41,18 @@ from astropy.io import fits
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 
-# eclipticam-v3w calibration (binned 1152x648) — fallback defaults;
-# the real values are read from camera.json (distortion + detrans blocks).
+# eclipticam-v3w calibration — fallback defaults; the real values are
+# read from camera.json (distortion + detrans blocks).
+#
+# Detrans velocity is stored resolution-INDEPENDENTLY as a fraction of
+# image WIDTH per second, so it survives capture-resolution changes (the
+# night daemon went 2304x1296 binned -> 4608x2592 full-res on 2026-06-22).
+# At runtime it is scaled to whatever width the working frame is at:
+#   v_px_per_s = v_frac_per_s * W.
+# The original fit was v=0.040 px/s on the binned 1152-wide geometry, i.e.
+# 0.040 / 1152 = 3.4722e-5 of the width per second.
 K1, K2 = -0.636, 0.311
-V_PXS = 0.040
+V_FRAC_PS = 0.040 / 1152.0        # fraction of image width per second
 V_ANGLE_DEG = 7.8
 
 # Crop fractions to trim the barrel-undistort black border, per edge
@@ -66,23 +74,18 @@ def epoch_ms(p):
     return int(Path(p).name.split(".")[0])
 
 
-# Calibration basis: distortion (k1,k2) and detrans v were both fit on
-# the 1152x648 binned geometry. Frames MUST be reduced to this before
-# undistort/detrans or v (px/s) comes out at the wrong scale.
-CAL_W = 1152
+def load_bin(p, n=1):
+    """Load a v3w frame and optionally n×n sum-bin it.
 
-def load_bin(p):
-    """Load a v3w frame and sum-bin to the 1152x648 calibration geometry.
-
-    The night daemon's capture resolution changed on 2026-06-22 from
-    2304x1296 (binned) to 4608x2592 (full-res native). A fixed 2x2 bin
-    would land full-res on 2304x1296 — twice the linear scale v/k1/k2
-    were fit for, so detrans would UNDER-translate (shift by half the
-    needed distance). Bin by whatever integer factor brings the frame to
-    the 1152-wide basis: 2x for legacy binned nights, 4x for full-res."""
+    n=1 keeps full resolution (the default — we want the detail). n>1
+    bins for speed/SNR. Resolution no longer needs to match any fixed
+    calibration geometry: distortion rho is normalised (scale-invariant)
+    and detrans v is a fraction of image width (scaled to W at runtime),
+    so both survive the 2026-06-22 full-res switch and any binning."""
     d = fits.open(p)[1].data.astype(np.float32)
+    if n <= 1:
+        return d
     H, W = d.shape
-    n = max(1, round(W / CAL_W))            # 2 for 2304-wide, 4 for 4608-wide
     H, W = H // n * n, W // n * n
     d = d[:H, :W]
     return d.reshape(H // n, n, W // n, n).sum(axis=(1, 3))
@@ -141,11 +144,18 @@ def main():
                          "pulls the faintest stars (linear p13-p97.4 "
                          "stretch matching splay).")
     ap.add_argument("--v", type=float, default=None,
-                    help="px/sec (default: camera.json detrans.v_px_per_s)")
+                    help="detrans velocity as FRACTION of image width per "
+                         "second (default: camera.json detrans.v_frac_per_s)")
+    ap.add_argument("--v-px", type=float, default=None,
+                    help="detrans velocity in px/sec at the WORKING "
+                         "resolution — dev override; bypasses fraction scaling")
     ap.add_argument("--angle", type=float, default=None,
                     help="deg (default: camera.json detrans.angle_deg)")
     ap.add_argument("--k1", type=float, default=None)
     ap.add_argument("--k2", type=float, default=None)
+    ap.add_argument("--bin", type=int, default=1,
+                    help="n×n sum-bin factor (1=full res, default). Larger "
+                         "is faster/higher-SNR; v scales automatically.")
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--max-windows", type=int, default=None,
                     help="process only the first N output frames (slice)")
@@ -161,17 +171,26 @@ def main():
     # call this unconditionally.
     detr = cfg.get("detrans") or {}
     dist = cfg.get("distortion") or {}
-    if not detr and args.v is None:
+    if not detr and args.v is None and args.v_px is None:
         sys.stderr.write(f"{args.camera} has no `detrans` block in "
-                         "camera.json and no --v given; skipping "
+                         "camera.json and no --v/--v-px given; skipping "
                          "(not a detrans camera)\n")
         return 0
-    v = args.v if args.v is not None else detr.get("v_px_per_s", V_PXS)
+    # Detrans velocity as a fraction of image width per second. Prefer the
+    # resolution-independent config key; fall back to the legacy px/s key
+    # (which was fit on the binned 1152-wide geometry) divided by 1152.
+    if args.v is not None:
+        v_frac = args.v
+    elif "v_frac_per_s" in detr:
+        v_frac = detr["v_frac_per_s"]
+    elif "v_px_per_s" in detr:
+        v_frac = detr["v_px_per_s"] / 1152.0     # legacy: fit at 1152-wide
+    else:
+        v_frac = V_FRAC_PS
     angle = args.angle if args.angle is not None \
         else detr.get("angle_deg", V_ANGLE_DEG)
     k1 = args.k1 if args.k1 is not None else dist.get("k1", K1)
     k2 = args.k2 if args.k2 is not None else dist.get("k2", K2)
-    print(f"calibration: v={v} px/s @ {angle}deg, k1={k1} k2={k2}")
 
     if args.frames_glob:
         fs = glob.glob(args.frames_glob)
@@ -199,10 +218,17 @@ def main():
           f"(window {args.window_min}min, step {args.step_min}min)")
 
     # peek one frame for geometry + map
-    H, W = load_bin(fs[0]).shape
+    H, W = load_bin(fs[0], args.bin).shape
     mapx, mapy = undistort_map(H, W, k1, k2)
     a = np.radians(angle)
     dv = np.array([np.cos(a), np.sin(a)])
+
+    # Resolve detrans velocity to px/s at THIS working resolution. --v-px
+    # is an explicit px/s override at the working res (dev use); otherwise
+    # scale the width-fraction by the actual frame width.
+    v = args.v_px if args.v_px is not None else v_frac * W
+    print(f"calibration: v={v:.4f} px/s ({v_frac*1e5:.4f}e-5 width/s) "
+          f"@ {angle}deg, k1={k1} k2={k2}, {W}x{H} (bin {args.bin})")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     # mode-specific scratch so max + deep runs don't collide
@@ -223,7 +249,7 @@ def main():
 
     def get_und(i):
         if i not in cache:
-            cache[i] = cv2.remap(load_bin(fs[i]), mapx, mapy,
+            cache[i] = cv2.remap(load_bin(fs[i], args.bin), mapx, mapy,
                                  cv2.INTER_LINEAR)
         return cache[i]
 
