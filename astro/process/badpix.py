@@ -33,6 +33,30 @@ def compute_bad_pixel_mask(min_img, max_img,
     return hot, cold, sky_med, sky_sigma, hot_thr, cold_thr
 
 
+def single_channel_hot(mosaic, excess=300.0, bg_excess=300.0):
+    """Detect hot pixels as single-photosite spikes on the RAW BAYER MOSAIC.
+
+    A real star is coherent across all Bayer channels; a hot pixel is a lone
+    spike in ONE channel, far above its SAME-COLOUR neighbours (Bayer 2-step).
+    Detecting here — BEFORE demosaic — is clean: each hot pixel is one bright
+    photosite. After demosaic they bloom into shape artefacts (green→diagonal,
+    R/B→L/plus, the "tiny tetris") that are hard to separate from real
+    features, so mask on the mosaic and the bloom never happens.
+
+    `mosaic` is a 2D raw Bayer frame (or a per-pixel median/mean of several
+    dark frames — hot pixels persist). Returns a bool mask (True = hot).
+    Complements compute_bad_pixel_mask()'s min-over-night method; OR them.
+    """
+    a = mosaic.astype(np.float32)
+    # max over the 8 same-colour neighbours (Bayer period = 2 px)
+    nbr = np.zeros_like(a)
+    for dy, dx in ((-2, 0), (2, 0), (0, -2), (0, 2),
+                   (-2, -2), (2, 2), (-2, 2), (2, -2)):
+        nbr = np.maximum(nbr, np.roll(np.roll(a, dy, 0), dx, 1))
+    bg = float(np.median(a))
+    return (a - nbr > excess) & (a - bg > bg_excess)
+
+
 def write_bad_mask(hot, cold, sky_med, sky_sigma, hot_thr, cold_thr,
                    n_frames, path):
     """Write a uint8 image where 0 = good, 1 = hot, 2 = cold."""

@@ -373,9 +373,17 @@ def main() -> int:
 
     hot, cold, sky_med, sky_sigma, hot_thr, cold_thr = \
         compute_bad_pixel_mask(min_img, max_img)
+    # Also catch single-photosite spikes on the raw mosaic (the "tiny tetris"
+    # hot pixels — a lone spike in one Bayer channel, coherent stars aren't).
+    # OR into the min/max-based hot mask; more selective, catches ones the
+    # min method misses. See astro.process.badpix.single_channel_hot.
+    from astro.process.badpix import single_channel_hot
+    sc_hot = single_channel_hot(min_img)
+    hot = hot | sc_hot
     write_bad_mask(hot, cold, sky_med, sky_sigma, hot_thr, cold_thr,
                    len(stacked), out_dir / f"{stem}badpixel.fits")
     badpix_info = {"n_hot": int(hot.sum()), "n_cold": int(cold.sum()),
+                   "n_hot_single_chan": int(sc_hot.sum()),
                    "bad_pct": round(100.0 * float(hot.sum() + cold.sum())
                                     / hot.size, 4)}
     print(f"badpix: hot={badpix_info['n_hot']} cold={badpix_info['n_cold']}")
