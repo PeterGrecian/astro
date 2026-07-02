@@ -17,8 +17,14 @@ production night test):
 - [x] **`bin/derot-select`** — sweeps derot windows, scores by registered
   source count, emits best as derot.{fits.fz,jpg} + derot-scores.csv +
   derot-info.json. Validated (454-495 sources/20-frame window).
+- [x] **`bin/sensitivity-plot`** — frequency-vs-magnitude GRAPH deliverable
+  (not just summary numbers). Plate-solved field → log-N vs V mag, absolute
+  axis anchored on brightest named star, TURNOVER (limiting mag) marked,
+  NAMED stars annotated at their catalog mags. Emits sensitivity.png +
+  sensitivity.json. Validated: astrocam 2026-07-01 found Polaris+Yildun,
+  limiting V≈6.8, faintest V≈8.3, 932 stars.
 - [x] **summary.json derot block** — n_sources/limiting_mag/best_window/k1/k2
-  documented; derot-select emits derot-info.json to populate it.
+  documented; derot-select + sensitivity-plot emit JSON sidecars to populate.
 - [ ] **WIRE IN**: publish-night-cam currently runs nightly-cam --no-derot.
   Replace with: fit-pole per night (or use solved pole) → derot-select →
   fold derot-info.json into summary. Needs a reliable per-night pole (the
