@@ -23,6 +23,11 @@ production night test):
   NAMED stars annotated at their catalog mags. Emits sensitivity.png +
   sensitivity.json. Validated: astrocam 2026-07-01 found Polaris+Yildun,
   limiting V≈6.8, faintest V≈8.3, 932 stars.
+  - [ ] ENHANCE: overlay the CATALOG line (Tycho-2 expected counts in the
+    field) alongside detected → completeness reads as detected/catalog
+    directly, and the gap past the turnover shows where we start missing
+    stars. Needs the Vizier query working (pairs with the off-pole-patch
+    fix in the Sensitivity item below — do them together).
 - [x] **summary.json derot block** — n_sources/limiting_mag/best_window/k1/k2
   documented; derot-select + sensitivity-plot emit JSON sidecars to populate.
 - [ ] **WIRE IN**: publish-night-cam currently runs nightly-cam --no-derot.
