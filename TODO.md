@@ -34,13 +34,22 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
       Invoke: `pipeline-night <night-dir> --pole-x 1171 --pole-y 506`
       (BINNED-px seed — starcam's own pole_prior is [910,40] binned, note
       warns "NOT full-res pixels", exactly the trap below).
-      CRITICAL: the pipeline works in **2×2-binned coords**. My error was
-      hand-rolling a full-res demosaic derot with a ×2 pole (2342,1012):
-      concentric arcs, a star 1hr apart missed by 675px. MY setup error, not
-      the method. For plate-solve resolution, port the *converged* geometry
-      to a demosaiced full-res derot afterward. `pipeline-night` is on the
-      legacy-delete list (DECISIONS 2026-06-16) but is the working reference
-      — follow it or port its bootstrap into current tooling. Hot-mask:
+      PRINCIPLE (peter): derot works on EITHER binned OR interpolated
+      (demosaiced) input — the only hard rule is NOT mosaic (never
+      geometrically transform the raw CFA) AND the geometry (pole/omega) must
+      be right. Binned isn't required, just convenient; interpolated is
+      equally valid and gives more resolution for the solve. My error was
+      hand-rolling a derot with a WRONG-geometry pole (full-res ×2 of a
+      binned pole → concentric arcs, star 1hr apart missed 675px), NOT the
+      demosaic. The pipeline uses binned coords by convention — match
+      whatever geometry the input is in.
+      PAYOFF (virtuous loop, work CENTER-OUT): fit-pole fine-tunes the pole →
+      derot registers faint arcs into POINT sources (esp. bright stars that
+      were saturated/arced) → more stars identified → tighter pole. Start
+      near the pole (low distortion, already anchored), extend outward ring
+      by ring, each ring tightening the fit for the next → rich point-source
+      field → plate solve. `pipeline-night` (legacy-delete list, DECISIONS
+      2026-06-16) is the working reference. Hot-mask:
       `muppet:~/tmp/psf-work/hotmask-fullres.npy`.
 - [ ] **Pull faintest stars** using the solved WCS; **estimate magnitudes**
       (calibrate flux against the identified Kochab/Pherkad/UMi stars).
