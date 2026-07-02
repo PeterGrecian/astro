@@ -21,7 +21,17 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
       ~3.4° out, ~120° apart, mag 4.3–5.2) — a 120° baseline pins roll far
       tighter than the 8° Kochab–Pherkad pair. Polaris currently lands
       "not quite" right → trio fit should fix it.
-- [ ] **Derot central region → plate-solve** (2026-07-02, in progress).
+- [x] **Derot central region → plate-solve — DONE 2026-07-02.** SOLVED via
+      astrometry.net (Tycho-2 idx 19, 17 stars, log-odds 47). Recipe that
+      worked (peter's steer): `derot-windows --window 40` (SHORT ~6-min
+      windows) + FRAME-CENTER crop (optical axis 820,616 binned, min
+      distortion — NOT the pole) → 226 clean point sources → solve-field on
+      PIP. Authoritative: scale 0.04422 deg/binpx (0.02211 full-res), pole
+      (1176,503) — hand-fit within 0.25°. WCS at pip:~/tmp/psf-splay/
+      solve-window.wcs. See [[project-astrocam-wcs-2026-07-01]]. Whole-frame
+      max-stack would NOT solve (arcs). NEXT (below): write scale/pole into
+      camera.json; extend outward (tile derot + k1/k2) for the full frame.
+- [ ] **Derot central region → plate-solve** (superseded — see DONE above).
       Max-stack won't solve (stars are arcs). Derot to point sources, then
       solve-field (on PIP — Tycho-2 indices 10-19 there; NOT on muppet).
       PROGRESS 2026-07-02: PROVED the method — binned-space derot about a
