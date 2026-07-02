@@ -21,6 +21,20 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
       ~3.4° out, ~120° apart, mag 4.3–5.2) — a 120° baseline pins roll far
       tighter than the 8° Kochab–Pherkad pair. Polaris currently lands
       "not quite" right → trio fit should fix it.
+- [ ] **Derot central region → plate-solve** (2026-07-02, in progress).
+      Max-stack won't solve (stars are arcs). Derot to point sources, then
+      solve-field (on PIP — Tycho-2 indices 10-19 there; NOT on muppet).
+      MUST demosaic before derot (raw-mosaic derot gave a CFA grid; see
+      [[project-bayer-presentation-decision]]). BLOCKER: the demosaic-derot
+      (`muppet:~/tmp/psf-work/derot_demosaic.py`) still leaves concentric
+      arcs — stars not registering. Diagnosed: a bright star at frame0
+      (2703,1468) vs ~1hr later (2995,664) does NOT come back to the same
+      spot under rotation about pole (2342,1012) full-res for either sign
+      (best 675px off) — so either the full-res pole is wrong, the two are
+      different stars, or the warpAffine angle convention is off. Debug:
+      track ONE confirmed star across frames, verify rotation brings it back,
+      before re-stacking. Hot-mask (full-res single-photosite) works:
+      `muppet:~/tmp/psf-work/hotmask-fullres.npy`.
 - [ ] **Pull faintest stars** using the solved WCS; **estimate magnitudes**
       (calibrate flux against the identified Kochab/Pherkad/UMi stars).
 - [ ] **Work outward, fit the plate** — extend from near-pole to the full
