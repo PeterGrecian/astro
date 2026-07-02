@@ -24,16 +24,18 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
 - [ ] **Derot central region → plate-solve** (2026-07-02, in progress).
       Max-stack won't solve (stars are arcs). Derot to point sources, then
       solve-field (on PIP — Tycho-2 indices 10-19 there; NOT on muppet).
-      MUST demosaic before derot (raw-mosaic derot gave a CFA grid; see
-      [[project-bayer-presentation-decision]]). BLOCKER: the demosaic-derot
-      (`muppet:~/tmp/psf-work/derot_demosaic.py`) still leaves concentric
-      arcs — stars not registering. Diagnosed: a bright star at frame0
-      (2703,1468) vs ~1hr later (2995,664) does NOT come back to the same
-      spot under rotation about pole (2342,1012) full-res for either sign
-      (best 675px off) — so either the full-res pole is wrong, the two are
-      different stars, or the warpAffine angle convention is off. Debug:
-      track ONE confirmed star across frames, verify rotation brings it back,
-      before re-stacking. Hot-mask (full-res single-photosite) works:
+      **USE THE PROVEN TOOLING** — many successful derots exist; geometry
+      just needs care. Recipe: (1) `fit-pole <binned-frames-dir> --pole-x
+      1171 --pole-y 506 --refine --omega <sign>` optimises the pole by
+      maximising derot sharpness (finds the pole that actually registers
+      stars — do NOT hand-compute it). (2) `derot-stack` with the fitted
+      pole → point sources. (3) for plate-solve resolution apply the fitted
+      geometry to a DEMOSAICED full-res derot (raw-mosaic derot = CFA grid;
+      see [[project-bayer-presentation-decision]]).
+      My hand-rolled `muppet:~/tmp/psf-work/derot_demosaic.py` left concentric
+      arcs — wrong pole geometry (used full-res ×2 of a binned pole; a star
+      1hr apart missed by 675px under rotation). That was MY setup error, not
+      the method — fit-pole avoids it. Hot-mask works:
       `muppet:~/tmp/psf-work/hotmask-fullres.npy`.
 - [ ] **Pull faintest stars** using the solved WCS; **estimate magnitudes**
       (calibrate flux against the identified Kochab/Pherkad/UMi stars).
