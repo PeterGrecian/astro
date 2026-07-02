@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""derot-select — sweep derot time-windows, score each, pick the best.
+
+The derot deliverable needs a good TIME INTERVAL: too short = few photons,
+too long = distortion + cloud + field rotation re-smear the stars. Rather
+than guess, sweep candidate windows over the night and score each by how
+many well-registered point sources it yields (the sensitivity yardstick).
+Emit the best window's stack as the derot deliverable, plus a per-window
+score table (so the trend is inspectable and feeds summary.json).
+
+Works on BINNED frames (2x2 panchromatic, moire-free — never the raw
+mosaic). Pole is fixed (fit it first with fit-pole, or pass --pole-x/-y).
+Distortion (k1,k2) optional — off-axis stars need it for long windows.
+
+Scoring: mean-stack each window about the pole, background-subtract,
+count sources above k*sigma. More sources = deeper = better interval.
+This IS the completeness turnover made operational.
+
+Usage
+-----
+    derot-select <binned-frames-dir> --pole-x 1176 --pole-y 503 \\
+        --windows 20,40,80,160 --out <dir>
+        [--k1 -0.08 --k2 0.02] [--step-frac 0.5] [--thresh-sigma 5]
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import glob
+import sys
+from pathlib import Path
+
+import numpy as np
+import cv2
+from astropy.io import fits
+from scipy import ndimage
+
+OMEGA = 7.2921e-5  # sidereal rad/s (pinned — physics)
+
+
+def load_frame(path):
+    with fits.open(path, memmap=True) as h:
+        for hdu in h:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                ep = hdu.header.get("EPOCH_MS")
+                return hdu.data.astype(np.float32), (int(ep) if ep else None)
+    raise SystemExit(f"no 2D image in {path}")
+
+
+def undistort_maps(h, w, k1, k2):
+    cx, cy = w / 2.0, h / 2.0
+    R = np.hypot(cx, cy)
+    ys, xs = np.indices((h, w), dtype=np.float32)
+    dx, dy = xs - cx, ys - cy
+    rn = np.hypot(dx, dy) / R
+    s = 1.0 + k1 * rn**2 + k2 * rn**4
+    return (cx + dx * s).astype(np.float32), (cy + dy * s).astype(np.float32)
+
+
+def count_sources(img, thresh_sigma):
+    """Background-subtract and count point sources above k*sigma."""
+    flat = img - ndimage.median_filter(img, 15)
+    sig = 1.4826 * np.median(np.abs(flat - np.median(flat)))
+    sm = ndimage.gaussian_filter(flat, 1.0)
+    lbl, n = ndimage.label(sm > thresh_sigma * sig)
+    # drop 1-px specks (residual hot pixels) — need >=3 px
+    return sum(1 for i in range(1, n + 1) if (lbl == i).sum() >= 3)
+
+
+def derot_window(frames, epochs, ref_ms, pole, k1, k2, dmaps, shape):
+    """Mean-stack a window's frames, derotated about the pole (+k1,k2)."""
+    h, w = shape
+    acc = np.zeros((h, w), np.float32)
+    for g, ep in zip(frames, epochs):
+        dt = (ep - ref_ms) / 1000.0
+        ang = np.degrees(-OMEGA * dt)
+        if dmaps is not None:
+            g = cv2.remap(g, dmaps[0], dmaps[1], cv2.INTER_LINEAR)
+        M = cv2.getRotationMatrix2D(pole, float(ang), 1.0)
+        acc += cv2.warpAffine(g, M, (w, h), flags=cv2.INTER_LINEAR,
+                              borderValue=0)
+    return acc / len(frames)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("dir", help="binned frames dir (with EPOCH_MS)")
+    ap.add_argument("--pole-x", type=float, required=True)
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--windows", default="20,40,80,160",
+                    help="comma-sep window lengths in frames to try")
+    ap.add_argument("--step-frac", type=float, default=0.5,
+                    help="slide step as fraction of window (default 0.5)")
+    ap.add_argument("--k1", type=float, default=0.0)
+    ap.add_argument("--k2", type=float, default=0.0)
+    ap.add_argument("--thresh-sigma", type=float, default=5.0)
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    fns = sorted(glob.glob(f"{args.dir}/*.fits.fz"))
+    fns = [f for f in fns if not Path(f).name.startswith(
+        ("sum", "min", "max", "stack", "hot", "badpixel"))]
+    if not fns:
+        print("no frames", file=sys.stderr)
+        return 2
+    loaded = [load_frame(f) for f in fns]
+    imgs = [d for d, _ in loaded]
+    epochs = [e for _, e in loaded]
+    if any(e is None for e in epochs):
+        print("frames lack EPOCH_MS", file=sys.stderr)
+        return 2
+    h, w = imgs[0].shape
+    pole = (args.pole_x, args.pole_y)
+    dmaps = None
+    if args.k1 or args.k2:
+        dmaps = undistort_maps(h, w, args.k1, args.k2)
+    print(f"{len(imgs)} frames {w}x{h}, pole {pole}, k1={args.k1} k2={args.k2}")
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    rows = []
+    best = None
+    for wlen in [int(x) for x in args.windows.split(",")]:
+        if wlen > len(imgs):
+            continue
+        step = max(1, int(wlen * args.step_frac))
+        for start in range(0, len(imgs) - wlen + 1, step):
+            sl = slice(start, start + wlen)
+            acc = derot_window(imgs[sl], epochs[sl], epochs[start], pole,
+                               args.k1, args.k2, dmaps, (h, w))
+            nsrc = count_sources(acc, args.thresh_sigma)
+            rows.append((wlen, start, epochs[start], nsrc))
+            if best is None or nsrc > best[0]:
+                best = (nsrc, wlen, start, acc)
+            print(f"  win={wlen:4d} start={start:4d}  sources={nsrc}",
+                  flush=True)
+
+    # write score table
+    with open(args.out / "derot-scores.csv", "w", newline="") as f:
+        wcsv = csv.writer(f)
+        wcsv.writerow(["window_frames", "start_frame", "epoch_ms", "n_sources"])
+        wcsv.writerows(rows)
+    nsrc, wlen, start, acc = best
+    print(f"\nBEST: window={wlen} frames, start={start}, {nsrc} sources")
+
+    # emit best derot as the deliverable
+    fits.PrimaryHDU(acc.astype(np.float32)).writeto(
+        args.out / "derot.fits.fz", overwrite=True)
+    flat = np.clip(acc - ndimage.median_filter(acc, 15), 0, None)
+    lo, hi = np.percentile(flat, 40), np.percentile(flat, 99.7)
+    u8 = np.clip((flat - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
+    cv2.imwrite(str(args.out / "derot.jpg"), u8)
+    print(f"wrote {args.out}/derot.{{fits.fz,jpg}} + derot-scores.csv")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
