@@ -24,16 +24,25 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
 - [ ] **Derot central region → plate-solve** (2026-07-02, in progress).
       Max-stack won't solve (stars are arcs). Derot to point sources, then
       solve-field (on PIP — Tycho-2 indices 10-19 there; NOT on muppet).
-      PROGRESS 2026-07-02: PROVED the method — hand-rolled binned-space derot
-      about a grid-SEARCHED pole (1171,501, refined from 1171,506) registered
-      **230 sources (129 within 20°)**, stars sharp near pole. BUT residual
-      radial smear (arcs grow with radius) = OMEGA (rate) error — the 3rd fit
-      dim. My hand-rolled omega scan was too noisy (boundary result 7.0e-5 vs
-      sidereal 7.2921e-5; crude scorer). NEXT: use REAL `fit-pole` for the 3D
-      (pole+omega) fit — needs astrocam frames prepped as a binned dir with
-      EPOCH_MS headers + a candidates.csv. Scratch on
-      `muppet:~/tmp/psf-work/` (fitpole2.py, derot_final.py, fit_omega.py,
-      derot-fitted.npy = the 230-source stack).
+      PROGRESS 2026-07-02: PROVED the method — binned-space derot about a
+      grid-searched pole registered **230 sources (129 within 20°)**, sharp
+      near pole. Residual radial smear (arcs grow with radius) is **LENS
+      DISTORTION (k1,k2), NOT omega** — omega is PINNED (physics, 1e-6);
+      derot-stack's own comment says "mini-arcs until lens distortion is
+      fitted". The REAL tooling now RUNS on prepped astrocam data:
+      - PREP DONE (reusable): `muppet:~/tmp/psf-work/fitpole-binned/` =
+        872 binned `.fits.fz` with EPOCH_MS + candidates.csv (via
+        `prep_binned.py` + `find-candidates --grid 80`).
+      - `fit-pole` → pole ~(1204,475); `fit-geometry` → pole (1194,482)
+        k1=-0.081 k2=0.021 (found real distortion). `derot-patches` applies
+        the k1/k2 model.
+      BLOCKER: fit landscape is FLAT and derot-patches sharpness ~1.0× —
+      **candidate quality**. find-candidates picked saturated FOREGROUND/glow
+      cells (houses, bottom of frame), not clean stars, so the fit scores on
+      junk. NEXT: mask foreground+sky (occlusion) so candidates are real
+      stars, THEN run the pipeline-night bootstrap (iterate fit-pole ↔
+      fit-geometry, re-find candidates each round) to converge. Then derot →
+      plate-solve. Scratch: `muppet:~/tmp/psf-work/`.
       **USE THE PROVEN PIPELINE** — the starcam v1 derots
       (petergrecian.co.uk/starcam/night/2026-05-27, "pole spread 146px") come
       from `bin/pipeline-night`, which is the known-good recipe:
