@@ -104,6 +104,10 @@ def main():
     ap.add_argument("--publish", action="store_true",
                     help="upload to S3 as <camera>/moon-net.png (one fixed "
                          "key, no per-night prefix — like combined-brightness)")
+    ap.add_argument("--v1-fov", action="store_true",
+                    help="draw the eclipticam-v1 frame perimeter on the "
+                         "backdrop, via the fitted affine in "
+                         "eclipticam-v1/v1_to_v3w.json (v3w backdrop only)")
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -160,6 +164,31 @@ def main():
         label = f"{thread['night']} dec{thread.get('dec_deg', '?')}"
         draw.text((lx + 6, ly - 14), label, fill=col)
         drawn += 1
+
+    # v1 FOV perimeter: project the v1 frame corners into this (v3w) frame via
+    # the fitted affine, so you SEE where the day camera looks relative to v3w.
+    if args.v1_fov:
+        tf_path = repo_root / "eclipticam-v1" / "v1_to_v3w.json"
+        if not tf_path.exists():
+            print(f"--v1-fov: no {tf_path.name} (run fit-v1-v3w first) — "
+                  "skipping FOV box")
+        else:
+            tf = json.loads(tf_path.read_text())
+            M = np.array(tf["affine_2x3"])            # 2x3, v1->v3w full-res
+            vw, vh = tf["from_full_res"]              # v1 frame size
+            corners = np.array([[0, 0], [vw, 0], [vw, vh], [0, vh]], float)
+            proj = (M[:, :2] @ corners.T).T + M[:, 2]  # into v3w full-res
+            fov_col = (255, 60, 60)
+            poly = [(px * sx, py * sy) for px, py in proj]   # -> target scale
+            draw.line(poly + [poly[0]], fill=fov_col, width=2)
+            # Label near the box's lowest on-frame corner (the top edge often
+            # projects above y=0 — v1 points higher than v3w — so anchor low).
+            lc = max(poly, key=lambda p: p[1])
+            fit = tf.get("fit", {})
+            draw.text((lc[0] + 4, min(lc[1], H - 14) - 12),
+                      f"v1 FOV (fit {fit.get('rms_px', '?')}px, "
+                      f"az {fit.get('az_deg', ['?', '?'])[0]}-"
+                      f"{fit.get('az_deg', ['?', '?'])[1]})", fill=fov_col)
 
     draw.text((8, 8), f"moon net: {drawn} thread(s)", fill=(0, 255, 80))
 

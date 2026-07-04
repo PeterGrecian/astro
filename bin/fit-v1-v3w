@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""fit-v1-v3w — pin the eclipticam v1<->v3w relationship from simultaneous
+moon sightings.
+
+Both cameras share a Pi and see the same sky. When the moon is marked in
+BOTH cameras' moon-net.json at the same instant, that pair is a direct
+v1_pixel <-> v3w_pixel correspondence (same moon => same az/alt => same
+sky point). Enough time-matched pairs pin an affine map v1 -> v3w.
+
+This does NOT need a per-camera pointing model — it's a direct pixel
+correspondence, valid over the sky region the matched points cover (today
+the moon's low SW arc, az ~194-218). Extrapolating far outside that band
+(e.g. to the daytime sun at az ~235-260) is unsafe; the fit's validity is
+bounded by its input spread.
+
+Writes the affine (2x3, v1->v3w full-res pixels) + provenance to
+eclipticam-v1/v1_to_v3w.json. Rerun as more matched nights accumulate to
+widen validity and tighten the fit.
+
+Usage:
+    fit-v1-v3w                      # all shared nights, write the transform
+    fit-v1-v3w --max-dt 90          # time-match tolerance (s)
+    fit-v1-v3w --dry-run            # fit + report residuals, write nothing
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _points(net_path):
+    net = json.loads(net_path.read_text())
+    out = []
+    for t in net["threads"]:
+        # day-space threads only (the "<night>-night" crop threads live in a
+        # different, offset pixel space and must not be mixed in).
+        if t["night"].endswith("-night"):
+            continue
+        for p in t["points"]:
+            out.append((datetime.fromisoformat(p["utc"]),
+                        float(p["x"]), float(p["y"]),
+                        p.get("az"), p.get("alt")))
+    return out
+
+
+def _match(v1, v3, max_dt):
+    """Time-match v1 to nearest v3w point within max_dt seconds."""
+    pairs = []
+    for t1, x1, y1, a1, _ in v1:
+        if not v3:
+            break
+        t3, x3, y3, a3, _ = min(v3, key=lambda r: abs((r[0] - t1).total_seconds()))
+        dt = abs((t3 - t1).total_seconds())
+        if dt <= max_dt:
+            pairs.append((x1, y1, x3, y3, a1, a3, dt))
+    return pairs
+
+
+def _fit_affine(P, Q):
+    """Least-squares affine Q = M[:, :2] @ P + M[:, 2]. Returns (M 2x3, res)."""
+    n = len(P)
+    A = np.c_[P, np.ones(n)]
+    sol, *_ = np.linalg.lstsq(A, Q, rcond=None)   # 3x2
+    M = sol.T                                       # 2x3
+    res = np.hypot(*((A @ sol) - Q).T)
+    return M, res
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--max-dt", type=float, default=90,
+                    help="max seconds between a v1 and v3w frame to call them "
+                         "simultaneous (default 90 — capture cadence is ~1/min)")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    v1 = _points(ROOT / "eclipticam-v1" / "moon-net.json")
+    v3 = _points(ROOT / "eclipticam-v3w" / "moon-net.json")
+    # match within a shared night by time; pooling all nights is fine since
+    # timestamps are unique per instant.
+    pairs = _match(v1, v3, args.max_dt)
+    print(f"v1 day pts: {len(v1)}   v3w day pts: {len(v3)}")
+    print(f"time-matched pairs (<= {args.max_dt:.0f}s): {len(pairs)}")
+    if len(pairs) < 3:
+        sys.stderr.write("\nneed >=3 matched pairs for an affine fit — mark "
+                         "the moon in BOTH cameras on a shared night\n")
+        return 1
+
+    P = np.array([(a, b) for a, b, *_ in pairs], float)
+    Q = np.array([(c, d) for _, _, c, d, *_ in pairs], float)
+    M, res = _fit_affine(P, Q)
+    rms = float(np.sqrt((res ** 2).mean()))
+    scale = float(np.sqrt(abs(M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0])))
+    az = [a for *_, a, b, dt in pairs if a is not None]
+    print(f"affine fit: rms={rms:.1f}px  median={np.median(res):.1f}  "
+          f"max={res.max():.1f}  scale={scale:.3f}")
+    print(f"  az coverage {min(az):.0f}..{max(az):.0f} deg "
+          f"(fit valid ~here; extrapolation beyond is unverified)")
+    for (x1, y1, x3, y3, a1, a3, dt), r in zip(pairs, res):
+        print(f"    v1({x1:5.0f},{y1:5.0f}) -> v3w({x3:5.0f},{y3:5.0f})  "
+              f"az={a1:.1f}  resid={r:.1f}px  dt={dt:.0f}s")
+
+    if args.dry_run:
+        print("\n[dry-run] nothing written")
+        return 0
+
+    out = {
+        "_comment": "Affine map v1 pixel -> v3w pixel (both full-res). From "
+                    "simultaneous moon sightings; see bin/fit-v1-v3w. Valid over "
+                    "the az band below; extrapolation beyond is unverified.",
+        "from": "eclipticam-v1", "to": "eclipticam-v3w",
+        "from_full_res": [2592, 1944], "to_full_res": [4608, 2592],
+        "affine_2x3": M.tolist(),
+        "fit": {"n_pairs": len(pairs), "rms_px": round(rms, 2),
+                "max_px": round(float(res.max()), 2),
+                "scale": round(scale, 4),
+                "az_deg": [round(min(az), 1), round(max(az), 1)],
+                "max_dt_s": args.max_dt},
+        "fitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    path = ROOT / "eclipticam-v1" / "v1_to_v3w.json"
+    path.write_text(json.dumps(out, indent=2) + "\n")
+    print(f"\nwrote {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
