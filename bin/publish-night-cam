@@ -407,7 +407,11 @@ echo "--- combined brightness (multi-night)"
 # prefix (like combined-brightness). Self-skips cleanly when the camera has no
 # moon-net.json (e.g. eclipticam-v1) or no reference stack on disk.
 echo "--- moon net (accumulated moon threads)"
-"$PY" "$HERE/moon-overlay" --camera "$CAMERA" --extend --publish || true
+# On v3w also draw the v1 FOV box + v1's sun trail mapped into the v1 patch
+# (via eclipticam-v1/v1_to_v3w.json). Self-skips if the transform is absent.
+moon_extra=()
+[[ "$CAMERA" == "eclipticam-v3w" ]] && moon_extra+=(--v1-sun)
+"$PY" "$HERE/moon-overlay" --camera "$CAMERA" --extend "${moon_extra[@]}" --publish || true
 
 # Refresh the calendar manifest at the PUBLIC camera prefix so the website
 # renders its per-night index from one S3 object (no per-night list/get/presign

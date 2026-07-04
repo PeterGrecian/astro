@@ -1,5 +1,5 @@
 {
-  "_comment": "v1 pixel -> v3w pixel maps (both full-res). From simultaneous moon sightings; see bin/fit-v1-v3w. TWO models: affine (tight on the moon arc, tilts at corners) and fov_box (published-FOV scale, no rotation, 1 anchor \u2014 for the v1 FOV perimeter box). moon-overlay --v1-fov uses fov_box.",
+  "_comment": "v1 pixel -> v3w pixel maps (both full-res). From simultaneous moon sightings; see bin/fit-v1-v3w. TWO models: affine (tight on the moon arc, tilts at corners) and fov_box (published-FOV scale + fitted rotation \u2014 for the v1 FOV box and the sun trail inside it). moon-overlay --v1-fov / --v1-sun use fov_box. NOTE: empirical scale (~0.745) disagrees with published FOV (0.9325) \u2014 v1 may be wider than spec; kept FOV scale, worth a plate-scale check.",
   "from": "eclipticam-v1",
   "to": "eclipticam-v3w",
   "from_full_res": [
@@ -34,25 +34,28 @@
     "max_dt_s": 90
   },
   "fov_box": {
-    "_comment": "q = scale*p + translate, no rotation. scale from published horizontal FOV (v1 53.5deg, v3w 102deg).",
+    "_comment": "q = scale * R @ p + translate. scale from published horizontal FOV (v1 53.5deg, v3w 102deg); R fitted (rotation only) from the matched moon points.",
     "scale": 0.9325,
+    "rotation_2x2": [
+      [
+        0.9979406571082395,
+        0.06414393884362707
+      ],
+      [
+        -0.06414393884362707,
+        0.9979406571082394
+      ]
+    ],
+    "rotation_deg": -3.68,
     "translate": [
-      1187.7,
-      31.9
-    ],
-    "anchor_v1": [
-      1091.0,
-      1850.0
-    ],
-    "anchor_v3w": [
-      2205.0,
-      1757.0
+      1124.2,
+      97.4
     ],
     "fov_deg": {
       "v1_h": 53.5,
       "v3w_h": 102.0
     },
-    "rms_px": 87.1
+    "rms_px": 71.4
   },
-  "fitted_at": "2026-07-04T12:29:51+00:00"
+  "fitted_at": "2026-07-04T12:49:39+00:00"
 }

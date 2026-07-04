@@ -125,9 +125,14 @@ def main():
                          "key, no per-night prefix — like combined-brightness)")
     ap.add_argument("--v1-fov", action="store_true",
                     help="draw the eclipticam-v1 frame perimeter on the "
-                         "backdrop, via the fitted affine in "
+                         "backdrop, via the fov_box model in "
                          "eclipticam-v1/v1_to_v3w.json (v3w backdrop only)")
+    ap.add_argument("--v1-sun", action="store_true",
+                    help="also map eclipticam-v1's sun-net trail into the v1 "
+                         "patch (via fov_box) and draw it — implies --v1-fov")
     args = ap.parse_args()
+    if args.v1_sun:
+        args.v1_fov = True
 
     repo_root = Path(__file__).resolve().parent.parent
     from astro.config import CameraConfig
@@ -184,11 +189,12 @@ def main():
         draw.text((lx + 6, ly - 14), label, fill=col)
         drawn += 1
 
-    # v1 FOV perimeter: project the v1 frame corners into this (v3w) frame so
-    # you SEE where the day camera looks relative to v3w. Uses the FOV-BOX model
-    # (scale from published FOV, NO rotation, 1 anchor point) — a clean
-    # axis-aligned box that stays on-frame, rather than the affine (tight on the
-    # moon arc but tilts/extrapolates off the top). See bin/fit-v1-v3w.
+    # v1 FOV perimeter (+ optional sun trail): map the v1 frame into this (v3w)
+    # frame so you SEE where the day camera looks relative to v3w. Uses the
+    # FOV-BOX model: scale from the published FOV ratio + a small fitted rotation
+    # (q = s*R@p + t). Rotation-aware, so v1 content FAR from the moon anchor —
+    # the daytime SUN — still lands in the right part of the patch. See
+    # bin/fit-v1-v3w. (Affine is tighter on the moon arc but extrapolates badly.)
     if args.v1_fov:
         tf_path = repo_root / "eclipticam-v1" / "v1_to_v3w.json"
         if not tf_path.exists():
@@ -198,20 +204,47 @@ def main():
             tf = json.loads(tf_path.read_text())
             box = tf.get("fov_box")
             vw, vh = tf["from_full_res"]              # v1 frame size
-            corners = np.array([[0, 0], [vw, 0], [vw, vh], [0, vh]], float)
-            if box:
-                s = box["scale"]; t = np.array(box["translate"])
-                proj = s * corners + t               # no-rotation, into v3w
-                lbl = f"v1 FOV (FOV-scale, {box.get('rms_px', '?')}px)"
-            else:  # fallback to affine if the box model isn't present
+
+            def _to_v3w(v1pts):
+                """map v1 full-res pixels -> v3w full-res via the fov_box model
+                (scale*R + t), falling back to the affine if fov_box absent."""
+                a = np.asarray(v1pts, float)
+                if box:
+                    R = np.array(box.get("rotation_2x2", [[1, 0], [0, 1]]))
+                    return box["scale"] * (a @ R.T) + np.array(box["translate"])
                 M = np.array(tf["affine_2x3"])
-                proj = (M[:, :2] @ corners.T).T + M[:, 2]
-                lbl = "v1 FOV (affine)"
+                return (M[:, :2] @ a.T).T + M[:, 2]
+
             fov_col = (255, 60, 60)
-            poly = [(px * sx, py * sy) for px, py in proj]   # -> target scale
+            corners = _to_v3w([[0, 0], [vw, 0], [vw, vh], [0, vh]])
+            poly = [(px * sx, py * sy) for px, py in corners]   # -> target scale
             draw.line(poly + [poly[0]], fill=fov_col, width=2)
             lc = max(poly, key=lambda p: p[1])        # lowest on-frame corner
+            lbl = (f"v1 FOV ({box.get('rms_px', '?')}px)" if box
+                   else "v1 FOV (affine)")
             draw.text((lc[0] + 4, min(lc[1], H - 14) - 12), lbl, fill=fov_col)
+
+            # Sun trail inside the v1 patch: map v1's sun-net points through the
+            # same model and draw them where v1 sees the sun (high in the patch).
+            if args.v1_sun:
+                sun_path = repo_root / "eclipticam-v1" / "sun-net.json"
+                sun = (json.loads(sun_path.read_text()).get("threads", [])
+                       if sun_path.exists() else [])
+                sun_col = (255, 200, 0)
+                for thr in sun:
+                    v1pts = [(p["x"], p["y"]) for p in
+                             sorted(thr["points"], key=lambda p: p.get("az", 0))]
+                    if len(v1pts) < 2:
+                        continue
+                    mapped = _to_v3w(v1pts)
+                    xy = [(px * sx, py * sy) for px, py in mapped]
+                    for a, b in zip(xy, xy[1:]):
+                        draw.line([a, b], fill=sun_col, width=2)
+                    for x, y in xy:
+                        draw.ellipse([x - 3, y - 3, x + 3, y + 3],
+                                     outline=sun_col, width=1)
+                    draw.text((xy[0][0] + 4, xy[0][1] - 12), "v1 sun",
+                              fill=sun_col)
 
     draw.text((8, 8), f"moon net: {drawn} thread(s)", fill=(0, 255, 80))
 

@@ -107,23 +107,35 @@ def main():
         print(f"    v1({x1:5.0f},{y1:5.0f}) -> v3w({x3:5.0f},{y3:5.0f})  "
               f"az={a1:.1f}  resid={r:.1f}px  dt={dt:.0f}s")
 
-    # --- FOV-scale, no-rotation model (for the v1-FOV BOX) --------------
-    # Peter's approach: the size ratio is KNOWN from published RPi FOV specs,
-    # not fitted. Assume no rotation between the cameras (until we have better
-    # info), so a SINGLE common point sets the translation. This gives a clean
-    # axis-aligned box that doesn't tilt/extrapolate off-frame like the affine
-    # (which is fit only along the moon arc). Looser on the arc (~tens of px)
-    # but robust and needs just 1 matched point.
+    # --- FOV-scale + rotation model (for the v1-FOV BOX and sun trail) ---
+    # Peter's approach: the size ratio is KNOWN from published RPi FOV specs
+    # (trust the physical spec, not the arc-fit scale — the moon points span
+    # only a narrow arc, so a fitted scale is easily biased). FIX scale to the
+    # FOV ratio, then fit ROTATION + translation from the matched points (the
+    # data says there IS a small ~-3.7deg roll between the cameras). This maps
+    # the whole v1 frame — incl. the daytime SUN, far from the moon anchor —
+    # rotation-aware, so the sun lands sensibly in the upper v1 patch.
+    # Decomposing the affine confirmed: mean scale ~0.90, roll ~-3.7deg;
+    # empirical scale (~0.745) disagrees with FOV (0.9325) — the v1 lens may be
+    # wider than spec (or v3w narrower). Kept FOV scale per Peter; the gap is
+    # flagged in _comment for a later plate-scale check.
     V1_FOV_H, V3_FOV_H = 53.50, 102.0        # deg, published (OV5647 / Mod3 Wide)
     V1_W, V3_W = 2592, 4608                   # full-res widths
     s_fov = (V1_FOV_H / V1_W) / (V3_FOV_H / V3_W)   # v3w px per v1 px
-    # anchor on the pair with the smallest capture-time gap (best simultaneity)
-    ax1, ay1, ax3, ay3, *_ = min(pairs, key=lambda p: p[6])
-    t_fov = np.array([ax3 - s_fov * ax1, ay3 - s_fov * ay1])
-    fov_pred = s_fov * P + t_fov
+    # fixed-scale Procrustes: best rotation R + translation t at scale s_fov
+    Pm, Qm = P.mean(0), Q.mean(0)
+    Hm = (s_fov * (P - Pm)).T @ (Q - Qm)
+    Uu, _, Vv = np.linalg.svd(Hm)
+    Rr = Vv.T @ Uu.T
+    if np.linalg.det(Rr) < 0:                 # guard against reflection
+        Vv[-1] *= -1
+        Rr = Vv.T @ Uu.T
+    t_fov = Qm - s_fov * (Rr @ Pm)
+    fov_theta = float(np.degrees(np.arctan2(Rr[1, 0], Rr[0, 0])))
+    fov_pred = (s_fov * P @ Rr.T) + t_fov
     fov_res = np.hypot(*(fov_pred - Q).T)
     fov_rms = float(np.sqrt((fov_res ** 2).mean()))
-    print(f"FOV-box model (no-rot, s={s_fov:.4f} from published FOV, 1 anchor): "
+    print(f"FOV-box model (s={s_fov:.4f} from published FOV, rot={fov_theta:.2f}deg): "
           f"rms={fov_rms:.0f}px max={fov_res.max():.0f}")
 
     if args.dry_run:
@@ -134,8 +146,11 @@ def main():
         "_comment": "v1 pixel -> v3w pixel maps (both full-res). From "
                     "simultaneous moon sightings; see bin/fit-v1-v3w. TWO models: "
                     "affine (tight on the moon arc, tilts at corners) and fov_box "
-                    "(published-FOV scale, no rotation, 1 anchor — for the v1 FOV "
-                    "perimeter box). moon-overlay --v1-fov uses fov_box.",
+                    "(published-FOV scale + fitted rotation — for the v1 FOV box "
+                    "and the sun trail inside it). moon-overlay --v1-fov / "
+                    "--v1-sun use fov_box. NOTE: empirical scale (~0.745) "
+                    "disagrees with published FOV (0.9325) — v1 may be wider "
+                    "than spec; kept FOV scale, worth a plate-scale check.",
         "from": "eclipticam-v1", "to": "eclipticam-v3w",
         "from_full_res": [2592, 1944], "to_full_res": [4608, 2592],
         "affine_2x3": M.tolist(),
@@ -145,11 +160,13 @@ def main():
                 "az_deg": [round(min(az), 1), round(max(az), 1)],
                 "max_dt_s": args.max_dt},
         "fov_box": {
-            "_comment": "q = scale*p + translate, no rotation. scale from "
-                        "published horizontal FOV (v1 53.5deg, v3w 102deg).",
+            "_comment": "q = scale * R @ p + translate. scale from published "
+                        "horizontal FOV (v1 53.5deg, v3w 102deg); R fitted "
+                        "(rotation only) from the matched moon points.",
             "scale": round(float(s_fov), 4),
+            "rotation_2x2": Rr.tolist(),
+            "rotation_deg": round(fov_theta, 2),
             "translate": [round(float(t_fov[0]), 1), round(float(t_fov[1]), 1)],
-            "anchor_v1": [ax1, ay1], "anchor_v3w": [ax3, ay3],
             "fov_deg": {"v1_h": V1_FOV_H, "v3w_h": V3_FOV_H},
             "rms_px": round(fov_rms, 1)},
         "fitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
