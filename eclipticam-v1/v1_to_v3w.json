@@ -1,5 +1,5 @@
 {
-  "_comment": "Affine map v1 pixel -> v3w pixel (both full-res). From simultaneous moon sightings; see bin/fit-v1-v3w. Valid over the az band below; extrapolation beyond is unverified.",
+  "_comment": "v1 pixel -> v3w pixel maps (both full-res). From simultaneous moon sightings; see bin/fit-v1-v3w. TWO models: affine (tight on the moon arc, tilts at corners) and fov_box (published-FOV scale, no rotation, 1 anchor \u2014 for the v1 FOV perimeter box). moon-overlay --v1-fov uses fov_box.",
   "from": "eclipticam-v1",
   "to": "eclipticam-v3w",
   "from_full_res": [
@@ -33,5 +33,26 @@
     ],
     "max_dt_s": 90
   },
-  "fitted_at": "2026-07-04T10:59:54Z"
+  "fov_box": {
+    "_comment": "q = scale*p + translate, no rotation. scale from published horizontal FOV (v1 53.5deg, v3w 102deg).",
+    "scale": 0.9325,
+    "translate": [
+      1187.7,
+      31.9
+    ],
+    "anchor_v1": [
+      1091.0,
+      1850.0
+    ],
+    "anchor_v3w": [
+      2205.0,
+      1757.0
+    ],
+    "fov_deg": {
+      "v1_h": 53.5,
+      "v3w_h": 102.0
+    },
+    "rms_px": 87.1
+  },
+  "fitted_at": "2026-07-04T12:29:51+00:00"
 }

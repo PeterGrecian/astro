@@ -107,14 +107,35 @@ def main():
         print(f"    v1({x1:5.0f},{y1:5.0f}) -> v3w({x3:5.0f},{y3:5.0f})  "
               f"az={a1:.1f}  resid={r:.1f}px  dt={dt:.0f}s")
 
+    # --- FOV-scale, no-rotation model (for the v1-FOV BOX) --------------
+    # Peter's approach: the size ratio is KNOWN from published RPi FOV specs,
+    # not fitted. Assume no rotation between the cameras (until we have better
+    # info), so a SINGLE common point sets the translation. This gives a clean
+    # axis-aligned box that doesn't tilt/extrapolate off-frame like the affine
+    # (which is fit only along the moon arc). Looser on the arc (~tens of px)
+    # but robust and needs just 1 matched point.
+    V1_FOV_H, V3_FOV_H = 53.50, 102.0        # deg, published (OV5647 / Mod3 Wide)
+    V1_W, V3_W = 2592, 4608                   # full-res widths
+    s_fov = (V1_FOV_H / V1_W) / (V3_FOV_H / V3_W)   # v3w px per v1 px
+    # anchor on the pair with the smallest capture-time gap (best simultaneity)
+    ax1, ay1, ax3, ay3, *_ = min(pairs, key=lambda p: p[6])
+    t_fov = np.array([ax3 - s_fov * ax1, ay3 - s_fov * ay1])
+    fov_pred = s_fov * P + t_fov
+    fov_res = np.hypot(*(fov_pred - Q).T)
+    fov_rms = float(np.sqrt((fov_res ** 2).mean()))
+    print(f"FOV-box model (no-rot, s={s_fov:.4f} from published FOV, 1 anchor): "
+          f"rms={fov_rms:.0f}px max={fov_res.max():.0f}")
+
     if args.dry_run:
         print("\n[dry-run] nothing written")
         return 0
 
     out = {
-        "_comment": "Affine map v1 pixel -> v3w pixel (both full-res). From "
-                    "simultaneous moon sightings; see bin/fit-v1-v3w. Valid over "
-                    "the az band below; extrapolation beyond is unverified.",
+        "_comment": "v1 pixel -> v3w pixel maps (both full-res). From "
+                    "simultaneous moon sightings; see bin/fit-v1-v3w. TWO models: "
+                    "affine (tight on the moon arc, tilts at corners) and fov_box "
+                    "(published-FOV scale, no rotation, 1 anchor — for the v1 FOV "
+                    "perimeter box). moon-overlay --v1-fov uses fov_box.",
         "from": "eclipticam-v1", "to": "eclipticam-v3w",
         "from_full_res": [2592, 1944], "to_full_res": [4608, 2592],
         "affine_2x3": M.tolist(),
@@ -123,6 +144,14 @@ def main():
                 "scale": round(scale, 4),
                 "az_deg": [round(min(az), 1), round(max(az), 1)],
                 "max_dt_s": args.max_dt},
+        "fov_box": {
+            "_comment": "q = scale*p + translate, no rotation. scale from "
+                        "published horizontal FOV (v1 53.5deg, v3w 102deg).",
+            "scale": round(float(s_fov), 4),
+            "translate": [round(float(t_fov[0]), 1), round(float(t_fov[1]), 1)],
+            "anchor_v1": [ax1, ay1], "anchor_v3w": [ax3, ay3],
+            "fov_deg": {"v1_h": V1_FOV_H, "v3w_h": V3_FOV_H},
+            "rms_px": round(fov_rms, 1)},
         "fitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     path = ROOT / "eclipticam-v1" / "v1_to_v3w.json"
