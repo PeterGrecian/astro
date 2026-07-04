@@ -1,0 +1,37 @@
+{
+  "_comment": "Affine map v1 pixel -> v3w pixel (both full-res). From simultaneous moon sightings; see bin/fit-v1-v3w. Valid over the az band below; extrapolation beyond is unverified.",
+  "from": "eclipticam-v1",
+  "to": "eclipticam-v3w",
+  "from_full_res": [
+    2592,
+    1944
+  ],
+  "to_full_res": [
+    4608,
+    2592
+  ],
+  "affine_2x3": [
+    [
+      0.7129858846557946,
+      0.35537597177435987,
+      772.243426400463
+    ],
+    [
+      -0.07154037458543593,
+      1.105692950668261,
+      -215.00392094130086
+    ]
+  ],
+  "fit": {
+    "n_pairs": 10,
+    "rms_px": 3.9,
+    "max_px": 6.4,
+    "scale": 0.9021,
+    "az_deg": [
+      194.4,
+      217.8
+    ],
+    "max_dt_s": 90
+  },
+  "fitted_at": "2026-07-04T10:59:54Z"
+}

@@ -66,8 +66,14 @@ def _reference_stack(repo_root, cfg):
         nd = cfg.frames_root / "night" / night
         cands = []
         if subcam:
-            cands.append(nd / f"{subcam}_max.fits.fz")
-        cands += [nd / "max.fits.fz", nd / subcam / "max.fits.fz"]
+            cands += [nd / f"{subcam}_max.fits.fz", nd / subcam / "max.fits.fz"]
+        # The BARE max.fits.fz belongs to whichever camera owns the night
+        # stack (v3w). Only accept it for a camera that actually captured
+        # night raw this night — otherwise a day-only camera (v1) would
+        # borrow v3w's stack and draw its net in the WRONG pixel space
+        # (this was the sun-net-on-a-v3w-backdrop bug).
+        if not subcam or (nd / subcam).is_dir():
+            cands.append(nd / "max.fits.fz")
         return next((c for c in cands if c.exists()), None)
 
     # Prefer the pinned reference night (a fixed dark/clear backdrop).
@@ -85,6 +91,19 @@ def _reference_stack(repo_root, cfg):
             s = _stack_for(night)
             if s:
                 return s
+    # Day-camera fallback: a day-only camera (eclipticam-v1) never produces a
+    # night max-stack, so the sun-net would otherwise borrow another camera's
+    # night stack — the WRONG pixel space. Use the most recent day JPEG so the
+    # net draws on this camera's OWN sky (sun points then land on the sun).
+    ddir = cfg.frames_root / "day"
+    if ddir.exists():
+        for day in sorted((p.name for p in ddir.iterdir() if p.is_dir()),
+                          reverse=True):
+            dd = ddir / day / subcam
+            frames = sorted(dd.glob("*/*.jpg")) if dd.exists() else []
+            if frames:
+                # mid-afternoon-ish: a lit sky. Take the median frame of the day.
+                return frames[len(frames) // 2]
     return None
 
 
@@ -104,6 +123,10 @@ def main():
     ap.add_argument("--publish", action="store_true",
                     help="upload to S3 as <camera>/moon-net.png (one fixed "
                          "key, no per-night prefix — like combined-brightness)")
+    ap.add_argument("--v1-fov", action="store_true",
+                    help="draw the eclipticam-v1 frame perimeter on the "
+                         "backdrop, via the fitted affine in "
+                         "eclipticam-v1/v1_to_v3w.json (v3w backdrop only)")
     args = ap.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -161,6 +184,31 @@ def main():
         draw.text((lx + 6, ly - 14), label, fill=col)
         drawn += 1
 
+    # v1 FOV perimeter: project the v1 frame corners into this (v3w) frame via
+    # the fitted affine, so you SEE where the day camera looks relative to v3w.
+    if args.v1_fov:
+        tf_path = repo_root / "eclipticam-v1" / "v1_to_v3w.json"
+        if not tf_path.exists():
+            print(f"--v1-fov: no {tf_path.name} (run fit-v1-v3w first) — "
+                  "skipping FOV box")
+        else:
+            tf = json.loads(tf_path.read_text())
+            M = np.array(tf["affine_2x3"])            # 2x3, v1->v3w full-res
+            vw, vh = tf["from_full_res"]              # v1 frame size
+            corners = np.array([[0, 0], [vw, 0], [vw, vh], [0, vh]], float)
+            proj = (M[:, :2] @ corners.T).T + M[:, 2]  # into v3w full-res
+            fov_col = (255, 60, 60)
+            poly = [(px * sx, py * sy) for px, py in proj]   # -> target scale
+            draw.line(poly + [poly[0]], fill=fov_col, width=2)
+            # Label near the box's lowest on-frame corner (the top edge often
+            # projects above y=0 — v1 points higher than v3w — so anchor low).
+            lc = max(poly, key=lambda p: p[1])
+            fit = tf.get("fit", {})
+            draw.text((lc[0] + 4, min(lc[1], H - 14) - 12),
+                      f"v1 FOV (fit {fit.get('rms_px', '?')}px, "
+                      f"az {fit.get('az_deg', ['?', '?'])[0]}-"
+                      f"{fit.get('az_deg', ['?', '?'])[1]})", fill=fov_col)
+
     draw.text((8, 8), f"moon net: {drawn} thread(s)", fill=(0, 255, 80))
 
     # Privacy crop: the backdrop is a real max-stack (camera pixels), so any
@@ -189,7 +237,10 @@ def main():
         import boto3
         bucket = cfg.s3["bucket"]
         cam_prefix = cfg.s3["prefix"].removesuffix("/nights")
-        key = f"{cam_prefix}/moon-net.png"
+        # Key follows the OUTPUT basename, not a fixed "moon-net.png" — so a
+        # sun-net.png render publishes to <cam>/sun-net.png and doesn't clobber
+        # the moon net. (One fixed key per net, no per-night prefix.)
+        key = f"{cam_prefix}/{out.name}"
         boto3.client("s3").upload_file(
             str(out), bucket, key, ExtraArgs={"ContentType": "image/png"})
         print(f"uploaded s3://{bucket}/{key}")

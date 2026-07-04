@@ -24,6 +24,12 @@ Usage:
     mark-moon-net --camera eclipticam-v1 --night 2026-06-25 --mode day
     mark-moon-net --camera eclipticam-v3w --night 2026-06-24 --mode night \\
         --dec -19.1 --phase 78
+    # sun sightings (daytime, v1 ND filter) -> sun-net.json:
+    mark-moon-net --camera eclipticam-v1 --night 2026-07-04 --body sun --mode day
+
+--body {moon,sun} picks both the ephemeris body and the target net file
+(moon-net.json / sun-net.json). Threads are keyed by capture-night and
+coordinate space (day-JPEG vs night-FITS), so nights and spaces never mix.
 """
 from __future__ import annotations
 
@@ -38,6 +44,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
+from astro.nightdir import night_of
 
 
 # Frame-time + moon az/alt — same conventions as bin/moon-track, so
@@ -62,11 +69,12 @@ def _frame_dt(path, mode):
         return None
 
 
-def _moon_azalt(obs, dt):
+def _body_azalt(obs, dt, body="moon"):
+    """(az, alt) in degrees for the sun or moon at UTC `dt`."""
     import ephem
     obs.date = dt
-    m = ephem.Moon(obs)
-    return (float(m.az) * 180 / np.pi, float(m.alt) * 180 / np.pi)
+    b = ephem.Sun(obs) if body == "sun" else ephem.Moon(obs)
+    return (float(b.az) * 180 / np.pi, float(b.alt) * 180 / np.pi)
 
 
 def _read_crop_exif(path):
@@ -114,6 +122,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
     ap.add_argument("--night", required=True)
+    ap.add_argument("--body", choices=("moon", "sun"), default="moon",
+                    help="which body traces the thread. 'moon' -> moon-net.json "
+                         "(default); 'sun' -> sun-net.json (daytime; use with "
+                         "--mode day and the v1 ND filter). Az/alt are computed "
+                         "for the chosen body.")
     ap.add_argument("--mode", choices=("day", "night"), default="day")
     ap.add_argument("--log", type=Path,
                     default=Path.home() / ".splay-probes.log")
@@ -149,10 +162,11 @@ def main():
     # v3w day frames are full-sensor 4608x2592 even though camera.json
     # resolution (the binned night mode) is 2304x1296 — prefer the net's
     # declared capture_full_res when present.
+    net_file = "sun-net.json" if args.body == "sun" else "moon-net.json"
     net_path = args.net or (Path(__file__).resolve().parent.parent
-                            / args.camera / "moon-net.json")
+                            / args.camera / net_file)
     net = (json.loads(net_path.read_text()) if net_path.exists()
-           else {"_comment": f"moon-net for {args.camera}",
+           else {"_comment": f"{args.body}-net for {args.camera}",
                  "capture_full_res": [fullW, fullH], "threads": []})
     fullW, fullH = net.get("capture_full_res", [fullW, fullH])
 
@@ -238,6 +252,17 @@ def main():
             skipped.append((frame_id, "no timestamp (no CAP tag, "
                             "frame missing/no EXIF)"))
             continue
+        # Night guard: a point belongs to --night only if its OWN capture time
+        # falls in that noon-rollover night. Normal frames are already filtered
+        # by the /<subcam>/<night>/ path tail, but crop probes (moon-extract
+        # JPEGs) bypass that filter — they match by EXIF/filename regardless of
+        # which night they came from. Without this guard, a --night run swept in
+        # every crop ever probed in ~/.splay-probes.log, mixing 5+ nights (each
+        # a different moon declination) into one thread — the "wrong cyan line".
+        pt_night = night_of(dt.replace(tzinfo=datetime.timezone.utc))
+        if pt_night != args.night:
+            skipped.append((frame_id, f"night {pt_night} != --night {args.night}"))
+            continue
         x, y = int(m.group("x")), int(m.group("y"))
         note = None
         if crop_origin is not None:
@@ -256,11 +281,22 @@ def main():
             note = f"rescaled from {rw}x{rh}"
         elif not rw:
             note = "no RES tag (assumed full-res — verify zoom was 1x)"
-        a, alt = _moon_azalt(obs, dt)
+        a, alt = _body_azalt(obs, dt, args.body)
         rec = {"frame": frame_id, "utc": dt.isoformat(),
                "x": x, "y": y, "az": round(a, 2), "alt": round(alt, 2)}
         if note:
             rec["mark_note"] = note
+        # Coordinate space: crop probes come from the night FITS (raw Bayer
+        # readout), whose pixel space is offset from the day JPEG (ISP-processed
+        # path) by an un-calibrated ~(+470,+85)px shift plus a small roll —
+        # measured on 2026-06-25 where day and night points overlap in azimuth.
+        # NOT a flip: the moon tracks the same left-to-right direction in both,
+        # so it's an offset/scale, not a mirror. Likely a differing ScalerCrop /
+        # sensor mode between the day and night picamera2 configs. Until that
+        # transform is pinned, night-space points must NOT share a thread with
+        # day-space points, or the polyline jumps between the two frames. Tag
+        # the space so upsert routes them apart.
+        rec["_space"] = "night" if crop_origin is not None else "day"
         if frame_id in seen_frames:
             dup.append((frame_id, "duplicate probe (kept last)"))
             # keep the latest probe for a frame
@@ -292,45 +328,59 @@ def main():
     if not accepted:
         return 1
 
-    # upsert the thread for this night
-    thread = next((t for t in net["threads"] if t["night"] == args.night),
-                  None)
-    if thread is None:
-        thread = {"night": args.night}
-        net["threads"].append(thread)
-    if args.dec is not None:
-        thread["dec_deg"] = args.dec
-    if args.phase is not None:
-        thread["phase_pct"] = args.phase
-    # MERGE (append + dedup by frame), don't replace — so a re-run, or night
-    # points added to an existing day thread, accumulate instead of wiping the
-    # thread. New points win on a frame collision. --replace forces the old
-    # wipe behaviour.
-    if args.replace:
-        merged = accepted
-    else:
-        new_frames = {r["frame"] for r in accepted}
-        kept = [p for p in thread.get("points", [])
-                if p["frame"] not in new_frames]
-        merged = kept + accepted
-        merged.sort(key=lambda r: r["utc"])
-    n_added = len(merged) - len(thread.get("points", [])) \
-        if not args.replace else len(merged)
-    thread["points"] = merged
+    # Upsert per COORDINATE SPACE. Day-JPEG points and night-FITS (crop) points
+    # live in different pixel spaces (see the _space tag above), so each goes
+    # into its own thread: "<night>" for day, "<night>-night" for night. This
+    # keeps every polyline within a single coordinate frame — no cross-space
+    # jumps. moon-overlay draws both as independent threads.
+    def _thread_name(space):
+        return args.night if space == "day" else f"{args.night}-night"
+
+    spaces = sorted({r["_space"] for r in accepted})
+    summaries = []
+    for space in spaces:
+        tname = _thread_name(space)
+        space_pts = [r for r in accepted if r["_space"] == space]
+        for r in space_pts:
+            r.pop("_space", None)
+        thread = next((t for t in net["threads"] if t["night"] == tname), None)
+        if thread is None:
+            thread = {"night": tname}
+            net["threads"].append(thread)
+        if args.dec is not None:
+            thread["dec_deg"] = args.dec
+        if args.phase is not None:
+            thread["phase_pct"] = args.phase
+        # MERGE (append + dedup by frame), don't replace — so a re-run, or new
+        # points added to an existing thread, accumulate instead of wiping it.
+        # New points win on a frame collision. --replace forces the old wipe.
+        if args.replace:
+            merged = space_pts
+        else:
+            new_frames = {r["frame"] for r in space_pts}
+            kept = [p for p in thread.get("points", [])
+                    if p["frame"] not in new_frames]
+            merged = kept + space_pts
+            merged.sort(key=lambda r: r["utc"])
+        thread["points"] = merged
+        summaries.append((tname, len(merged), len(space_pts)))
     net["threads"].sort(key=lambda t: t["night"])
     net_path.write_text(json.dumps(net, indent=2) + "\n")
-    print(f"\n{args.night} thread now {len(merged)} points "
-          f"({'replaced' if args.replace else f'+{len(accepted)} merged'}) "
-          f"in {net_path}")
+    for tname, total, added in summaries:
+        print(f"\n{tname} thread now {total} points "
+              f"({'replaced' if args.replace else f'+{added} merged'}) "
+              f"in {net_path}")
 
     # Keep the cumulative render fresh: re-draw moon-net.png whenever the net
     # changes (--no-render to skip). moon-overlay auto-finds a backdrop.
     if not args.no_render:
         import subprocess
         overlay = Path(__file__).resolve().parent / "moon-overlay"
+        out_png = net_path.with_suffix(".png")
         r = subprocess.run(
             [sys.executable, str(overlay), "--camera", args.camera,
-             "--extend"], capture_output=True, text=True)
+             "--net", str(net_path), "--out", str(out_png), "--extend"],
+            capture_output=True, text=True)
         line = (r.stdout.strip().splitlines() or [""])[-1]
         print(f"render: {line}" if r.returncode == 0
               else f"render skipped ({r.stderr.strip().splitlines()[-1:] or ['?'][0]})")

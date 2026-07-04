@@ -1,7 +1,9 @@
 # astro — TODO
 
-moon-net refresh daily
-moon crops daily on eclipticam
+moon crops use
+sun-net: 5-stop gel bloom -> 15px rms marks; Baader film for tight sun marks
+v1 pointing/distortion fit from moon(07-02)+sun(07-03) wide-baseline threads
+calibrate v3w day-JPEG <-> night-FITS offset (~+470,+85px + roll) to merge -night threads
 
 Live work list. Move items to DECISIONS.md once they crystallise into
 load-bearing choices; delete done items (per the
