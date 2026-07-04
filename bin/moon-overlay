@@ -189,7 +189,10 @@ def main():
         import boto3
         bucket = cfg.s3["bucket"]
         cam_prefix = cfg.s3["prefix"].removesuffix("/nights")
-        key = f"{cam_prefix}/moon-net.png"
+        # Key follows the OUTPUT basename, not a fixed "moon-net.png" — so a
+        # sun-net.png render publishes to <cam>/sun-net.png and doesn't clobber
+        # the moon net. (One fixed key per net, no per-night prefix.)
+        key = f"{cam_prefix}/{out.name}"
         boto3.client("s3").upload_file(
             str(out), bucket, key, ExtraArgs={"ContentType": "image/png"})
         print(f"uploaded s3://{bucket}/{key}")
