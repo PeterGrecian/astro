@@ -73,6 +73,39 @@ def _fit_affine(P, Q):
     return M, res
 
 
+# --- polynomial warp: register v1 onto v3w's (distorted) image directly ----
+# Both cameras see the same sky, so the tie-points (moon+sun at matched times)
+# are like matched scene features between two photos. A bivariate polynomial
+# v1_pixel -> v3w_pixel ABSORBS both lenses' distortion + scale + rotation at
+# once — no camera model needed. Degree 1 = affine (needs a spread of >=3
+# non-collinear pts); degree 2 bends for distortion (needs the SUN points, high
+# in v3w's distorted edge, to constrain the curvature). Normalise coords to
+# keep the Vandermonde well-conditioned.
+def _poly_terms(x, y, deg):
+    """Design-matrix columns for a bivariate poly of total degree `deg`."""
+    cols = []
+    for i in range(deg + 1):
+        for j in range(deg + 1 - i):
+            cols.append((x ** i) * (y ** j))
+    return np.stack(cols, axis=-1)
+
+
+def _fit_poly(P, Q, deg):
+    """Fit v1->v3w as two polynomials of total degree `deg`.
+    Returns (coeffs, residuals, norm) where norm=(mean,scale) rescales input."""
+    mean = P.mean(0)
+    scale = P.std(0).mean() or 1.0
+    Pn = (P - mean) / scale
+    A = _poly_terms(Pn[:, 0], Pn[:, 1], deg)
+    if A.shape[0] < A.shape[1]:
+        return None   # under-determined for this degree
+    cx, *_ = np.linalg.lstsq(A, Q[:, 0], rcond=None)
+    cy, *_ = np.linalg.lstsq(A, Q[:, 1], rcond=None)
+    pred = np.c_[A @ cx, A @ cy]
+    res = np.hypot(*(pred - Q).T)
+    return (np.c_[cx, cy], res, (mean.tolist(), float(scale)))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--max-dt", type=float, default=90,
@@ -121,6 +154,31 @@ def main():
         print(f"    v1({x1:5.0f},{y1:5.0f}) -> v3w({x3:5.0f},{y3:5.0f})  "
               f"az={a1:.1f}  resid={r:.1f}px  dt={dt:.0f}s")
 
+    # --- polynomial warp: register v1 onto v3w's distorted image ----------
+    # Pick the highest degree the tie-points support. Degree 2 needs the points
+    # SPREAD across the frame (both moon AND sun) to constrain curvature — with
+    # only the moon arc it would over-fit, so gate degree 2 on having a real
+    # 2D spread (sun pairs present) and enough points. This is the map that
+    # bends for v3w's strong barrel; moon-overlay uses it when present.
+    warp = None
+    Psd = P.std(0)
+    spread_2d = (len(pairs) >= 8 and len(sun_pairs) >= 3
+                 and Psd.min() > 0.15 * Psd.max())
+    if spread_2d:
+        got = _fit_poly(P, Q, 2)
+        if got is not None:
+            coeffs, wres, norm = got
+            wrms = float(np.sqrt((wres ** 2).mean()))
+            warp = {"degree": 2, "coeffs": coeffs.tolist(), "norm": norm,
+                    "rms_px": round(wrms, 1), "max_px": round(float(wres.max()), 1),
+                    "n_pairs": len(pairs)}
+            print(f"poly warp (deg 2, distortion-bending): rms={wrms:.1f}px "
+                  f"max={wres.max():.1f}  ({len(sun_pairs)} sun + "
+                  f"{len(moon_pairs)} moon)")
+    if warp is None:
+        print("poly warp: SKIPPED — need a 2D spread of tie-points (mark the "
+              "v3w SUN too); using the linear models only for now.")
+
     # --- FOV-scale + rotation model (for the v1-FOV BOX and sun trail) ---
     # Peter's approach: the size ratio is KNOWN from published RPi FOV specs
     # (trust the physical spec, not the arc-fit scale — the moon points span
@@ -157,17 +215,19 @@ def main():
         return 0
 
     out = {
-        "_comment": "v1 pixel -> v3w pixel maps (both full-res). From "
-                    "simultaneous moon sightings; see bin/fit-v1-v3w. TWO models: "
-                    "affine (tight on the moon arc, tilts at corners) and fov_box "
-                    "(published-FOV scale + fitted rotation — for the v1 FOV box "
-                    "and the sun trail inside it). moon-overlay --v1-fov / "
-                    "--v1-sun use fov_box. NOTE: empirical scale (~0.745) "
-                    "disagrees with published FOV (0.9325) — v1 may be wider "
-                    "than spec; kept FOV scale, worth a plate-scale check.",
+        "_comment": "v1 pixel -> v3w pixel maps (both full-res). Tie-points are "
+                    "the moon+sun marked in BOTH cameras at matched times — like "
+                    "registering two photos of the same sky. THREE models: "
+                    "affine (linear), fov_box (published-FOV scale + rotation), "
+                    "and 'warp' (bivariate polynomial that BENDS for v3w's strong "
+                    "barrel — the correct map at the distorted edge where the sun "
+                    "is). moon-overlay uses warp when present, else fov_box. NOTE: "
+                    "the warp needs the SUN tie-points (v3w sun-net) to fit the "
+                    "curvature; absent them it stays None.",
         "from": "eclipticam-v1", "to": "eclipticam-v3w",
         "from_full_res": [2592, 1944], "to_full_res": [4608, 2592],
         "affine_2x3": M.tolist(),
+        "warp": warp,
         "fit": {"n_pairs": len(pairs), "rms_px": round(rms, 2),
                 "max_px": round(float(res.max()), 2),
                 "scale": round(scale, 4),

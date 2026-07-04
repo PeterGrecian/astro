@@ -203,12 +203,30 @@ def main():
         else:
             tf = json.loads(tf_path.read_text())
             box = tf.get("fov_box")
+            warp = tf.get("warp")
             vw, vh = tf["from_full_res"]              # v1 frame size
 
+            def _warp_eval(a, w):
+                """bivariate-polynomial warp v1 -> v3w (bends for distortion)."""
+                (mx, my), sc = w["norm"]
+                xn = (a[:, 0] - mx) / sc
+                yn = (a[:, 1] - my) / sc
+                deg = w["degree"]
+                cols = []
+                for i in range(deg + 1):
+                    for j in range(deg + 1 - i):
+                        cols.append((xn ** i) * (yn ** j))
+                A = np.stack(cols, axis=-1)
+                C = np.array(w["coeffs"])             # (nterms, 2)
+                return A @ C
+
             def _to_v3w(v1pts):
-                """map v1 full-res pixels -> v3w full-res via the fov_box model
-                (scale*R + t), falling back to the affine if fov_box absent."""
+                """map v1 full-res pixels -> v3w full-res. Prefer the polynomial
+                warp (distortion-aware); else the fov_box (scale*R+t); else the
+                affine. The warp is the correct map at v3w's distorted edge."""
                 a = np.asarray(v1pts, float)
+                if warp:
+                    return _warp_eval(a, warp)
                 if box:
                     R = np.array(box.get("rotation_2x2", [[1, 0], [0, 1]]))
                     return box["scale"] * (a @ R.T) + np.array(box["translate"])
@@ -216,13 +234,25 @@ def main():
                 return (M[:, :2] @ a.T).T + M[:, 2]
 
             fov_col = (255, 60, 60)
-            corners = _to_v3w([[0, 0], [vw, 0], [vw, vh], [0, vh]])
-            poly = [(px * sx, py * sy) for px, py in corners]   # -> target scale
+            # Sample the v1 frame PERIMETER densely, then map — under the
+            # distortion-aware warp the straight v1 edges become CURVED in v3w,
+            # so we can't just connect 4 corners. (Linear models: the samples
+            # stay collinear, so it still looks like straight edges.)
+            n = 40
+            edge = []
+            for a, b in [((0, 0), (vw, 0)), ((vw, 0), (vw, vh)),
+                         ((vw, vh), (0, vh)), ((0, vh), (0, 0))]:
+                ts = np.linspace(0, 1, n, endpoint=False)
+                edge += [(a[0] + t * (b[0] - a[0]),
+                          a[1] + t * (b[1] - a[1])) for t in ts]
+            perim = _to_v3w(edge)
+            poly = [(px * sx, py * sy) for px, py in perim]
             draw.line(poly + [poly[0]], fill=fov_col, width=2)
             lc = max(poly, key=lambda p: p[1])        # lowest on-frame corner
-            lbl = (f"v1 FOV ({box.get('rms_px', '?')}px)" if box
-                   else "v1 FOV (affine)")
-            draw.text((lc[0] + 4, min(lc[1], H - 14) - 12), lbl, fill=fov_col)
+            model = ("warp" if warp else "FOV-scale" if box else "affine")
+            rms = (warp or box or {}).get("rms_px", "?")
+            draw.text((lc[0] + 4, min(lc[1], H - 14) - 12),
+                      f"v1 FOV ({model}, {rms}px)", fill=fov_col)
 
             # Sun trail inside the v1 patch: map v1's sun-net points through the
             # same model and draw them where v1 sees the sun (high in the patch).
