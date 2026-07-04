@@ -303,18 +303,10 @@ PYEOF
 )
     if [[ "$verdict" == "clear" ]]; then
         echo "--- sensitivity chart (clear night)"
-        # pole seed from camera.json pole_prior_xy (binned = /2), else solved default
-        pole=$("$PY" - <<PYEOF 2>/dev/null || echo "1176,503"
-import sys; sys.path.insert(0,"$REPO")
-from astro.config import CameraConfig
-c=CameraConfig.load("$CAMERA"); p=c.get("pole_prior_xy")
-print(f"{p[0]//2},{p[1]//2}" if p else "1176,503")
-PYEOF
-)
-        px="${pole%,*}"; py="${pole#*,}"
+        # pole + occlusion read from astrocam/occlusion.json (config-driven:
+        # after a camera move, update that file and everything follows).
         if "$PY" "$HERE/sensitivity-night" --night-dir "$night_dir" \
-                --out-dir "${night_dir}/sensitivity" \
-                --pole-x "$px" --pole-y "$py"; then
+                --out-dir "${night_dir}/sensitivity"; then
             cp "${night_dir}/sensitivity/sensitivity.png" "${night_dir}/" 2>/dev/null
             cp "${night_dir}/sensitivity/sensitivity.json" "${night_dir}/" 2>/dev/null
             echo "sensitivity chart produced"

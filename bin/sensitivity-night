@@ -40,19 +40,39 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--night-dir", required=True)
     ap.add_argument("--out-dir", required=True)
-    ap.add_argument("--pole-x", type=float, required=True,
-                    help="seed pole X (binned) — solved/config prior")
-    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--pole-x", type=float, default=None,
+                    help="pole X (binned). Default: occlusion.json "
+                         "pole_prior_xy / 2 (fixed camera — update config "
+                         "after a move rather than passing this).")
+    ap.add_argument("--pole-y", type=float, default=None)
     ap.add_argument("--window", type=int, default=40,
                     help="derot window length in frames (short = ~6 min)")
     ap.add_argument("--anchor-name", default="Polaris")
     ap.add_argument("--anchor-mag", type=float, default=1.98)
+    ap.add_argument("--refit", action="store_true",
+                    help="re-fit the pole fresh each night (default: use the "
+                         "given pole directly — the fresh fit drifts ~28px on "
+                         "a fixed camera and breaks the solve)")
     args = ap.parse_args()
 
     nd = args.night_dir
     work = args.out_dir
     binned = f"{work}/binned"
     os.makedirs(binned, exist_ok=True)
+
+    # pole: CLI override, else occlusion.json pole_prior_xy / 2 (binned).
+    px_arg, py_arg = args.pole_x, args.pole_y
+    if px_arg is None or py_arg is None:
+        import json
+        occf = f"{ASTRO}/astrocam/occlusion.json"
+        try:
+            p = json.load(open(occf))["pole_prior_xy"]
+            px_arg, py_arg = p[0] / 2.0, p[1] / 2.0
+            print(f"pole from occlusion.json: ({px_arg:.0f},{py_arg:.0f}) binned")
+        except Exception as e:
+            print(f"SKIP: no pole (--pole-x/-y or occlusion.json): {e}")
+            return 2
+    args.pole_x, args.pole_y = px_arg, py_arg
 
     # 1. dark-window frames -> binned + EPOCH_MS
     try:
@@ -84,10 +104,29 @@ def main():
         hh, ww = hot.shape
         hot = hot[:hh // 2 * 2, :ww // 2 * 2].reshape(
             hh // 2, 2, ww // 2, 2).any(axis=(1, 3))
+    # foreground from the occlusion grid (trees + gutter cells). Cells are in
+    # WEBSITE orientation (180° from FITS), so build the mask in that frame
+    # then rot180 back to FITS coords. Falls back to a border+bottom rectangle
+    # if no occlusion.json.
     fg = np.zeros((Hb, Wb), bool)
-    m = 60
-    fg[:m, :] = fg[-m:, :] = fg[:, :m] = fg[:, -m:] = True
-    fg[int(Hb * 0.72):, :] = True    # bottom (houses/trees)
+    occ = f"{ASTRO}/astrocam/occlusion.json"
+    if os.path.exists(occ):
+        import json
+        o = json.load(open(occ))
+        cols = o["grid"]["cols"]; rows = o["grid"]["rows"]
+        labels = o["grid"]["col_labels"]
+        cells = list(o.get("trees", [])) + list(o.get("gutter", []))
+        fgw = np.zeros((Hb, Wb), bool)      # website-orientation mask
+        cw, ch = Wb / cols, Hb / rows
+        for cell in cells:
+            c = labels.index(cell[0]); r = int(cell[1:]) - 1
+            fgw[int(r*ch):int((r+1)*ch), int(c*cw):int((c+1)*cw)] = True
+        fg = np.rot90(fgw, 2)               # website -> FITS orientation
+        print(f"    occlusion: {len(cells)} cells", flush=True)
+    else:
+        m = 60
+        fg[:m, :] = fg[-m:, :] = fg[:, :m] = fg[:, -m:] = True
+        fg[int(Hb * 0.72):, :] = True
     mask = (hot | fg).astype(np.uint8)
     fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(mask)]).writeto(
         f"{work}/mask.fits.fz", overwrite=True)
@@ -101,26 +140,25 @@ def main():
     if r3.returncode:
         print("SKIP: find-candidates failed\n", r3.stderr); return 2
 
-    # 4. fit-pole then fit-geometry
-    print("[4] fit-pole + fit-geometry", flush=True)
-    r4 = sh([PY, f"{ASTRO}/bin/fit-pole", binned,
-             "--pole-x", args.pole_x, "--pole-y", args.pole_y,
-             "--range", 20, "--grid", 7, "--frames", 150,
-             "--top", 40, "--refine"])
-    if r4.returncode or "recommended" not in r4.stdout:
-        print("SKIP: fit-pole did not converge\n", r4.stderr); return 2
-    t = [l for l in r4.stdout.splitlines() if "recommended" in l][-1].split()
-    px = float(t[t.index("--pole-x") + 1]); py = float(t[t.index("--pole-y") + 1])
-    r4b = sh([PY, f"{ASTRO}/bin/fit-geometry", binned,
-              "--candidates", f"{binned}/candidates.csv",
-              "--pole-x", px, "--pole-y", py, "--frames", 150, "--top", 40])
-    if not r4b.returncode:
-        t2 = [l for l in r4b.stdout.splitlines() if "recommended" in l]
-        if t2:
-            tk = t2[-1].split()
-            px = float(tk[tk.index("--pole-x") + 1])
-            py = float(tk[tk.index("--pole-y") + 1])
-    print(f"    pole ({px:.1f},{py:.1f})", flush=True)
+    # 4. pole. For a FIXED camera use the solved pole DIRECTLY — a fresh
+    # fit-pole systematically drifts ~28px (proven 2026-07-04: 07-01 SOLVES
+    # with the solved pole 1176,503 but FAILS with the drifted fresh fit
+    # 1164,478, same frames). The camera is firmly mounted so the pole is
+    # stable. --refit re-enables the (unreliable) fresh fit if ever needed.
+    if args.refit:
+        print("[4] fit-pole + fit-geometry (--refit)", flush=True)
+        r4 = sh([PY, f"{ASTRO}/bin/fit-pole", binned,
+                 "--pole-x", args.pole_x, "--pole-y", args.pole_y,
+                 "--range", 20, "--grid", 7, "--frames", 150,
+                 "--top", 40, "--refine"])
+        if r4.returncode or "recommended" not in r4.stdout:
+            print("SKIP: fit-pole did not converge\n", r4.stderr); return 2
+        t = [l for l in r4.stdout.splitlines() if "recommended" in l][-1].split()
+        px = float(t[t.index("--pole-x") + 1]); py = float(t[t.index("--pole-y") + 1])
+    else:
+        px, py = args.pole_x, args.pole_y
+        print(f"[4] fixed pole ({px:.1f},{py:.1f}) — no refit "
+              "(fresh fit drifts on this fixed camera)", flush=True)
 
     # 5. derot-windows -> frame-centre crop
     print("[5] derot-windows", flush=True)
