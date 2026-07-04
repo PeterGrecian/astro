@@ -66,8 +66,14 @@ def _reference_stack(repo_root, cfg):
         nd = cfg.frames_root / "night" / night
         cands = []
         if subcam:
-            cands.append(nd / f"{subcam}_max.fits.fz")
-        cands += [nd / "max.fits.fz", nd / subcam / "max.fits.fz"]
+            cands += [nd / f"{subcam}_max.fits.fz", nd / subcam / "max.fits.fz"]
+        # The BARE max.fits.fz belongs to whichever camera owns the night
+        # stack (v3w). Only accept it for a camera that actually captured
+        # night raw this night — otherwise a day-only camera (v1) would
+        # borrow v3w's stack and draw its net in the WRONG pixel space
+        # (this was the sun-net-on-a-v3w-backdrop bug).
+        if not subcam or (nd / subcam).is_dir():
+            cands.append(nd / "max.fits.fz")
         return next((c for c in cands if c.exists()), None)
 
     # Prefer the pinned reference night (a fixed dark/clear backdrop).
@@ -85,6 +91,19 @@ def _reference_stack(repo_root, cfg):
             s = _stack_for(night)
             if s:
                 return s
+    # Day-camera fallback: a day-only camera (eclipticam-v1) never produces a
+    # night max-stack, so the sun-net would otherwise borrow another camera's
+    # night stack — the WRONG pixel space. Use the most recent day JPEG so the
+    # net draws on this camera's OWN sky (sun points then land on the sun).
+    ddir = cfg.frames_root / "day"
+    if ddir.exists():
+        for day in sorted((p.name for p in ddir.iterdir() if p.is_dir()),
+                          reverse=True):
+            dd = ddir / day / subcam
+            frames = sorted(dd.glob("*/*.jpg")) if dd.exists() else []
+            if frames:
+                # mid-afternoon-ish: a lit sky. Take the median frame of the day.
+                return frames[len(frames) // 2]
     return None
 
 
