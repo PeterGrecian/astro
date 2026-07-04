@@ -81,13 +81,27 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    v1 = _points(ROOT / "eclipticam-v1" / "moon-net.json")
-    v3 = _points(ROOT / "eclipticam-v3w" / "moon-net.json")
-    # match within a shared night by time; pooling all nights is fine since
-    # timestamps are unique per instant.
-    pairs = _match(v1, v3, args.max_dt)
-    print(f"v1 day pts: {len(v1)}   v3w day pts: {len(v3)}")
-    print(f"time-matched pairs (<= {args.max_dt:.0f}s): {len(pairs)}")
+    # Correspondences come from BOTH bodies: moon (low in the frame) and sun
+    # (high) marked in both cameras. Pooling them spans the whole field, so the
+    # fit pins scale + rotation from data rather than leaning on the published
+    # FOV scale. Each net is loaded if present; a body with no v3w counterpart
+    # simply contributes nothing.
+    def _load(name):
+        f1 = ROOT / "eclipticam-v1" / f"{name}.json"
+        f3 = ROOT / "eclipticam-v3w" / f"{name}.json"
+        return (_points(f1) if f1.exists() else [],
+                _points(f3) if f3.exists() else [])
+    v1_moon, v3_moon = _load("moon-net")
+    v1_sun, v3_sun = _load("sun-net")
+    # match within each body separately (a moon point must pair with a moon
+    # point), then pool. Timestamps are unique per instant so this is safe.
+    moon_pairs = _match(v1_moon, v3_moon, args.max_dt)
+    sun_pairs = _match(v1_sun, v3_sun, args.max_dt)
+    pairs = moon_pairs + sun_pairs
+    print(f"v1 pts: moon {len(v1_moon)} sun {len(v1_sun)}   "
+          f"v3w pts: moon {len(v3_moon)} sun {len(v3_sun)}")
+    print(f"time-matched pairs (<= {args.max_dt:.0f}s): "
+          f"{len(moon_pairs)} moon + {len(sun_pairs)} sun = {len(pairs)}")
     if len(pairs) < 3:
         sys.stderr.write("\nneed >=3 matched pairs for an affine fit — mark "
                          "the moon in BOTH cameras on a shared night\n")
