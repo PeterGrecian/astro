@@ -286,6 +286,46 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     done
 fi
 
+# --- 2b. sensitivity chart (flag-gated, clear nights, graceful skip) ---
+# SENSITIVITY=1 enables the per-night freq-vs-mag deliverable. Runs only on
+# CLEAR nights (verdict in summary.json), and NEVER fails this run — any
+# problem (no solve, missing solve-field, cloudy) just skips with no chart.
+# The derot solve is right at the edge of reliable, so some clear nights
+# won't produce a chart; that's expected. astrocam only (needs a pole seed).
+if [[ "${SENSITIVITY:-0}" -eq 1 && "$CAMERA" == "astrocam" && "$WEB_ONLY" -eq 0 ]]; then
+    verdict=$("$PY" - <<PYEOF 2>/dev/null || echo unknown
+import json
+try:
+    print(json.load(open("${night_dir}/summary.json")).get("verdict","unknown"))
+except Exception:
+    print("unknown")
+PYEOF
+)
+    if [[ "$verdict" == "clear" ]]; then
+        echo "--- sensitivity chart (clear night)"
+        # pole seed from camera.json pole_prior_xy (binned = /2), else solved default
+        pole=$("$PY" - <<PYEOF 2>/dev/null || echo "1176,503"
+import sys; sys.path.insert(0,"$REPO")
+from astro.config import CameraConfig
+c=CameraConfig.load("$CAMERA"); p=c.get("pole_prior_xy")
+print(f"{p[0]//2},{p[1]//2}" if p else "1176,503")
+PYEOF
+)
+        px="${pole%,*}"; py="${pole#*,}"
+        if "$PY" "$HERE/sensitivity-night" --night-dir "$night_dir" \
+                --out-dir "${night_dir}/sensitivity" \
+                --pole-x "$px" --pole-y "$py"; then
+            cp "${night_dir}/sensitivity/sensitivity.png" "${night_dir}/" 2>/dev/null
+            cp "${night_dir}/sensitivity/sensitivity.json" "${night_dir}/" 2>/dev/null
+            echo "sensitivity chart produced"
+        else
+            echo "sensitivity: skipped (no solve / not ready) — continuing"
+        fi
+    else
+        echo "--- sensitivity: skip (verdict=$verdict, not clear)"
+    fi
+fi
+
 # --- 3. publish to S3 ------------------------------------------------
 if [[ "$NO_PUBLISH" -eq 1 ]]; then
     echo "skip publish (--no-publish)"
@@ -306,6 +346,8 @@ names = [
     "brightness.png",
     "max.jpg",
     "derot.jpg",
+    "sensitivity.png",
+    "sensitivity.json",
     "thumb.jpg",
     "poster-colour.jpg",
     "poster-diff.jpg",
