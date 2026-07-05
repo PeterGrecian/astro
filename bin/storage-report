@@ -38,17 +38,24 @@ INVENTORY_TABLE = "astro-storage-inventory"
 CAPACITY_TABLE = "astro-host-capacity"
 
 # Cameras scanned via locate.list_nights (flat/canonical single-dir-per-night
-# layouts) when --cameras isn't given. starcam is cold-archived (rows from the
-# CSV). eclipticam-v1/v3w are NOT here — they use the <mode>/<date>/ layout and
-# are scanned by scan_mode_dated instead (locate would undercount them).
+# layouts) when --cameras isn't given. eclipticam-v1/v3w are NOT here — they
+# use the <mode>/<date>/ layout and are scanned by scan_mode_dated instead
+# (locate would undercount them). starcam is NOT here either: locate can't
+# discover its night/<date>/HH layout (no per-camera subdir), so its local
+# copies are scanned via EXTRA_STREAMS roots below.
 DEFAULT_CAMERAS = ["astrocam"]
 
-# Non-astro streams with no astro CameraConfig (gardencam/skycam). We scan
-# their top-level dirs directly for dated subdirs so they're VISIBLE on the
-# storage page (skycam raw is GC-bound, ~40G on puppy — worth tracking).
-# camera-name -> list of root dirs (globbed, ~ expanded).
+# Extra roots holding plain <root>/YYYY-MM-DD night dirs that the locate
+# scan can't reach: puppy's remaining raw starcam nights and muppet's two
+# backup copies (squashed sum8/sum2, some raw). Scanning them here matters
+# because the prune step deletes any local row this host's scan doesn't
+# emit — CSV-loaded local rows do NOT survive without a scanner backing
+# them. skycam was removed 2026-07-05 (peter: the astro storage page is
+# for astro data only); its rows are pruned on the next run since we no
+# longer emit them. camera-name -> list of root dirs (globbed, ~ expanded).
 EXTRA_STREAMS = {
-    "skycam": ["~/skycam-frames", "~/skycam-processed", "~/skycam-rerender"],
+    "starcam": ["~/starcam-frames/night", "~/starcam-backup",
+                "/mnt/bigdisk/starcam-backup"],
 }
 
 # Cameras whose frames live in a <root>/<mode>/<date>/... tree (day AND night
@@ -70,16 +77,135 @@ MODES = ("day", "night")
 MIN_REAL_BYTES = 1 << 20  # 1 MiB
 
 
-def du_bytes(path: Path) -> int:
-    """Total bytes under path (follows the tree; skips broken symlinks)."""
+# Frame-file extensions, in the order we prefer them as the night's
+# "primary" format when several are present (raw science data first).
+FRAME_EXTS = (".fits.fz", ".fits", ".dng", ".jpg", ".jpeg", ".png")
+
+
+def _ext_of(name: str) -> str:
+    """Extension for format purposes — keeps the compound '.fits.fz'."""
+    low = name.lower()
+    if low.endswith(".fits.fz"):
+        return ".fits.fz"
+    i = low.rfind(".")
+    return low[i:] if i >= 0 else ""
+
+
+def scan_tree(path: Path) -> dict:
+    """One walk of a night dir: total bytes, per-extension frame counts,
+    a sample file per frame extension, and the mtime span of the frames
+    (for cadence). Skips broken symlinks."""
     total = 0
+    exts: dict[str, int] = {}
+    sample: dict[str, Path] = {}
+    mt_min = mt_max = None
     for p in path.rglob("*"):
         try:
-            if p.is_file():
-                total += p.stat().st_size
+            if not p.is_file():
+                continue
+            st = p.stat()
         except OSError:
-            pass
-    return total
+            continue
+        total += st.st_size
+        ext = _ext_of(p.name)
+        if ext in FRAME_EXTS:
+            exts[ext] = exts.get(ext, 0) + 1
+            sample.setdefault(ext, p)
+            mt = st.st_mtime
+            mt_min = mt if mt_min is None else min(mt_min, mt)
+            mt_max = mt if mt_max is None else max(mt_max, mt)
+    return {"bytes": total, "exts": exts, "sample": sample,
+            "mt_min": mt_min, "mt_max": mt_max}
+
+
+def du_bytes(path: Path) -> int:
+    """Total bytes under path (follows the tree; skips broken symlinks)."""
+    return scan_tree(path)["bytes"]
+
+
+def fits_dims(path: Path):
+    """(width, height) of the image in a FITS / fpacked .fits.fz — parsed
+    from the ASCII header cards, no astropy needed. For .fz the image dims
+    are ZNAXIS1/ZNAXIS2 in the compressed extension header; for plain FITS
+    they're NAXIS1/NAXIS2. Reads at most the first 64 KiB."""
+    try:
+        head = path.open("rb").read(64 * 1024)
+    except OSError:
+        return None
+    kv = {}
+    for key in (b"ZNAXIS1", b"ZNAXIS2", b"NAXIS1", b"NAXIS2"):
+        # header card: KEYWORD padded to 8 chars, then '= value'
+        i = head.find(key.ljust(8) + b"=")
+        if i >= 0:
+            try:
+                kv[key] = int(head[i + 9:i + 30].split(b"/")[0])
+            except ValueError:
+                pass
+    w = kv.get(b"ZNAXIS1") or kv.get(b"NAXIS1")
+    h = kv.get(b"ZNAXIS2") or kv.get(b"NAXIS2")
+    return (w, h) if w and h else None
+
+
+def jpeg_dims(path: Path):
+    """(width, height) from a JPEG's SOF marker, stdlib only."""
+    try:
+        with path.open("rb") as f:
+            if f.read(2) != b"\xff\xd8":
+                return None
+            while True:
+                b = f.read(1)
+                if not b:
+                    return None
+                if b != b"\xff":
+                    continue
+                marker = f.read(1)
+                if marker in (b"\xd8", b"\x01") or b"\xd0" <= marker <= b"\xd7":
+                    continue
+                seg = int.from_bytes(f.read(2), "big")
+                if marker in (b"\xc0", b"\xc1", b"\xc2", b"\xc3",
+                              b"\xc5", b"\xc6", b"\xc7", b"\xc9",
+                              b"\xca", b"\xcb", b"\xcd", b"\xce", b"\xcf"):
+                    f.read(1)  # precision
+                    h = int.from_bytes(f.read(2), "big")
+                    w = int.from_bytes(f.read(2), "big")
+                    return (w, h)
+                f.seek(seg - 2, 1)
+    except OSError:
+        return None
+
+
+def fmt_of(scan: dict, native=None):
+    """Format summary for an inventory item, from a scan_tree() result.
+
+    {ext, n_frames, dims: [w, h]?, res_class?, cadence_s?}
+
+    res_class compares the sampled frame dims to the camera's native
+    resolution: 'full mosaic' (raw at native res), 'half mosaic (bin2)'
+    (2x2-binned raw), or the bare dims when neither. JPEGs are demosaiced
+    so they get 'full' / 'half' without the mosaic wording. cadence_s is
+    the mean seconds between frames, from the frames' mtime span."""
+    counts = scan["exts"]
+    if not counts:
+        return None
+    ext = max(counts, key=lambda e: (counts[e], -FRAME_EXTS.index(e)))
+    fmt = {"ext": ext, "n_frames": counts[ext]}
+    raw = ext in (".fits.fz", ".fits", ".dng")
+    dims = (fits_dims if ext in (".fits.fz", ".fits") else jpeg_dims)(
+        scan["sample"][ext]) if ext != ".dng" else None
+    if dims:
+        w, h = dims
+        fmt["dims"] = [w, h]
+        if native:
+            nw, nh = native
+            if (w, h) == (nw, nh):
+                fmt["res_class"] = "full mosaic" if raw else "full"
+            elif (w * 2, h * 2) == (nw, nh):
+                fmt["res_class"] = "half mosaic (bin2)" if raw else "half"
+    if counts[ext] >= 2 and scan["mt_min"] is not None:
+        span = scan["mt_max"] - scan["mt_min"]
+        if span > 0:
+            fmt["cadence_s"] = int(round(span / (counts[ext] - 1)))
+    return fmt
 
 
 def is_shrunk(path: Path) -> bool:
@@ -117,7 +243,16 @@ def scan_host(cameras, host):
             # registry-only (USB/cold) rows are owned by cold-archive-night.
             if not loc.online or not loc.path.is_dir():
                 continue
-            size = du_bytes(loc.path)
+            # Skip nights on a REMOTE filesystem (e.g. muppet NFS-mounts
+            # puppy's ~/starcam-frames) — that data belongs to its origin
+            # host and would be double-counted here.
+            try:
+                if _is_remote(str(mount_point_of(loc.path))):
+                    continue
+            except OSError:
+                continue
+            scan = scan_tree(loc.path)
+            size = scan["bytes"]
             # Skip stubs/shadows: when both a canonical metadata-only dir and a
             # real flat/percam copy exist, locate can land on the metadata one.
             # The incomplete hierarchical-migration stubs (canonical
@@ -138,6 +273,9 @@ def scan_host(cameras, host):
                 "shrunk": is_shrunk(loc.path),
                 "updated_at": int(time.time()),
             }
+            fmt = fmt_of(scan, native=cfg.get("resolution"))
+            if fmt:
+                item["fmt"] = fmt
             # verdict (clear/cloudy/no-data) from summary.json drives the
             # keeper policy on the web page; record it when present.
             v = verdict_of(loc.path)
@@ -152,12 +290,16 @@ _DATED = _re.compile(r"(\d{4}-\d{2}-\d{2})$")
 
 
 def scan_extra_streams(host):
-    """Yield inventory items for non-astro streams (skycam) by finding dated
-    subdirs under their roots. One item per (stream, night, root) so the
-    storage page shows them. Aggregated per night across the flat YYYY-MM-DD
-    dirs; the canonical YYYY/MM/DD tree is summed too."""
+    """Yield inventory items for EXTRA_STREAMS roots by finding dated
+    subdirs under them. One item per (stream, night, root) so the storage
+    page shows each physical copy (e.g. muppet's two starcam-backup
+    copies on different disks)."""
     import glob as _glob
     for stream, roots in EXTRA_STREAMS.items():
+        try:
+            native = CameraConfig.load(stream).get("resolution")
+        except FileNotFoundError:
+            native = None
         for root in roots:
             for rp in _glob.glob(Path(root).expanduser().as_posix()):
                 rootp = Path(rp)
@@ -176,9 +318,11 @@ def scan_extra_streams(host):
                 for d in rootp.glob("[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"):
                     if not d.is_dir():
                         continue
-                    size = du_bytes(d)
+                    scan = scan_tree(d)
+                    size = scan["bytes"]
                     if size < MIN_REAL_BYTES:
                         continue
+                    fmt = fmt_of(scan, native=native)
                     yield {
                         "night": d.name,
                         "loc": f"{stream}#{host}#{d}",
@@ -189,8 +333,9 @@ def scan_extra_streams(host):
                         "online": True,
                         "layout": f"flat:{rootp.name}",
                         "bytes": {"on_disk": size},
-                        "shrunk": False,
+                        "shrunk": is_shrunk(d),
                         "updated_at": int(time.time()),
+                        **({"fmt": fmt} if fmt else {}),
                     }
 
 
@@ -227,10 +372,15 @@ def scan_mode_dated(host):
                         if not sub.is_dir():
                             continue
                         cam = f"{stem}-{sub.name}"   # eclipticam-v1 / -v3w
-                        size = du_bytes(sub)
+                        scan = scan_tree(sub)
+                        size = scan["bytes"]
                         subcam_bytes += size
                         if size < MIN_REAL_BYTES:
                             continue
+                        try:
+                            native = CameraConfig.load(cam).get("resolution")
+                        except FileNotFoundError:
+                            native = None
                         item = {
                             "night": d.name,
                             "loc": f"{cam}#{host}#{sub}",
@@ -244,6 +394,9 @@ def scan_mode_dated(host):
                             "shrunk": is_shrunk(sub),
                             "updated_at": int(time.time()),
                         }
+                        fmt = fmt_of(scan, native=native)
+                        if fmt:
+                            item["fmt"] = fmt
                         v = verdict_of(sub) or verdict_of(d)
                         if v:
                             item["verdict"] = v
@@ -378,8 +531,14 @@ def main() -> int:
     if args.dry_run:
         for it in inv:
             sz = it["bytes"]["on_disk"]
+            f = it.get("fmt") or {}
+            fdesc = " ".join(str(x) for x in (
+                f.get("ext"), "x".join(map(str, f.get("dims", []))) or None,
+                f.get("res_class"), f.get("n_frames") and f"{f['n_frames']}fr",
+                f.get("cadence_s") and f"~{f['cadence_s']}s") if x)
             print(f"  {it['night']}  {it['camera']:14} {it['layout']:9} "
-                  f"{sz/(1<<30):6.2f} GB  shrunk={it['shrunk']}  {it['path']}")
+                  f"{sz/(1<<30):6.2f} GB  shrunk={it['shrunk']}  "
+                  f"[{fdesc}]  {it['path']}")
         for c in cap:
             print(f"  CAP {c['fs']:22} {c['used_gb']}/{c['size_gb']} GB ({c['pct']}%)")
         return 0
