@@ -224,12 +224,12 @@ def fmt_of(scan: dict, native=None):
     {ext, n_frames, dims: [w, h]?, res_class?, cadence_s?}
 
     res_class compares the sampled frame dims to the camera's native
-    resolution: 'full mosaic' (raw Bayer at native res) or 'bin2'
-    (2x2 sum-binned — the binning merges the Bayer channels, so it is
-    no longer a mosaic; don't call it one). When the sampled frame is a
-    squashed sum product the class is prefixed instead: 'sum8 mosaic',
-    'sum2 bin2' ('full' implied). JPEGs are demosaiced so they get
-    'full' / 'half'. cadence_s is the median gap between capture times
+    resolution: 'mosaic' (raw Bayer at native res — full implied) or
+    'bin2' (2x2 sum-binned — the binning merges the Bayer channels, so
+    it is no longer a mosaic; don't call it one). When the sampled frame
+    is a squashed sum product the class is prefixed: 'sum8 mosaic',
+    'sum2 bin2'. JPEGs are demosaiced so they get 'full' / 'half'.
+    cadence_s is the median gap between capture times
     parsed from the FILENAMES (epoch-ms / HH-MM-SS / HH/MMSS) — mtimes
     don't survive copies or squashing, so they're only the fallback —
     snapped to the capture interval (see _nice_cadence)."""
@@ -252,8 +252,7 @@ def fmt_of(scan: dict, native=None):
             nw, nh = native
             if (w, h) == (nw, nh):
                 base = "mosaic" if raw else "full"
-                fmt["res_class"] = (f"{summed} {base}" if summed
-                                    else "full mosaic" if raw else "full")
+                fmt["res_class"] = f"{summed} {base}" if summed else base
             elif (w * 2, h * 2) == (nw, nh):
                 base = "bin2" if raw else "half"
                 fmt["res_class"] = f"{summed} {base}" if summed else base
