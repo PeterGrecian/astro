@@ -179,9 +179,15 @@ def main():
                     help="deg (default: camera.json detrans.angle_deg)")
     ap.add_argument("--k1", type=float, default=None)
     ap.add_argument("--k2", type=float, default=None)
-    ap.add_argument("--bin", type=int, default=1,
-                    help="n×n sum-bin factor (1=full res, default). Larger "
-                         "is faster/higher-SNR; v scales automatically.")
+    ap.add_argument("--bin", type=int, default=2,
+                    help="n×n sum-bin factor (default 2). Bin>=2 sum-combines "
+                         "the RGGB Bayer quad to clean grey BEFORE the warp — "
+                         "the correct de-mosaic. bin=1 would geometrically warp "
+                         "the raw mosaic (Bayer checkerboard baked in) and is "
+                         "auto-promoted to 2. Larger is faster/higher-SNR.")
+    ap.add_argument("--allow-mosaic-warp", action="store_true",
+                    help="permit --bin 1 (warps the raw Bayer mosaic — "
+                         "checkerboard artifacts). For debugging only.")
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--max-windows", type=int, default=None,
                     help="process only the first N output frames (slice)")
@@ -189,6 +195,16 @@ def main():
     ap.add_argument("--frames-glob", default=None,
                     help="override frame glob (default resolves v3w night)")
     args = ap.parse_args()
+
+    # Never geometrically warp the raw Bayer mosaic (the CFA checkerboard gets
+    # baked into the output — see project-bayer-presentation-decision). bin>=2
+    # sum-combines the RGGB quad to grey first. Auto-promote bin 1 -> 2 unless
+    # explicitly overridden for debugging.
+    if args.bin < 2 and not args.allow_mosaic_warp:
+        sys.stderr.write("detrans-sweep: --bin 1 would warp the raw Bayer "
+                         "mosaic; promoting to --bin 2 (grey). Pass "
+                         "--allow-mosaic-warp to override.\n")
+        args.bin = 2
 
     cfg = CameraConfig.load(args.camera)
     # Calibration from camera.json (distortion + detrans blocks), with
