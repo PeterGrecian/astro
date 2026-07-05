@@ -180,10 +180,12 @@ def fmt_of(scan: dict, native=None):
     {ext, n_frames, dims: [w, h]?, res_class?, cadence_s?}
 
     res_class compares the sampled frame dims to the camera's native
-    resolution: 'full mosaic' (raw at native res), 'half mosaic (bin2)'
-    (2x2-binned raw), or the bare dims when neither. JPEGs are demosaiced
-    so they get 'full' / 'half' without the mosaic wording. cadence_s is
-    the mean seconds between frames, from the frames' mtime span."""
+    resolution: 'full mosaic' (raw Bayer at native res) or 'bin2'
+    (2x2 sum-binned — the binning merges the Bayer channels, so it is
+    no longer a mosaic; don't call it one). JPEGs are demosaiced so
+    they get 'full' / 'half' instead. cadence_s is the mean seconds
+    between frames, from the frames' mtime span, snapped to the capture
+    interval (see _nice_cadence)."""
     counts = scan["exts"]
     if not counts:
         return None
@@ -200,7 +202,7 @@ def fmt_of(scan: dict, native=None):
             if (w, h) == (nw, nh):
                 fmt["res_class"] = "full mosaic" if raw else "full"
             elif (w * 2, h * 2) == (nw, nh):
-                fmt["res_class"] = "half mosaic (bin2)" if raw else "half"
+                fmt["res_class"] = "bin2" if raw else "half"
     if counts[ext] >= 2 and scan["mt_min"] is not None:
         span = scan["mt_max"] - scan["mt_min"]
         if span > 0:
@@ -433,6 +435,33 @@ def scan_mode_dated(host):
                         }
 
 
+def dedup_aliases(inv: list[dict]) -> list[dict]:
+    """Collapse rows that are the SAME storage seen through different
+    names — symlinks, bind mounts (e.g. eclipticam's ~/eclipticam-frames
+    is a bind mount of /mnt/ssd), or overlapping scan roots. Identity is
+    the resolved path's (st_dev, st_ino) per (night, camera); anything
+    that resolves to the same inode is one copy, not two. Of the aliases,
+    keep the home-dir path (reported as ~/... on the page — preferred)."""
+    home = str(Path.home())
+    by_key: dict[tuple, dict] = {}
+    out = []
+    for it in inv:
+        try:
+            st = Path(it["path"]).resolve().stat()
+            key = (it["night"], it["camera"], st.st_dev, st.st_ino)
+        except OSError:
+            out.append(it)
+            continue
+        cur = by_key.get(key)
+        if cur is None:
+            by_key[key] = it
+            out.append(it)
+        elif it["path"].startswith(home) and not cur["path"].startswith(home):
+            # same storage, nicer name — swap the kept row's identity
+            cur.update(it)
+    return out
+
+
 def mount_point_of(path: Path) -> Path:
     """The mount point of the filesystem holding `path` (walk up until the
     device id changes). Resolves symlinks first."""
@@ -527,8 +556,9 @@ def main() -> int:
     args = ap.parse_args()
 
     inv = list(scan_host(args.cameras, args.host))
-    inv += list(scan_extra_streams(args.host))   # skycam etc.
+    inv += list(scan_extra_streams(args.host))   # starcam backup roots
     inv += list(scan_mode_dated(args.host))      # eclipticam day+night
+    inv = dedup_aliases(inv)
     # capacity: the roots each camera searches (+ known astro mounts, see
     # scan_capacity); NFS-mounted remote disks are excluded.
     roots = []
