@@ -66,7 +66,11 @@ EXTRA_STREAMS = {
 MODE_DATED_STREAMS = {
     "eclipticam": ["~/eclipticam-frames"],
 }
-MODES = ("day", "night")
+# Only night mode is inventoried (2026-07-05, peter): day frames and the
+# date-level deliverables are derived/disposable and just noise on the
+# storage page — they stay on disk but are not reported. Their existing
+# rows prune on each host's next run.
+MODES = ("night",)
 
 # A "night" must hold at least this many bytes of real data to be inventoried.
 # Excludes the metadata-only stubs of the incomplete hierarchical migration:
@@ -449,7 +453,6 @@ def scan_mode_dated(host):
                         "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]")):
                     if not d.is_dir():
                         continue
-                    subcam_bytes = 0
                     # Real subcams are named v1, v3w, v<N>... — NOT the
                     # deliverable frame dirs (sweep-colour, sweep-diff, ...).
                     for sub in sorted(d.glob("v[0-9]*")):
@@ -458,7 +461,6 @@ def scan_mode_dated(host):
                         cam = f"{stem}-{sub.name}"   # eclipticam-v1 / -v3w
                         scan = scan_tree(sub)
                         size = scan["bytes"]
-                        subcam_bytes += size
                         if size < MIN_REAL_BYTES:
                             continue
                         try:
@@ -485,24 +487,9 @@ def scan_mode_dated(host):
                         if v:
                             item["verdict"] = v
                         yield item
-                    # Date-level deliverables (sweep mp4s, posters) live at
-                    # <mode>/<date>/ outside the subcam dirs — don't lose them.
-                    date_total = du_bytes(d)
-                    remainder = date_total - subcam_bytes
-                    if remainder >= MIN_REAL_BYTES:
-                        yield {
-                            "night": d.name,
-                            "loc": f"{stem}-deliverables#{host}#{d}",
-                            "camera": f"{stem}-deliverables",
-                            "host": host,
-                            "path": str(d),
-                            "storage_class": "local",
-                            "online": True,
-                            "layout": f"mode:{mode}",
-                            "bytes": {"on_disk": remainder},
-                            "shrunk": False,
-                            "updated_at": int(time.time()),
-                        }
+                    # Date-level deliverables (sweep mp4s, posters) at
+                    # <mode>/<date>/ outside the subcam dirs are NOT
+                    # reported (2026-07-05, peter — see MODES note).
 
 
 def dedup_aliases(inv: list[dict]) -> list[dict]:
