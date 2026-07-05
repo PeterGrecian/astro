@@ -94,10 +94,13 @@ def _ext_of(name: str) -> str:
 def scan_tree(path: Path) -> dict:
     """One walk of a night dir: total bytes, per-extension frame counts,
     a sample file per frame extension, and the mtime span of the frames
-    (for cadence). Skips broken symlinks."""
+    (for cadence). The sample is the LARGEST file of its extension, so a
+    night holding both raw and binned frames is classed by its best
+    (full-res) product, not whichever file the walk hit first. Skips
+    broken symlinks."""
     total = 0
     exts: dict[str, int] = {}
-    sample: dict[str, Path] = {}
+    sample: dict[str, tuple[int, Path]] = {}   # ext -> (size, path)
     mt_min = mt_max = None
     for p in path.rglob("*"):
         try:
@@ -110,11 +113,13 @@ def scan_tree(path: Path) -> dict:
         ext = _ext_of(p.name)
         if ext in FRAME_EXTS:
             exts[ext] = exts.get(ext, 0) + 1
-            sample.setdefault(ext, p)
+            if ext not in sample or st.st_size > sample[ext][0]:
+                sample[ext] = (st.st_size, p)
             mt = st.st_mtime
             mt_min = mt if mt_min is None else min(mt_min, mt)
             mt_max = mt if mt_max is None else max(mt_max, mt)
-    return {"bytes": total, "exts": exts, "sample": sample,
+    return {"bytes": total, "exts": exts,
+            "sample": {e: p for e, (_, p) in sample.items()},
             "mt_min": mt_min, "mt_max": mt_max}
 
 
