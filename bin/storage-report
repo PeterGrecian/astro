@@ -77,6 +77,8 @@ MODES = ("day", "night")
 MIN_REAL_BYTES = 1 << 20  # 1 MiB
 
 
+import re as _re
+
 # Frame-file extensions, in the order we prefer them as the night's
 # "primary" format when several are present (raw science data first).
 FRAME_EXTS = (".fits.fz", ".fits", ".dng", ".jpg", ".jpeg", ".png")
@@ -91,7 +93,35 @@ def _ext_of(name: str) -> str:
     return low[i:] if i >= 0 else ""
 
 
-def scan_tree(path: Path) -> dict:
+_EPOCH_MS = _re.compile(r"^\d{13}$")
+_HMS = _re.compile(r"^(\d{2})-(\d{2})-(\d{2})$")
+_MMSS = _re.compile(r"^\d{4}$")
+
+
+def _capture_s(p: Path, allow_mmss: bool = False):
+    """Capture time in seconds from the FILENAME, or None. Frame names
+    carry the real capture time (starcam/v3w-legacy <epoch_ms>, canonical
+    HH-MM-SS, astrocam HH/MMSS); file mtimes do NOT survive copies and
+    squashing, so cadence must come from here whenever it can. Epoch names
+    give absolute seconds; the others give seconds-of-day (good enough for
+    the median inter-frame gap). HH/MMSS is only parsed when allow_mmss
+    (astrocam's flat layout): a 4-digit name is otherwise ambiguous with
+    the legacy SEQUENTIAL numbering (HH/NNNN), which is not a time."""
+    stem = p.name.split(".", 1)[0]
+    if _EPOCH_MS.match(stem):
+        return int(stem) / 1000.0
+    m = _HMS.match(stem)
+    if m:
+        h, mn, s = (int(g) for g in m.groups())
+        return float(h * 3600 + mn * 60 + s)
+    if allow_mmss and _MMSS.match(stem) and stem[:2] < "60" \
+            and stem[2:] < "60" and _re.match(r"^\d{2}$", p.parent.name):
+        return float(int(p.parent.name) * 3600
+                     + int(stem[:2]) * 60 + int(stem[2:]))
+    return None
+
+
+def scan_tree(path: Path, allow_mmss: bool = False) -> dict:
     """One walk of a night dir: total bytes, per-extension frame counts,
     a sample file per frame extension, and the mtime span of the frames
     (for cadence). The sample is the LARGEST file of its extension, so a
@@ -101,6 +131,11 @@ def scan_tree(path: Path) -> dict:
     total = 0
     exts: dict[str, int] = {}
     sample: dict[str, tuple[int, Path]] = {}   # ext -> (size, path)
+    # capture times from filenames, keyed by sum-product tag ('' = raw/
+    # binned, 'sum8', 'sum2', ...) so a squashed dir holding sum8 (24 s)
+    # AND sum2 (6 s) doesn't blend their cadences. Sets: raw+binned pairs
+    # share a capture time.
+    times: dict[str, set] = {}
     mt_min = mt_max = None
     for p in path.rglob("*"):
         try:
@@ -115,12 +150,16 @@ def scan_tree(path: Path) -> dict:
             exts[ext] = exts.get(ext, 0) + 1
             if ext not in sample or st.st_size > sample[ext][0]:
                 sample[ext] = (st.st_size, p)
+            t = _capture_s(p, allow_mmss)
+            if t is not None:
+                m = _re.search(r"-(sum\d+)", p.parent.name)
+                times.setdefault(m.group(1) if m else "", set()).add(t)
             mt = st.st_mtime
             mt_min = mt if mt_min is None else min(mt_min, mt)
             mt_max = mt if mt_max is None else max(mt_max, mt)
     return {"bytes": total, "exts": exts,
             "sample": {e: p for e, (_, p) in sample.items()},
-            "mt_min": mt_min, "mt_max": mt_max}
+            "times": times, "mt_min": mt_min, "mt_max": mt_max}
 
 
 def du_bytes(path: Path) -> int:
@@ -187,32 +226,57 @@ def fmt_of(scan: dict, native=None):
     res_class compares the sampled frame dims to the camera's native
     resolution: 'full mosaic' (raw Bayer at native res) or 'bin2'
     (2x2 sum-binned — the binning merges the Bayer channels, so it is
-    no longer a mosaic; don't call it one). JPEGs are demosaiced so
-    they get 'full' / 'half' instead. cadence_s is the mean seconds
-    between frames, from the frames' mtime span, snapped to the capture
-    interval (see _nice_cadence)."""
+    no longer a mosaic; don't call it one). When the sampled frame is a
+    squashed sum product the class is prefixed instead: 'sum8 mosaic',
+    'sum2 bin2' ('full' implied). JPEGs are demosaiced so they get
+    'full' / 'half'. cadence_s is the median gap between capture times
+    parsed from the FILENAMES (epoch-ms / HH-MM-SS / HH/MMSS) — mtimes
+    don't survive copies or squashing, so they're only the fallback —
+    snapped to the capture interval (see _nice_cadence)."""
     counts = scan["exts"]
     if not counts:
         return None
     ext = max(counts, key=lambda e: (counts[e], -FRAME_EXTS.index(e)))
     fmt = {"ext": ext, "n_frames": counts[ext]}
     raw = ext in (".fits.fz", ".fits", ".dng")
+    sample = scan["sample"][ext]
     dims = (fits_dims if ext in (".fits.fz", ".fits") else jpeg_dims)(
-        scan["sample"][ext]) if ext != ".dng" else None
+        sample) if ext != ".dng" else None
+    # squashed sample? the sum products live in HH-sumN / HHb-sumN dirs
+    m = _re.search(r"-(sum\d+)", str(sample))
+    summed = m.group(1) if m else None
     if dims:
         w, h = dims
         fmt["dims"] = [w, h]
         if native:
             nw, nh = native
             if (w, h) == (nw, nh):
-                fmt["res_class"] = "full mosaic" if raw else "full"
+                base = "mosaic" if raw else "full"
+                fmt["res_class"] = (f"{summed} {base}" if summed
+                                    else "full mosaic" if raw else "full")
             elif (w * 2, h * 2) == (nw, nh):
-                fmt["res_class"] = "bin2" if raw else "half"
-    if counts[ext] >= 2 and scan["mt_min"] is not None:
+                base = "bin2" if raw else "half"
+                fmt["res_class"] = f"{summed} {base}" if summed else base
+    cadence = _median_gap(scan["times"].get(summed or "", set()))
+    if cadence is None and counts[ext] >= 2 and scan["mt_min"] is not None:
         span = scan["mt_max"] - scan["mt_min"]
         if span > 0:
-            fmt["cadence_s"] = _nice_cadence(span / (counts[ext] - 1))
+            cadence = span / (counts[ext] - 1)
+    if cadence:
+        fmt["cadence_s"] = _nice_cadence(cadence)
     return fmt
+
+
+def _median_gap(times: set[float]):
+    """Median gap between consecutive capture times — robust to capture
+    holes and to the midnight wrap of seconds-of-day names (both just
+    contribute outlier gaps, which a median ignores). None when too few
+    frames carry a parseable time."""
+    if len(times) < 10:
+        return None
+    ts = sorted(times)
+    gaps = sorted(b - a for a, b in zip(ts, ts[1:]) if b > a)
+    return gaps[len(gaps) // 2] if gaps else None
 
 
 def _nice_cadence(c: float) -> int:
@@ -270,7 +334,9 @@ def scan_host(cameras, host):
                     continue
             except OSError:
                 continue
-            scan = scan_tree(loc.path)
+            # astrocam's flat layout names frames HH/MMSS — let the time
+            # parser use that form here (ambiguous elsewhere, see _capture_s).
+            scan = scan_tree(loc.path, allow_mmss=(loc.layout == "flat"))
             size = scan["bytes"]
             # Skip stubs/shadows: when both a canonical metadata-only dir and a
             # real flat/percam copy exist, locate can land on the metadata one.
