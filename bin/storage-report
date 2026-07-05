@@ -204,8 +204,20 @@ def fmt_of(scan: dict, native=None):
     if counts[ext] >= 2 and scan["mt_min"] is not None:
         span = scan["mt_max"] - scan["mt_min"]
         if span > 0:
-            fmt["cadence_s"] = int(round(span / (counts[ext] - 1)))
+            fmt["cadence_s"] = _nice_cadence(span / (counts[ext] - 1))
     return fmt
+
+
+def _nice_cadence(c: float) -> int:
+    """Snap a measured cadence to the capture interval it wobbles around:
+    mtime spans come out a second or two off (~59/61 s for a 60 s cadence),
+    so minute-scale values within 3% of a multiple of 60 s snap to it.
+    Sub-minute cadences (3 s raw, 24 s sum8) are reported as measured."""
+    if c >= 45:
+        target = round(c / 60) * 60
+        if target and abs(c - target) / target <= 0.03:
+            return target
+    return int(round(c))
 
 
 def is_shrunk(path: Path) -> bool:
