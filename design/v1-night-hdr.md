@@ -1,6 +1,10 @@
 # v1 day–night–sun HDR — v1 as the wide-DR highlights camera
 
-**Status: design only (2026-07-01). No code, no capture change yet.**
+> **ABANDONED 2026-07-06.** The whole day/moon/sun/v1 line is retired — v1
+> capture is stopped (eclipticam is night-only now) and the day frames deleted.
+> This HDR idea never left design and won't be built. Not needed for the quests.
+
+**Status: ABANDONED (was: design only 2026-07-01. No code was ever written.)**
 
 ## Scope grew (read this first)
 

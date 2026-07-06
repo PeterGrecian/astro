@@ -1,5 +1,16 @@
 # Moon capture subsystem — design
 
+> **PARTLY ABANDONED 2026-07-06.** Of the four purposes below:
+> - **net tracking** (moon as astrometric anchor) — ABANDONED, superseded by
+>   Altair-based v3w star-ID (`project-v3w-star-id-moon-anchor`); not needed for
+>   the quests.
+> - **v1 as a complement** (the "chosen direction" section) — ABANDONED; v1
+>   capture is stopped, eclipticam is night-only, day frames deleted.
+> - **phases timelapse / moon removal / focus testing** — potentially KEPT (real
+>   v3w deliverables, independent of the anchoring scaffolding; `moon-extract`,
+>   `moon-track`, `moon-deliver` still live — see `retire-moon-marking-v1.md`
+>   Tier 3). Read the below with that split in mind.
+
 Peter's design (2026-06-24/25). The moon is a Swiss-army calibration
 object serving FOUR purposes: phases timelapse, precise net tracking,
 moon removal from long exposures, and focus testing.

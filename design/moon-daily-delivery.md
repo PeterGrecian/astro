@@ -1,5 +1,12 @@
 # Daily moon delivery — automated on eclipticam
 
+> **PARTLY ABANDONED 2026-07-06.** The **moon-net render + publish** is retired
+> (deliverables removed from site/pipeline/S3; Altair star-ID superseded the
+> anchoring; not needed for the quests). The **moon extraction / montage**
+> (`moon-extract`, `moon-track`, `moon-deliver`) is KEPT as a real v3w
+> deliverable. So: moon crops/montage stay; the moon-NET part is gone. See
+> `retire-moon-marking-v1.md`.
+
 **Goal:** every night, automatically extract the moon from v3w night frames,
 render the cumulative moon-net, and publish both, with no hand-running.
 

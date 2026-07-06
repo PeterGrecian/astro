@@ -1,9 +1,10 @@
 # astro — TODO
 
-moon crops use
-sun-net: 5-stop gel bloom -> 15px rms marks; Baader film for tight sun marks
-v1 pointing/distortion fit from moon(07-02)+sun(07-03) wide-baseline threads
-calibrate v3w day-JPEG <-> night-FITS offset (~+470,+85px + roll) to merge -night threads
+~~sun-net: 5-stop gel bloom; v1 pointing/distortion fit from moon+sun threads;
+v3w day-JPEG<->night-FITS offset calibration~~ — **ABANDONED 2026-07-06.** The
+whole moon/sun/v1 anchoring line is retired (superseded by Altair star-ID; not
+needed for the quests). v1 capture stopped, eclipticam night-only, deliverables
+removed. See `design/retire-moon-marking-v1.md`.
 
 Live work list. Move items to DECISIONS.md once they crystallise into
 load-bearing choices; delete done items (per the
@@ -144,14 +145,13 @@ Started 2026-07-02 on the 2026-07-01 night; near-pole WCS solved by hand
 
 ## Now
 
-- [ ] **NEXT BIG: eclipticam-moon orientation lock.** Lock camera pointing
-      from known fiducials — moon (eclipticam day) + Polaris (astrocam
-      night): known position + known time → absolute WCS. Mostly assembly
-      (`wcs-from-anchors`, `fit-pole`, `orient-check`, `overlay-gaia2`
-      exist). The one new piece: a **multi-anchor LSQ WCS fit**
-      (`wcs-from-anchors` only takes 1–2; the moon-net is over-determined).
-      eclipticam-moon first. Foundation for star-ID → limiting mag → Neptune.
-      See memory `project-astro-orientation-lock`.
+- [ ] **NEXT BIG: v3w orientation lock via STAR-ID (not moon).** Lock camera
+      pointing from identified stars — Altair/Aquila on v3w, Deneb+Polaris on
+      astrocam: known position + known time → absolute WCS + plate solve. The
+      moon/sun-anchor approach here is **ABANDONED 2026-07-06** (hand-marking
+      tedious; stars are direct). Make the plate-solve a standing per-night tool
+      (foundation for the quests: M51/Algol/Polaris + limiting mag → Neptune).
+      See memory `project-v3w-star-id-moon-anchor`, `design/zenith-quests.md`.
 - [ ] **Verify astrocam→muppet night write** (switched 2026-06-28). astrocam
       writes ~11 GB/night over NFS to muppet via a USB2-capped, ~74 ms link.
       Day-probe write works; confirm a full night didn't stutter capture.

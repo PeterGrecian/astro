@@ -1,5 +1,12 @@
 # Moon-net marking workflow
 
+> **ABANDONED 2026-07-06.** Superseded by direct Altair-based star-ID on v3w
+> (`project-v3w-star-id-moon-anchor`); the hand-marked moon-net was scaffolding
+> to bootstrap v3w astrometry and proved practically tedious. Not needed for the
+> quests (M51/Algol/Polaris/planets) — those use star-ID + plate solve directly.
+> Deliverables + capture already retired (see `retire-moon-marking-v1.md`).
+> Kept as a historical record of the method.
+
 Building the per-camera **moon-net** — the accumulated set of hand-marked
 moon curves (one *thread* per clear night) that pins each eclipticam's
 pointing / plate-scale / distortion (see `project-astro-orientation-lock`).

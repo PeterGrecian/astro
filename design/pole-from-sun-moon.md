@@ -1,5 +1,10 @@
 # Pole determination from sun + moon
 
+> **ABANDONED 2026-07-06.** Superseded by direct Altair-based star-ID on v3w
+> (`project-v3w-star-id-moon-anchor`), which pins pointing/plate/pole from stars
+> without needing the sun/moon as anchors. Not needed for the quests. Kept as a
+> historical record of the method.
+
 Written 2026-06-05.
 
 Eclipticam is a fixed window-mounted camera that does **not** see the

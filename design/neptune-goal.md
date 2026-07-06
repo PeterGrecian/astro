@@ -17,7 +17,7 @@ can resolve — that is THE open question.
 |---|---|
 | Magnitude | **+7.8** (≈100× fainter than Polaris, ~6 mag below) |
 | Autumn visibility | well-placed ALL autumn in v3w's field (az ~150, alt ~35) at a convenient evening hour: Sept ~midnight → Dec ~18h as the season moves earlier |
-| So pointing is NOT the obstacle | the moon net gives where-in-frame; Neptune will be there |
+| So pointing is NOT the obstacle | Altair-based star-ID + plate solve gives where-in-frame; Neptune will be there (moon-net anchoring ABANDONED 2026-07-06, superseded by star-ID) |
 | The obstacle IS depth | can an f/2.2 ultra-wide Pi camera, through DOUBLE GLAZING, reach mag 8? Unknown. |
 
 ## The gating question: limiting magnitude
@@ -39,9 +39,11 @@ noise: 1960 vs 5684 grey-bin), and longer baselines.
 
 ## The race (parallel aspects, all feeding the goal)
 
-- **Pointing / astrometry** — the moon NET (accumulating monthly threads
-  at different declinations) -> precise pixel↔sky across the field. 2
-  threads so far (dec -9, -19). On track; breaks the single-arc degeneracy.
+- **Pointing / astrometry** — **Altair-based star-ID + plate solve** (2026-07-05
+  onward): identify bright stars directly in v3w night frames, fit the local
+  plate → precise pixel↔sky across the field. Supersedes the moon-net anchoring
+  (ABANDONED 2026-07-06 — hand-marking was tedious; stars are direct). See
+  `project-v3w-star-id-moon-anchor`.
 - **Depth / magnitude** — limiting-magnitude measurement (above). THE
   gating unknown.
 - **Capture** — full-res 4608x2592 + lens 3.15 in-focus (both landed),
