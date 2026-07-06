@@ -60,6 +60,12 @@ class StreamingConfig:
     camera: str = ""                       # canonical camera name for brightness.csv path
     frames_root: Optional[Path] = None     # NFS root; if None, brightness.csv stays in buffer_dir
     mode: str = "night"                    # recorded per-row in brightness.csv
+    # Focus-dither experiment: step LensPosition per frame in a sawtooth
+    # {"base": 3.15, "top": 5.15, "step": 0.10}. None = fixed lens_position
+    # (normal capture). When set, each frame's commanded + reported focus is
+    # written to the FITS header (LENSPOS / LENSPREP). Sweeps focus for
+    # star-focus discovery + VCM mechanics + super-resolution radial dither.
+    focus_dither: Optional[dict] = None
     # Exit streaming when frame mean reaches this fraction of the
     # uint16 container's max (65535). Expressed as a fraction, not as
     # "stops above pedestal", because saturated raw means CANNOT
@@ -71,10 +77,28 @@ class StreamingConfig:
 
 
 def _capture_thread(picam2, q: queue.Queue, stop: threading.Event,
-                    log: logging.Logger):
+                    log: logging.Logger, focus_dither: Optional[dict] = None):
     """Pull frames as fast as the camera will deliver; drop nothing
-    here. Each item is (epoch_ms, bayer_uint16_copy)."""
+    here. Each item is (epoch_ms, bayer_uint16_copy, lens_cmd, lens_rep).
+
+    focus_dither {"base","top","step"}: step LensPosition each frame in a
+    sawtooth before capturing (settle briefly), and tag the frame with the
+    commanded + reported focus. None = fixed focus (lens_cmd/lens_rep None)."""
+    i = 0
+    lp_cmd = lp_rep = None
+    if focus_dither:
+        base = focus_dither["base"]; top = focus_dither["top"]
+        step = focus_dither["step"]
+        n = max(1, int(round((top - base) / step)))
     while not stop.is_set():
+        if focus_dither:
+            lp_cmd = round(base + (i % n) * step, 3)
+            try:
+                # AfMode 0 = Manual; re-assert each frame in case of glitch.
+                picam2.set_controls({"AfMode": 0, "LensPosition": lp_cmd})
+                time.sleep(0.3)   # VCM settle before the exposure
+            except Exception as e:
+                log.error(f"lens step failed: {e}")
         try:
             req = picam2.capture_request()
         except Exception as e:
@@ -83,10 +107,13 @@ def _capture_thread(picam2, q: queue.Queue, stop: threading.Event,
             continue
         try:
             bayer = req.make_array("raw").view(np.uint16).copy()
+            if focus_dither:
+                lp_rep = req.get_metadata().get("LensPosition")
         finally:
             req.release()
         epoch_ms = int(time.time() * 1000)
-        q.put((epoch_ms, bayer))
+        q.put((epoch_ms, bayer, lp_cmd, lp_rep))
+        i += 1
 
 
 def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
@@ -109,7 +136,7 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
 
     while not (stop.is_set() and q.empty()):
         try:
-            epoch_ms, bayer = q.get(timeout=1.0)
+            epoch_ms, bayer, lp_cmd, lp_rep = q.get(timeout=1.0)
         except queue.Empty:
             continue
         # Saturation guard: if the frame is bright enough to be daylight
@@ -160,6 +187,10 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         h["CAMERA"] = cfg.camera_name
         h["MEAN"] = mean
         h["PER_S"] = per_s
+        if lp_cmd is not None:   # focus-dither run: record the per-frame focus
+            h["LENSPOS"] = (lp_cmd, "commanded VCM dioptre (focus-dither)")
+            h["LENSPREP"] = (float(lp_rep) if lp_rep is not None else -1.0,
+                             "reported LensPosition (metadata)")
         fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp_path, overwrite=True)
         tmp_path.rename(out_path)
     legacy_fh.close()
@@ -207,13 +238,15 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
         # Drop first frame — controls may not be applied yet.
         req = cam.capture_request(); req.release()
         cap_t = threading.Thread(target=_capture_thread,
-                                 args=(cam, q, stop, log), daemon=True)
+                                 args=(cam, q, stop, log, cfg.focus_dither),
+                                 daemon=True)
         comp_t = threading.Thread(target=_compress_thread,
                                   args=(cfg, q, stop, saturated, log),
                                   daemon=True)
         cap_t.start(); comp_t.start()
         log.info(f"streaming: cam={cfg.cam_idx} exp={cfg.exposure_us}us "
-                 f"gain={cfg.gain} lp={cfg.lens_position} buf={cfg.buffer_dir}")
+                 f"gain={cfg.gain} lp={cfg.lens_position} buf={cfg.buffer_dir} "
+                 f"focus_dither={cfg.focus_dither}")
         while not stop.is_set():
             time.sleep(1.0)
         cap_t.join(timeout=5)

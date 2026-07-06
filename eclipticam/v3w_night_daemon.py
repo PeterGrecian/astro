@@ -63,8 +63,21 @@ def main() -> int:
     lens_position = _param("V3W_LENS_POSITION", cap.get("lens_position"),
                            3.15, float)
     pedestal = _param("V3W_PEDESTAL", cfg_v3w.get("pedestal"), 4380, int)
+    # Focus-dither experiment (opt-in via env). V3W_FOCUS_DITHER=1 enables a
+    # per-frame sawtooth focus sweep (base->top by step), writing LENSPOS to
+    # each FITS header. Overridable ranges via V3W_FD_BASE/TOP/STEP. Unset =
+    # normal fixed-focus capture. Lets the experiment run through the normal
+    # systemd service (no masking / manual launch).
+    focus_dither = None
+    if os.environ.get("V3W_FOCUS_DITHER") == "1":
+        focus_dither = {
+            "base": float(os.environ.get("V3W_FD_BASE", 3.15)),
+            "top": float(os.environ.get("V3W_FD_TOP", 5.15)),
+            "step": float(os.environ.get("V3W_FD_STEP", 0.10)),
+        }
     logging.info(f"capture params: exposure_us={exposure_us} gain={gain} "
-                 f"lens_position={lens_position} pedestal={pedestal}")
+                 f"lens_position={lens_position} pedestal={pedestal} "
+                 f"focus_dither={focus_dither}")
 
     cfg = StreamingConfig(
         cam_idx=CAM_V3W,
@@ -91,6 +104,7 @@ def main() -> int:
         camera=CAMERA,
         frames_root=frames_root,
         mode="night",
+        focus_dither=focus_dither,
     )
     reason = run(cfg)
     logging.info(f"exiting cleanly (reason={reason})")
