@@ -7,11 +7,14 @@ transforms. Keep this current when capture/render geometry changes.
 
 ## The three cameras
 
-| Camera | Sensor | Bayer | Raw resolution | Plate scale (deg/px) | rotate_180 |
-|---|---|---|---|---|---|
-| **eclipticam-v3w** | IMX708 | SRGGB10 (RGGB) | 4608 × 2592 | 0.0443* (see note) | **NO** — array-top = sky-top |
-| **eclipticam-v1** | OV5647 | SGBRG10 | 2592 × 1944 | 0.0206 | (day cam; TBD) |
-| **astrocam** | IMX219 | SBGGR10 (BGGR) | 3280 × 2464 | 0.019 (nom) / **0.0207 solved** | **YES** — sensor mounted inverted |
+| Camera | Module | Sensor | Bayer | Raw resolution | Plate scale (deg/px) | rotate_180 |
+|---|---|---|---|---|---|---|
+| **eclipticam-v3w** | Camera Module 3 Wide | IMX708 | SRGGB10 (RGGB) | 4608 × 2592 | 0.0443* (see note) | **NO** — array-top = sky-top |
+| **eclipticam-v1** | Camera Module v1 | OV5647 | SGBRG10 | 2592 × 1944 | 0.0206 | (day cam; TBD) |
+| **astrocam** | **Camera Module v2** | IMX219 | SBGGR10 (BGGR) | 3280 × 2464 | 0.019 (nom) / **0.0207 solved** | **YES** — sensor mounted inverted |
+
+(Module ↔ sensor: v1 = OV5647, v2 = IMX219, Module 3 Wide = IMX708. "the v2
+camera" = astrocam.)
 
 \* v3w plate_scale 0.0443 in camera.json is the OLD binned value; solved full-res
 is ~0.0221 deg/px (0.02214 = 102°/4608). See project memory / distortion notes.
