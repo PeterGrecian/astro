@@ -64,15 +64,12 @@ Consequences for cloud-close:
   halts imaging). Must NOT flap on transient cloud (sg90 wear + fragmented
   imaging) -> cloud-close needs a LONGER hysteresis than day/night: close only on
   PERSISTENT low star-count (minutes), rely on the 300s lockout.
-- **Bootstrap circularity**: re-open currently triggers on DARKNESS (mean<=80),
-  but a CLOUDY NIGHT is ALSO dark -> it would immediately re-open. And with the
-  cover CLOSED (mean~3) it CANNOT see stars to judge clarity. So it cannot tell
-  "clear night" from "cloudy night" while closed. RESOLUTION: when cloud-closed
-  at night, PERIODICALLY PEEK — briefly re-open every N min, sample star count,
-  re-close if still cloudy, stay open if clear. (Or accept: dark alone re-opens,
-  and cloud-close re-triggers on the next star-count sample once open — a
-  self-correcting open/sample/close cycle, bounded by the lockout so it peeks at
-  most every ~5 min.)
+- **No bootstrap problem — the cover is TRANSPARENT** (Peter). The camera still
+  sees the sky brightness AND star count THROUGH the closed cover (mean ~3 is the
+  DARK sky through glass, not blindness; day mode merely CHOOSES not to save
+  frames). So clarity is judgeable continuously whether open or closed -> the
+  cloud-close/clear-open decision runs on the through-glass star count with NO
+  peek needed. Closed = rain protection only, not a blind shutter.
 
 ## Fail-safe consideration
 Given the box is only *fairly* sheltered, bias toward safety: on **ambiguity or
