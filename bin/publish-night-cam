@@ -401,17 +401,12 @@ PYEOF
 echo "--- combined brightness (multi-night)"
 "$PY" "$HERE/combined-brightness" --camera "$CAMERA" --publish || true
 
-# Refresh the accumulating moon net: the reference-night max-stack with every
-# marked moon thread drawn over it. Fixed camera => the threads accumulate into
-# a net of known-position curves across the field. One stable key at the camera
-# prefix (like combined-brightness). Self-skips cleanly when the camera has no
-# moon-net.json (e.g. eclipticam-v1) or no reference stack on disk.
-echo "--- moon net (accumulated moon threads)"
-# On v3w also draw the v1 FOV box + v1's sun trail mapped into the v1 patch
-# (via eclipticam-v1/v1_to_v3w.json). Self-skips if the transform is absent.
-moon_extra=()
-[[ "$CAMERA" == "eclipticam-v3w" ]] && moon_extra+=(--v1-sun)
-"$PY" "$HERE/moon-overlay" --camera "$CAMERA" --extend "${moon_extra[@]}" --publish || true
+# Moon-net / sun-net publishing RETIRED 2026-07-06. The hand-marked moon/sun
+# nets + the v1 anchoring were scaffolding to bootstrap v3w astrometry; Altair-
+# based star-ID superseded them (see design/retire-moon-marking-v1.md). Stopped
+# producing moon-net.png / sun-net.png here; the website no longer displays them
+# (mywebsite passes moon_net_url=sun_net_url=None). moon-overlay + the marked
+# nets are kept on disk for now (data retirement is a separate later step).
 
 # Refresh the calendar manifest at the PUBLIC camera prefix so the website
 # renders its per-night index from one S3 object (no per-night list/get/presign
