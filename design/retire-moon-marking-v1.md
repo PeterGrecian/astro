@@ -1,6 +1,8 @@
 # Retire moon/sun-net hand-marking + v1-day anchoring
 
-**Status: PLAN (2026-07-05). Not yet executed — document first, tidy later.**
+**Status: IN PROGRESS. DELIVERABLES RETIRED + DEPLOYED 2026-07-06** (moon-net/
+sun-net: pipeline producer, website display, S3 objects all removed & live).
+Tier-1 tools/configs + v1 data retirement still pending.**
 
 ## Why
 
