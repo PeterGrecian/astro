@@ -301,11 +301,12 @@ def capture_tick():
         ensure_v3w_streaming_running()
         lum = streaming_v3w_lum()
     else:
+        # v3w day-JPEG capture RETIRED 2026-07-06 — eclipticam is now
+        # NIGHT-ONLY (the day/moon/sun/v1 work is abandoned; see
+        # design/retire-moon-marking-v1.md). In day mode just ensure the
+        # night streaming daemon is stopped and shoot nothing.
         ensure_v3w_streaming_stopped()
-        hour_dir = FRAMES / "day" / utc_date / "v3w" / hh
-        out_path = next_frame_path(hour_dir, "jpg")
-        shoot_day(CAM_V3W, out_path, lens_position=LENS_POSITION_V3W)
-        lum = scene_luminance_from_jpeg(out_path) if out_path.exists() else None
+        lum = None
     new_state["v3w"] = {"mode": v3w_mode, "hold": v3w_hold,
                         "lum": lum if lum is not None else v3w_prev.get("lum")}
 
@@ -313,18 +314,16 @@ def capture_tick():
     # In v3w-night the scene is dark, so a v1 day-mode JPG is just
     # noise — skip it. v1 state freezes so its hysteresis resumes
     # cleanly when day returns.
+    # v1 (OV5647 day camera) capture RETIRED 2026-07-06. The day/moon/sun/v1
+    # work is abandoned (Altair-based v3w star-ID superseded the v1 sun/moon
+    # anchoring; see design/retire-moon-marking-v1.md). No more v1 day JPEGs.
+    # State bookkeeping retained (mode/hold) so anything reading state.json's
+    # "v1" key still finds it, but no frame is shot and no luminance measured.
     v1_prev = state.get("v1", {})
     v1_mode, v1_hold = decide_mode(v1_prev, sun_alt_deg=sun_alt,
                                    night_deg=night_deg)
-    if v3w_mode == "day":
-        hour_dir = FRAMES / "day" / utc_date / "v1" / hh
-        out_path = next_frame_path(hour_dir, "jpg")
-        shoot_day(CAM_V1, out_path, lens_position=None)
-        v1_lum = scene_luminance_from_jpeg(out_path) if out_path.exists() else None
-    else:
-        v1_lum = None
     new_state["v1"] = {"mode": v1_mode, "hold": v1_hold,
-                       "lum": v1_lum if v1_lum is not None else v1_prev.get("lum")}
+                       "lum": v1_prev.get("lum")}
     save_state(new_state)
 
 
