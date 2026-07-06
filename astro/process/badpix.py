@@ -12,11 +12,20 @@ Cold: MAX over the night < sky_median - COLD_SIGMA -> persistently dark
 Sky model is median + MAD of the min image — robust against the bad
 pixels themselves contaminating the statistics.
 """
+import json
+from pathlib import Path
+
 import numpy as np
 from astropy.io import fits
 
 HOT_SIGMA = 10.0
 COLD_SIGMA = 10.0
+
+# Committed master hot-pixel masks live next to each camera's config as
+# <camera>/hot-master.json (the per-night badpixel.fits is post-hoc, so it is
+# NOT available at capture / pipeline step 0 — the master is). See
+# design/hot-pixel-mask.md.
+_CONFIG_ROOT = Path(__file__).resolve().parents[2]  # repo root (astro/)
 
 
 def compute_bad_pixel_mask(min_img, max_img,
@@ -80,3 +89,55 @@ def load_bad_mask(path):
     """Read a bad-mask FITS back as a bool array (True = bad)."""
     with fits.open(path) as hdul:
         return hdul[1].data != 0
+
+
+def load_master(camera, raw_shape=None):
+    """Load a camera's committed master hot-pixel mask as a bool array.
+
+    Returns True = hot. The JSON stores hot pixels at BINNED resolution
+    (half the raw mosaic); pass ``raw_shape=(H, W)`` to get it upsampled ×2
+    to the raw mosaic grid (and trimmed/padded to exactly that shape). With
+    no ``raw_shape`` the binned-resolution mask is returned.
+
+    Apply this at STEP 0 of any PSF / detection / streak work — the per-night
+    badpixel.fits is generated post-hoc and is unavailable at capture time.
+    Returns None (with no error) if the camera has no master mask yet.
+    """
+    path = _CONFIG_ROOT / camera / "hot-master.json"
+    if not path.exists():
+        return None
+    doc = json.loads(path.read_text())
+    h, w = doc["resolution"]
+    mask = np.zeros((h, w), dtype=bool)
+    yx = np.asarray(doc["hot_yx"], dtype=int)
+    if len(yx):
+        mask[yx[:, 0], yx[:, 1]] = True
+    if raw_shape is None:
+        return mask
+    up = np.repeat(np.repeat(mask, 2, axis=0), 2, axis=1)
+    H, W = raw_shape
+    out = np.zeros((H, W), dtype=bool)
+    out[: min(H, up.shape[0]), : min(W, up.shape[1])] = \
+        up[: min(H, up.shape[0]), : min(W, up.shape[1])]
+    return out
+
+
+def apply_master(frame, camera, fill="median"):
+    """Return a copy of ``frame`` with the camera's master-hot pixels filled.
+
+    ``fill``: "median" (global frame median — good for detection/PSF; neutral),
+    "zero", or a float. No-op copy if the camera has no master mask. ``frame``
+    is a raw 2D mosaic; the mask is upsampled to its shape automatically.
+    """
+    mask = load_master(camera, raw_shape=frame.shape)
+    out = frame.copy()
+    if mask is None or not mask.any():
+        return out
+    if fill == "median":
+        val = float(np.median(frame))
+    elif fill == "zero":
+        val = 0.0
+    else:
+        val = float(fill)
+    out[mask] = val
+    return out
