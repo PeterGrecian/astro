@@ -52,6 +52,28 @@ persistent record.** Fix: append timestamped events to a durable file, e.g.
 transition list): `<utc> open|closed reason=dark|bright|cloudy mean=.. n_stars=..`.
 Then dusk-open / dawn-close / rain-close are auditable.
 
+### 3. Capture is gated by cover state (mode==night == cover OPEN)
+CONFIRMED (Peter): astrocam CAPTURES ONLY when the cover is OPEN. `if mode ==
+"night":` gates all capture (coadd/FITS/brightness/starfind); "Day mode just
+discards the raw and doesn't write FITS" (capture.py L69). mode<->cover are
+locked: night==open, day==closed (L290). So **cover-close and capture-stop are
+the SAME event.**
+
+Consequences for cloud-close:
+- A sustained cloud closes the cover -> capture stops (correct for rain, but also
+  halts imaging). Must NOT flap on transient cloud (sg90 wear + fragmented
+  imaging) -> cloud-close needs a LONGER hysteresis than day/night: close only on
+  PERSISTENT low star-count (minutes), rely on the 300s lockout.
+- **Bootstrap circularity**: re-open currently triggers on DARKNESS (mean<=80),
+  but a CLOUDY NIGHT is ALSO dark -> it would immediately re-open. And with the
+  cover CLOSED (mean~3) it CANNOT see stars to judge clarity. So it cannot tell
+  "clear night" from "cloudy night" while closed. RESOLUTION: when cloud-closed
+  at night, PERIODICALLY PEEK — briefly re-open every N min, sample star count,
+  re-close if still cloudy, stay open if clear. (Or accept: dark alone re-opens,
+  and cloud-close re-triggers on the next star-count sample once open — a
+  self-correcting open/sample/close cycle, bounded by the lockout so it peeks at
+  most every ~5 min.)
+
 ## Fail-safe consideration
 Given the box is only *fairly* sheltered, bias toward safety: on **ambiguity or
 sensor failure, default to CLOSED**. Better to miss a clear night than flood the
