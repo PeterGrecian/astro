@@ -133,8 +133,35 @@ def save_state(state):
     STATE_FILE.write_text(json.dumps(state))
 
 
-def cover(position):
-    subprocess.run([sys.executable, str(HERE / "cover.py"), position], check=True)
+def log_event(kind, **fields):
+    """Append a durable, timestamped JSON event line to the per-night events
+    log next to the frames on NFS (survives restarts/journal rotation, is
+    fleet-visible, and co-located with the night's data). Never raises — an
+    NFS hiccup must not stop capture. Answers "did the cover open last night?"
+    which the ephemeral prints + overwritten state.json could not."""
+    now = utcnow()
+    rec = {"utc": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "event": kind, **fields}
+    try:
+        night_dir = FRAMES / night_of(now)
+        night_dir.mkdir(parents=True, exist_ok=True)
+        with (night_dir / "events.log").open("a", buffering=1) as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError as e:
+        print(f"events.log append failed: {e}", flush=True)
+    print(f"EVENT {rec}", flush=True)  # also to journal for live tailing
+
+
+def cover(position, reason=""):
+    """Move the cover and durably log the move + outcome. A failed servo
+    command is logged (ok=false) so a stuck cover is visible in the record."""
+    ok = True
+    try:
+        subprocess.run([sys.executable, str(HERE / "cover.py"), position],
+                       check=True)
+    except subprocess.CalledProcessError as e:
+        ok = False
+        print(f"cover {position} FAILED: {e}", flush=True)
+    log_event("cover", position=position, reason=reason, ok=ok)
 
 
 def make_camera():
@@ -287,7 +314,8 @@ def main():
     consec_bright = 0
     last_cover_flip = 0.0
 
-    cover("open" if mode == "night" else "closed")
+    log_event("startup", mode=mode)
+    cover("open" if mode == "night" else "closed", reason="startup")
 
     cam = make_camera()
     apply_controls(cam)
@@ -398,15 +426,15 @@ def main():
 
             if not lockout:
                 if mode == "day" and consec_dark >= COVER_HYST_FRAMES:
-                    print(f"mode day->night (mean={frame_mean:.1f})", flush=True)
-                    cover("open")
+                    log_event("transition", to="night", mean=round(frame_mean, 1))
+                    cover("open", reason=f"day->night mean={frame_mean:.1f}")
                     mode = "night"
                     apply_controls(cam)
                     last_cover_flip = now_mono
                     consec_dark = 0
                 elif mode == "night" and consec_bright >= COVER_HYST_FRAMES:
-                    print(f"mode night->day (mean={frame_mean:.1f})", flush=True)
-                    cover("closed")
+                    log_event("transition", to="day", mean=round(frame_mean, 1))
+                    cover("closed", reason=f"night->day mean={frame_mean:.1f}")
                     mode = "day"
                     apply_controls(cam)
                     last_cover_flip = now_mono
