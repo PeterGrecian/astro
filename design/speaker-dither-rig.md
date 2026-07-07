@@ -24,14 +24,32 @@ needs 2.** So the rig is designed 2-axis, deployed on astrocam first.
 
 ## Mechanics
 
-- Camera plate on a compliant 2-axis flexure (or gimbal): two orthogonal nod
-  axes through the camera's centre of mass, low friction, spring-return.
-- **Speaker A** pushes the plate → nod about axis 1 → image shifts in direction 1.
-- **Speaker B** (orthogonal) → nod about axis 2 → image shifts in direction 2.
-- Small-angle tilt ≈ pure image translation (uniform shift for all stars).
-- Throw is tiny: **0.1 px = 8 arcsec tilt; 0.5 px = 40 arcsec** (f≈2588 px on
-  astrocam full-res). Voice coil **~1 µm/mA**; full dither ~**16 µm on a 100 mm
-  arm = ~16 mA**. Well within a scrap speaker's linear range.
+**3-point corner scheme (Peter's design — the camera IS the moving plate):**
+The camera is a **2 cm square**. Mount it on three of its four corners:
+```
+  P0 constrained (pivot) ──────── P1 → speaker A
+        │
+  P2 → speaker B                  P3 free (follows)
+```
+- **P0** — constrained pivot (the fixed reference).
+- **P1, P2** — the two ADJACENT corners, each on a **speaker voice coil**.
+- **P3** — diagonal, free.
+- Speaker A (P1) nods the plate about the **P0–P2 edge**; speaker B (P2) about
+  the **P0–P1 edge** → **two orthogonal tilt axes = clean 2D**, no separate
+  gimbal (the constraint geometry gives the axes for free).
+- **Throw is tiny** — arm = the 20 mm edge: **0.1 px shift = 8 arcsec = 0.77 µm
+  coil throw; 0.5 px = 40 arcsec = 3.9 µm**. At ~1 µm/mA → **sub-mA to ~1 mA**
+  drive, deep in the linear regime. (Bare-coil µm/mA changes once the camera
+  loads it — self-calibrate.)
+
+**Weighted diaphragm (anti-microphony, Peter):** mass-load each cone so it
+ignores ambient acoustic/vibration (footsteps, wind, sound) that would inject
+*uncommanded* dither — critical, since the reconstruction assumes the dither is
+ONLY what we drive. Bonus: lower f0 = more stable/predictable settling.
+- **Bench-check**: weighting lowers resonance f0 = ½π√(k/m); we drive ~0.018 Hz
+  and must stay **stiffness-controlled** (below f0 → position ∝ current, linear,
+  no phase lag). The **camera mass already dominates** the light cone, so f0 is
+  already low; confirm f0 stays comfortably above 0.018 Hz on the bench.
 
 ## Drive — circular (Lissajous) dither
 
