@@ -74,6 +74,30 @@ The v3w streak/tracking machinery transfers to all three and to astrocam:
 - **Method:** the whole dither/drizzle + PSF-subtraction stack, on a fixed,
   always-available bright+faint pair. Prove it on Polaris B → apply to Titan.
 
+## Quest 4 — Mizar & Alcor (the calibration double)
+
+- **Mizar (ζ UMa, mag 2.2) + Alcor (80 UMa, mag 4.0): separation 11.8 arcmin,
+  PA ~71°.** Dec +54.9 = **near-zenith** for lat 51.4 (culm alt 86°); Ursa Major
+  is **circumpolar** → up all year, any clear night.
+- **Scope (chosen 2026-07-07): split Mizar–Alcor + photometry. NOT Mizar A–B.**
+  Mizar is *itself* a telescopic double (A–B, 14.4″) — but 14.4″ is **below the
+  ~39″ Dawes limit of a ~3 mm Pi lens** (the Airy disks merge in the OPTICS before
+  the sensor → the info is never captured → **dithering cannot recover it**;
+  dithering beats pixel-aliasing, NOT diffraction). So the A–B split needs a real
+  aperture we don't have — deliberately out of scope.
+- **What it exercises (3 skills, all achievable):**
+  1. **Resolve** the 11.8′ pair — 10–18 px apart, trivial on any camera; confirms
+     the field + scale. v3w (science cam) the natural choice.
+  2. **Photometry** — Mizar/Alcor = 1.8 mag = **5.2× brightness ratio**; measure
+     it → validates the magnitude calibration (the sensitivity/limiting-mag work).
+  3. **Astrometry** — a **known 11.8″ separation at known PA 71°** = a precise
+     **ruler + compass** in the field → measures plate scale + roll directly →
+     **feeds the standing plate solve** (`design/standing-plate-solve.md`). A
+     calibration gift: a fixed, always-up, bright, known-geometry reference.
+- **Why it's arguably the most immediately useful zenith quest:** it doubles as a
+  calibration standard for everything else — the ruler for plate scale, the ratio
+  for photometry — always available, near-zenith, in the best air.
+
 ## Status / dependencies (what these quests need built)
 - **Plate solve as a standing tool** — have the recipe (astrometry.net on the
   derot window) but not a per-night automated solve. Needed for all three.
