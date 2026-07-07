@@ -69,10 +69,28 @@ transverse direction; the circle covers all phases isotropically.)
 
 ## Electronics
 
-- Pi: 2× PWM outputs (hardware PWM pins) → 2× transistor/MOSFET drivers →
-  2× voice coils. Low current (~16 mA peak) → a small NPN or logic-level MOSFET
-  each, flyback diode across each coil. Shared ground.
-- Optionally a series resistor to set the mA/µm scale; current = amplitude.
+**PWM-as-DAC, NOT PWM-at-0.03Hz (Peter).** Running hardware PWM literally at
+0.03 Hz is daft (33 s period, terrible resolution). Instead: keep a **fast PWM
+carrier (~10 kHz)** and slowly vary the **duty cycle** in software to trace the
+sine; an **RC low-pass** smooths the carrier into an analog control voltage. The
+0.03 Hz lives in the duty-cycle *program* (a `sin(2π f t) → duty` loop, rewrite
+every ~10–50 ms), not the PWM frequency.
+
+- **2 channels**: the Pi's two hardware PWM channels (GPIO12/13 or 18/19) — one
+  per speaker = the two orthogonal tilt axes; drive 90° out of phase → circle.
+- **RC filter (Peter)**: cutoff between the sine and the carrier, e.g.
+  **fc ≈ 10 Hz (R≈16 k, C≈1 µF)**: the 0.03 Hz sine passes unattenuated with
+  **~zero phase lag** (0.03 ≪ 10 → negligible RC phase error — important, the
+  reconstruction needs the dither phase vs exposure precisely); the 10 kHz
+  carrier is knocked down ~1000×. Duty resolution (12–16 bit at 10 kHz) gives
+  >1000 smooth voltage levels over the sine — ample for µm throws.
+- **Driver = voltage→CURRENT, not just voltage.** The RC gives a voltage but the
+  coil throw ∝ **current** (~1 µm/mA), and coil R drifts with temperature. So
+  follow the filter with a **current source** (transistor + emitter/sense
+  resistor, or an op-amp current driver) so µm/mA stays linear and temp-stable.
+  Low current (~1 mA peak here, from the 20 mm-arm geometry) → a small NPN or
+  logic-level MOSFET each, flyback diode across each coil, shared ground.
+- Series sense resistor sets the mA/µm scale; current = commanded amplitude.
 - Sync: the dither phase must be **known vs the exposure** so frames can be
   detranslated. Either (a) start the sine at exposure-open (open-loop, phase from
   a timestamp), or (b) log the commanded (A,B) per frame in the FITS header
