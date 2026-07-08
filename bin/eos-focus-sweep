@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Star-focus sweep for the Canon EOS 2000D over gphoto2/USB.
+
+Drives the lens to the far stop (past infinity), then steps back Near,
+capturing a frame per step and measuring star FWHM. Reports the sharpest
+step and can re-drive to it. Designed for muppet with the camera tethered.
+
+Requirements learned the hard way (2026-07-08):
+  - manualfocusdrive only works inside ONE gphoto2 invocation where the
+    live-view stream is engaged by a --capture-preview first; repeated
+    same values must be interleaved with None.
+  - Lens switch on AF; mode dial on M (dial is physical, not settable).
+  - Plain --capture-image refuses to fire when AF can't lock (stars!),
+    so captures use eosremoterelease Immediate.
+
+Daylight smoke test:
+  eos-focus-sweep --shutter 1/500 --iso 100 --steps 3 --outdir ~/tmp/sweep-test
+Night use (55mm, wide open):
+  eos-focus-sweep --shutter 4 --iso 1600 --steps 24
+"""
+
+import argparse
+import csv
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+
+def sh(cmd, timeout=120):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                          timeout=timeout)
+
+
+def camera_on_bus():
+    return "04a9" in sh("lsusb").stdout
+
+
+def gp(args, timeout=120):
+    r = sh("gphoto2 " + args, timeout=timeout)
+    return r.returncode == 0, r.stdout + r.stderr
+
+
+def set_exposure(shutter, iso, aperture):
+    ok, out = gp(f'--set-config shutterspeed="{shutter}" '
+                 f'--set-config iso={iso} '
+                 f'--set-config aperture={aperture} '
+                 f'--set-config imageformat="Large Fine JPEG"')
+    if not ok:
+        print(f"WARNING: exposure setup grumbled:\n{out}", file=sys.stderr)
+    ok, out = gp("--get-config autoexposuremode")
+    if "Current: Manual" not in out:
+        print("WARNING: mode dial is not on M — aperture/shutter may be "
+              "ignored. Turn the dial to M.", file=sys.stderr)
+    ok, out = gp("--get-config focusmode")
+    if "Current: Manual" in out:
+        sys.exit("Lens AF/MF switch is on MF — focus drive cannot move the "
+                 "lens. Flip the lens switch to AF and rerun.")
+
+
+def drive(direction, size, count, workdir):
+    """Move focus: LV-engaged single invocation, None-interleaved steps."""
+    steps = "".join(
+        f'--set-config manualfocusdrive="{direction} {size}" '
+        f"--set-config manualfocusdrive=None " for _ in range(count))
+    ok, out = gp(f'--force-overwrite --filename {workdir}/lvjunk.jpg '
+                 f"--set-config viewfinder=1 --capture-preview "
+                 f"{steps}--set-config viewfinder=0", timeout=180)
+    time.sleep(2)
+    if not ok:
+        print(f"WARNING: focus drive reported: {out.strip()}", file=sys.stderr)
+
+
+def capture(path, exposure_s):
+    """Fire without AF via remote release; one retry on failure."""
+    wait = int(exposure_s) + 8
+    cmd = (f"--set-config eosremoterelease=Immediate "
+           f"--wait-event-and-download={wait}s "
+           f'--set-config eosremoterelease="Release Full" '
+           f"--force-overwrite --filename {path}")
+    for attempt in (1, 2):
+        gp(cmd, timeout=wait + 60)
+        if Path(path).exists():
+            return True
+        if not camera_on_bus():
+            sys.exit("Camera dropped off the USB bus — check the cable, "
+                     "power, and rerun.")
+        time.sleep(3)
+    return False
+
+
+def star_fwhm(path, nstars=5):
+    """Median FWHM (px) of the brightest star-like blobs in the frame."""
+    g = np.asarray(Image.open(path).convert("L"), dtype=np.float32)
+    g = g[::2, ::2]  # halve for speed; FWHM scaled back up below
+    bg = np.median(g)
+    # 3x3 mean smooth so single hot pixels don't win
+    k = np.ones((3, 3)) / 9.0
+    from numpy.lib.stride_tricks import sliding_window_view
+    sm = np.pad((sliding_window_view(g, (3, 3)) * k).sum(axis=(2, 3)),
+                1, mode="edge")
+    fwhms, taken = [], []
+    work = sm.copy()
+    for _ in range(nstars):
+        y, x = np.unravel_index(np.argmax(work), work.shape)
+        if work[y, x] - bg < 20:  # no more credible stars
+            break
+        r = 16
+        y0, y1 = max(0, y - r), min(g.shape[0], y + r)
+        x0, x1 = max(0, x - r), min(g.shape[1], x + r)
+        c = g[y0:y1, x0:x1] - bg
+        c = np.clip(c, 0, None)
+        tot = c.sum()
+        if tot > 0:
+            yy, xx = np.mgrid[0:c.shape[0], 0:c.shape[1]]
+            cy = (yy * c).sum() / tot
+            cx = (xx * c).sum() / tot
+            var = (((yy - cy) ** 2 + (xx - cx) ** 2) * c).sum() / tot
+            sigma = np.sqrt(max(var, 0.01) / 2)
+            fwhms.append(2.355 * sigma * 2)  # ×2 undoes the downsample
+        work[y0:y1, x0:x1] = bg  # suppress this star, find the next
+        taken.append((x * 2, y * 2))
+    return (float(np.median(fwhms)) if fwhms else float("nan")), taken
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--shutter", default="4", help="e.g. 4, 1/500 (default 4s)")
+    ap.add_argument("--iso", default="1600")
+    ap.add_argument("--aperture", default="5.6")
+    ap.add_argument("--coarse", type=int, default=10,
+                    help="Far-3 steps to reach the far stop first (default 10)")
+    ap.add_argument("--steps", type=int, default=24,
+                    help="Near steps to sweep back from the stop (default 24)")
+    ap.add_argument("--step-size", type=int, default=1, choices=[1, 2, 3],
+                    help="Near step size 1=fine 3=coarse (default 1)")
+    ap.add_argument("--goto-best", action="store_true",
+                    help="after the sweep, re-drive to the best step")
+    ap.add_argument("--outdir", default=None)
+    args = ap.parse_args()
+
+    outdir = Path(args.outdir or
+                  Path.home() / "tmp" / "eos-focus" /
+                  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%MZ"))
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    if not camera_on_bus():
+        sys.exit("No Canon on the USB bus (lsusb has no 04a9). Camera on? "
+                 "Cable in?")
+    if "/" in args.shutter:
+        num, den = args.shutter.split("/")
+        exposure_s = float(num) / float(den)
+    else:
+        exposure_s = float(args.shutter)
+
+    print(f"Output: {outdir}")
+    set_exposure(args.shutter, args.iso, args.aperture)
+
+    print(f"Driving to far stop ({args.coarse} x Far 3)...")
+    drive("Far", 3, args.coarse, outdir)
+
+    rows, best = [], (None, float("inf"))
+    for i in range(args.steps + 1):
+        frame = outdir / f"sweep-{i:02d}.jpg"
+        if not capture(frame, exposure_s):
+            print(f"Capture failed twice at step {i}; stopping early.",
+                  file=sys.stderr)
+            break
+        fwhm, stars = star_fwhm(frame)
+        rows.append((i, fwhm))
+        marker = ""
+        if fwhm == fwhm and fwhm < best[1]:
+            best = (i, fwhm)
+            marker = "  <-- best so far"
+        print(f"step {i:2d}: FWHM {fwhm:6.2f} px  ({len(stars)} stars)"
+              f"{marker}", flush=True)
+        if i < args.steps:
+            drive("Near", args.step_size, 1, outdir)
+
+    with open(outdir / "sweep.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", "fwhm_px"])
+        w.writerows(rows)
+
+    if best[0] is None:
+        sys.exit("No usable star measurements — check pointing/exposure.")
+    print(f"\nBest focus: step {best[0]} (FWHM {best[1]:.2f} px)")
+    print(f"Frames + sweep.csv in {outdir}")
+
+    if args.goto_best:
+        print(f"Re-driving to step {best[0]}: to far stop, then "
+              f"{best[0]} x Near {args.step_size}...")
+        drive("Far", 3, args.coarse, outdir)
+        if best[0] > 0:
+            drive("Near", args.step_size, best[0], outdir)
+        print("Done. Verify with one more frame.")
+
+
+if __name__ == "__main__":
+    main()
