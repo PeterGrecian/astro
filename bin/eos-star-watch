@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Wait for a cloud gap, then run the focus sweep automatically.
+
+Every --interval minutes: capture a test frame and look for real point
+sources (compact bright blobs — distinguished from the flat-noise
+moment signature that clouds produce). When enough stars appear, run
+eos-focus-sweep --goto-best and exit. Exits nonzero on timeout.
+"""
+
+import argparse
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+
+def sh(cmd, timeout=900):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                          timeout=timeout)
+
+
+def capture(path, exposure_s):
+    wait = int(exposure_s) + 8
+    sh(f"gphoto2 --set-config eosremoterelease=Immediate "
+       f"--wait-event-and-download={wait}s "
+       f'--set-config eosremoterelease="Release Full" '
+       f"--force-overwrite --filename {path}", timeout=wait + 60)
+    return Path(path).exists()
+
+
+def count_stars(path, min_height=25, max_fwhm=30.0):
+    """Count compact bright blobs. Clouds/noise give the ~43px uniform
+    signature; real stars (even softly defocused) come out well under."""
+    g = np.asarray(Image.open(path).convert("L"), dtype=np.float32)[::2, ::2]
+    bg = np.median(g)
+    from numpy.lib.stride_tricks import sliding_window_view
+    k = np.ones((3, 3)) / 9.0
+    sm = np.pad((sliding_window_view(g, (3, 3)) * k).sum(axis=(2, 3)),
+                1, mode="edge")
+    work = sm.copy()
+    n = 0
+    for _ in range(12):
+        y, x = np.unravel_index(np.argmax(work), work.shape)
+        if work[y, x] - bg < min_height:
+            break
+        r = 16
+        y0, y1 = max(0, y - r), min(g.shape[0], y + r)
+        x0, x1 = max(0, x - r), min(g.shape[1], x + r)
+        c = np.clip(g[y0:y1, x0:x1] - bg, 0, None)
+        tot = c.sum()
+        if tot > 0:
+            yy, xx = np.mgrid[0:c.shape[0], 0:c.shape[1]]
+            cy = (yy * c).sum() / tot
+            cx = (xx * c).sum() / tot
+            var = (((yy - cy) ** 2 + (xx - cx) ** 2) * c).sum() / tot
+            fwhm = 2.355 * np.sqrt(max(var, 0.01) / 2) * 2
+            if fwhm < max_fwhm:
+                n += 1
+        work[y0:y1, x0:x1] = bg
+    return n
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--interval", type=float, default=10, help="minutes")
+    ap.add_argument("--max-hours", type=float, default=4)
+    ap.add_argument("--min-stars", type=int, default=3)
+    ap.add_argument("--shutter", default="4")
+    ap.add_argument("--iso", default="1600")
+    ap.add_argument("--outdir", default=None)
+    args = ap.parse_args()
+
+    outdir = Path(args.outdir or Path.home() / "tmp" / "eos-focus" /
+                  ("watch-" + datetime.now(timezone.utc).strftime("%m%dT%H%MZ")))
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # Log to a file in outdir as well as stdout, and never die on a
+    # broken stdout pipe (e.g. the launching ssh session going away).
+    logf = open(outdir / "watch.log", "a", buffering=1)
+    real_print = print
+
+    def print(*a, **kw):  # noqa: A001
+        kw.pop("flush", None)
+        real_print(*a, file=logf, flush=True, **kw)
+        try:
+            real_print(*a, flush=True, **kw)
+        except (BrokenPipeError, OSError):
+            pass
+    exposure_s = float(args.shutter) if "/" not in args.shutter else \
+        float(args.shutter.split("/")[0]) / float(args.shutter.split("/")[1])
+
+    deadline = time.time() + args.max_hours * 3600
+    check = 0
+    while time.time() < deadline:
+        check += 1
+        if "04a9" not in sh("lsusb").stdout:
+            print(f"[{datetime.now():%H:%M}] camera off bus; waiting",
+                  flush=True)
+            time.sleep(60)
+            continue
+        frame = outdir / f"check-{check:03d}.jpg"
+        if capture(frame, exposure_s):
+            n = count_stars(frame)
+            print(f"[{datetime.now():%H:%M}] check {check}: "
+                  f"{n} star-like sources", flush=True)
+            if n >= args.min_stars:
+                print("Clear enough — running focus sweep.", flush=True)
+                r = subprocess.run(
+                    [str(Path.home() / "bin" / "eos-focus-sweep"),
+                     "--shutter", args.shutter, "--iso", args.iso,
+                     "--steps", "20", "--goto-best",
+                     "--outdir", str(outdir / "sweep")],
+                    stdout=logf, stderr=subprocess.STDOUT)
+                print(f"Sweep finished with exit code {r.returncode}; "
+                      f"see {outdir}/watch.log")
+                sys.exit(r.returncode)
+        else:
+            print(f"[{datetime.now():%H:%M}] capture failed", flush=True)
+        time.sleep(args.interval * 60)
+    print("Timed out without a usable gap.")
+    sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

@@ -63,16 +63,28 @@ def set_exposure(shutter, iso, aperture):
 
 
 def drive(direction, size, count, workdir):
-    """Move focus: LV-engaged single invocation, None-interleaved steps."""
+    """Move focus: LV-engaged single invocation, None-interleaved steps.
+
+    Retries: after a long exposure the camera stays busy for several
+    seconds (processing / LENR dark frame) and viewfinder=1 fails with
+    'I/O in progress' until it settles.
+    """
     steps = "".join(
         f'--set-config manualfocusdrive="{direction} {size}" '
         f"--set-config manualfocusdrive=None " for _ in range(count))
-    ok, out = gp(f'--force-overwrite --filename {workdir}/lvjunk.jpg '
-                 f"--set-config viewfinder=1 --capture-preview "
-                 f"{steps}--set-config viewfinder=0", timeout=180)
-    time.sleep(2)
-    if not ok:
-        print(f"WARNING: focus drive reported: {out.strip()}", file=sys.stderr)
+    cmd = (f"--force-overwrite --filename {workdir}/lvjunk.jpg "
+           f"--set-config viewfinder=1 --capture-preview "
+           f"{steps}--set-config viewfinder=0")
+    for attempt in range(1, 6):
+        ok, out = gp(cmd, timeout=180)
+        if ok and "Failed to set" not in out and "I/O in progress" not in out:
+            time.sleep(2)
+            return True
+        time.sleep(4)
+    print(f"WARNING: focus drive failed after {attempt} attempts: "
+          f"{out.strip().splitlines()[-1] if out.strip() else '?'}",
+          file=sys.stderr)
+    return False
 
 
 def capture(path, exposure_s):
@@ -179,7 +191,12 @@ def main():
         print(f"step {i:2d}: FWHM {fwhm:6.2f} px  ({len(stars)} stars)"
               f"{marker}", flush=True)
         if i < args.steps:
-            drive("Near", args.step_size, 1, outdir)
+            # let the camera finish long-exposure processing before LV
+            time.sleep(max(3.0, exposure_s))
+            if not drive("Near", args.step_size, 1, outdir):
+                print("Focus drive is not moving — aborting sweep so the "
+                      "curve stays meaningful.", file=sys.stderr)
+                break
 
     with open(outdir / "sweep.csv", "w", newline="") as f:
         w = csv.writer(f)
