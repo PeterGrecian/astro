@@ -61,11 +61,36 @@ if ! "$PY" "$HERE/moon-extract" --camera "$CAMERA" --night "$NIGHT" \
 "continuing to render (the net may still have older threads)"
 fi
 
-# --- 2. redraw + publish the cumulative moon-net render ---------------
+# --- 2. moon-drift mp4: stitch the crops (moon stays centred, sky drifts
+# past — a "tracked moon" clip). Crops are uniform 700x700 and sort by
+# epoch_ms (temporal). The SAME crops are the measurement artifact: open
+# the moon/ dir in splay and p-probe the disc -> mark-moon-net (EXIF crop
+# offsets already understood). mp4 = delivery; crop dir = measurement.
+moon_mp4="${night_dir}/moon-drift.mp4"
+ncrops=$(find "$moon_dir" -name 'moon_*.jpg' 2>/dev/null | wc -l)
+if [[ "$ncrops" -ge 2 ]]; then
+    echo "--- moon-drift mp4 ($ncrops crops)"
+    # glob pattern in temporal (filename) order; 12fps is a gentle drift.
+    list="${moon_dir}/.frames.txt"
+    find "$moon_dir" -name 'moon_*.jpg' | sort | sed "s/^/file '/;s/$/'/" > "$list"
+    if ffmpeg -y -loglevel error -r 12 -f concat -safe 0 -i "$list" \
+        -vf "scale=700:700,format=yuv420p" \
+        -c:v libx264 -crf 23 -preset "${FFMPEG_PRESET:-fast}" \
+        -movflags +faststart "$moon_mp4"; then
+        echo "wrote $moon_mp4 ($(du -h "$moon_mp4" | cut -f1))"
+    else
+        echo "moon-drift mp4 FAILED; continuing"
+    fi
+    rm -f "$list"
+else
+    echo "--- moon-drift mp4 skipped (<2 crops)"
+fi
+
+# --- 3. redraw + publish the cumulative moon-net render ---------------
 echo "--- moon-overlay"
 overlay_args=(--camera "$CAMERA" --extend)
 [[ "$NO_PUBLISH" -eq 0 ]] && overlay_args+=(--publish)
 "$PY" "$HERE/moon-overlay" "${overlay_args[@]}" || \
     echo "moon-overlay skipped (no backdrop / no threads)"
 
-echo "=== moon-deliver done: crops in ${moon_dir} ==="
+echo "=== moon-deliver done: crops + ${moon_mp4##*/} in ${night_dir} ==="

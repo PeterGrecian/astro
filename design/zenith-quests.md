@@ -1,6 +1,6 @@
-# Zenith quests — M51, Algol, Polaris A/B
+# Zenith quests — M51, Algol, Polaris A/B, Mizar & Alcor, Polaris B by binocular
 
-**Three targets to attempt at/near the zenith, chosen 2026-07-06.** The zenith
+**Targets to attempt at/near the zenith (and the pole), begun 2026-07-06.** The zenith
 is where a Pi camera performs best: airmass ~1, near-zero refraction, tightest
 PSF, darkest sky. These three exercise the same skills as the harder
 ecliptic-planet goals (Neptune/Uranus/Titan) but under the best conditions and —
@@ -73,6 +73,14 @@ The v3w streak/tracking machinery transfers to all three and to astrocam:
   astrocam super-resolution test.
 - **Method:** the whole dither/drizzle + PSF-subtraction stack, on a fixed,
   always-available bright+faint pair. Prove it on Polaris B → apply to Titan.
+- **CORRECTION (2026-07-09): optics-blocked on Pi lenses.** 18″ is below the
+  ~39″ Dawes limit of a ~3 mm Pi lens — the same wall Quest 4 records for
+  Mizar A–B (14.4″). The Airy disks merge in the optics; dithering/drizzle
+  beats pixel-aliasing, not diffraction, so no amount of super-resolution
+  recovers the split from a bare Pi camera. **Unblocked by Quest 5** (binocular
+  aperture). The *contrast* half of the Titan rehearsal (faint companion in a
+  bright star's PSF wings) moves there; the *sub-pixel* machinery rehearsal
+  continues on v3w streaks regardless.
 
 ## Quest 4 — Mizar & Alcor (the calibration double)
 
@@ -90,13 +98,52 @@ The v3w streak/tracking machinery transfers to all three and to astrocam:
      the field + scale. v3w (science cam) the natural choice.
   2. **Photometry** — Mizar/Alcor = 1.8 mag = **5.2× brightness ratio**; measure
      it → validates the magnitude calibration (the sensitivity/limiting-mag work).
-  3. **Astrometry** — a **known 11.8″ separation at known PA 71°** = a precise
+  3. **Astrometry** — a **known 11.8′ separation at known PA 71°** = a precise
      **ruler + compass** in the field → measures plate scale + roll directly →
      **feeds the standing plate solve** (`design/standing-plate-solve.md`). A
      calibration gift: a fixed, always-up, bright, known-geometry reference.
 - **Why it's arguably the most immediately useful zenith quest:** it doubles as a
   calibration standard for everything else — the ruler for plate scale, the ratio
   for photometry — always available, near-zenith, in the best air.
+
+## Quest 5 — Polaris B by binocular (the £0 aperture)
+
+**Chosen 2026-07-09.** Peter's "cheat" for the Polaris split: put a Pi camera
+behind **one half of a pair of cheap binoculars** (e.g. 10×50), pointed at the
+pole. Still DIY, long-focal-length, high-light-pollution astronomy — the pair
+of 50 mm tubes is technically an interferometer baseline, but the prisms don't
+preserve phase, so one tube it is.
+
+- **Why it works:** a 50 mm objective has a Dawes limit of ~2.3″ (even 30 mm
+  gives 3.9″) → the 18″ A–B split becomes **seeing-limited (~2–4″), not
+  optics-limited**. The wall that blocks Quests 3 and Mizar A–B simply isn't
+  there.
+- **Two coupling stages** (IMX219 numbers, 1.12 µm px):
+  | Stage | Optics | efl | scale | A–B sep |
+  |---|---|---|---|---|
+  | **T1 afocal** (no surgery) | camera + own lens through the eyepiece | ~47 mm (4.7 mm × 10×) | ~4.9″/px | **3.7 px** |
+  | **T2 prime** (open one half) | objective only, sensor at focus | ~180 mm | ~1.3″/px | **14 px** |
+  Afocal first — zero-commitment proof the optics chain works; prime is the
+  better end state (B well clear of A's core).
+- **The real challenge is CONTRAST, not resolution:** B is mag ~8.7 next to A
+  at 2.0 — a ~470× ratio. PSF-wing modelling + subtraction (the Titan method)
+  at 4–14 px separation = the Titan rehearsal, preserved from Quest 3 but at a
+  far kinder separation.
+- **No tracking needed — the pole is the cheat within the cheat.** Polaris
+  moves ~0.17″/s: 1 px per ~7 s at prime, ~28 s afocal. Short unguided
+  exposures, stack forever, Polaris never leaves even a 1° field. Mount = a
+  fixed bracket. Light pollution is irrelevant for a mag-8.7 *point source*;
+  A's halo is the enemy, and that's ours regardless of sky.
+- **The toolkit transfers:** at 4.9″/px vs ~3″ seeing the afocal image is
+  undersampled again → the streak/dither/drizzle + sub-pixel machinery applies
+  to the new instrument unchanged.
+- **Stretch goal — the Cepheid:** Polaris A is the nearest Cepheid (~0.05 mag,
+  3.97 d period). With B (constant) and field stars as in-frame comparisons, a
+  photometric campaign on this rig could **detect the pulsation of a Cepheid
+  from a light-polluted garden**. Exercises exactly the photometry chain Algol
+  (Quest 2) needs, available in summer while Perseus isn't.
+- **Graduated wins:** T1 see B at all (afocal, stack + wing-subtract); T2 clean
+  split at prime focus; T3 the Cepheid light curve.
 
 ## Status / dependencies (what these quests need built)
 - **Plate solve as a standing tool** — have the recipe (astrometry.net on the
@@ -106,3 +153,5 @@ The v3w streak/tracking machinery transfers to all three and to astrocam:
 - **Narrow Module 3 camera** — M51 (and Polaris-B split) want the finer scale;
   the purchase is effectively part of the M51 quest.
 - **Deep de-streaked stacking** — exists (detrans-deep); M51 pushes it hardest.
+- **Binocular half + Pi camera bracket** — Quest 5's only hardware; already
+  owned (afocal T1 needs no surgery at all).

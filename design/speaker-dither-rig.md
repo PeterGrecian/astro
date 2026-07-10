@@ -1,5 +1,11 @@
 # Two-speaker 2-axis tilt dither rig
 
+> Shared electronics, different application: the **PWM-as-DAC + RC-filter +
+> current-driver** technique in "Electronics" below is also used to make
+> *audible sound* on a Pi in `~/Berrylands/pwmaudio/` (there the coil drives a
+> speaker for tones; here it drives voice coils as silent µm actuators). This
+> doc stays in astro — it's an astronomy deliverable.
+
 **Status: DESIGN 2026-07-07.** Cheap speaker drivers ordered. Two voice coils
 give orthogonal camera-tilt axes → full 2D sub-pixel dither, commanded and
 independent of sky-drift. **Especially for astrocam** (see why).
