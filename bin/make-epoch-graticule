@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""make-epoch-graticule — emit a rotatable RA/Dec graticule overlay for splay.
+
+Writes two files at the epoch root (default the frames_root of a camera):
+  _epoch.reg       — DS9 region file: dec circles, RA spokes, hourly RA ticks,
+                     named-star markers. Shapes are authored SKY-FIXED at a
+                     reference frame's orientation; splay rotates them about the
+                     pole per frame time (see _epoch.wcs.json). tags:
+                     graticule / raticks / starnames.
+  _epoch.wcs.json  — pole (px,py), scale (deg/px), ref_utc, sidereal_rate,
+                     screen_spin. splay reads this to place & rotate the .reg.
+
+The WCS is a fixed-scale gnomonic hand fit (no distortion): pole + one plate
+scale + a roll angle. Predictions degrade radially — good to navigate by, not
+science-grade. To (re)derive the fit after a camera move, pass measured star
+pixels via --anchor (repeatable) and the tool solves pole/scale/roll by least
+squares; or pass a ready fit with --wcs-json.
+
+Rotation convention: shapes are sky-fixed; splay applies
+    angle = (frame_utc - ref_utc) * sidereal_rate * screen_spin
+about the pole. On a y-down image +angle is clockwise, so CCW-with-advancing-
+time uses screen_spin = -1 (default). A mirrored mount can flip it in the JSON.
+
+Usage
+-----
+From a ready fit (the common case — reuse a prior solve):
+    make-epoch-graticule --camera astrocam \\
+        --wcs-json fit.json \\
+        --ref-frame /mnt/muppet/astrocam-frames/2026-07-07/sweep-colour/frames/frame_00071.jpg
+
+Refit from measured star pixels on the reference frame:
+    make-epoch-graticule --camera astrocam \\
+        --ref-frame .../frame_00071.jpg \\
+        --anchor Deneb 1455 238 --anchor Polaris 480 707 \\
+        --anchor Schedar 1240 817 --anchor "Gamma Cas" 1129 845 ...
+
+--wcs-json is {"pole":[x,y],"k":<deg/px>,"phi":<deg>,"parity":<+/-1>}
+(the shape this tool writes to <out>/_epoch.fit.json for reproducibility).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+
+# Named stars for the graticule + fitting. name -> (RA deg, Dec deg), ICRS.
+STARS = {
+    "Polaris":   (37.9529, 89.2641),
+    "Deneb":     (310.358, 45.2803),
+    "Vega":      (279.234, 38.7837),
+    "Capella":   (79.172,  45.998),
+    "Kochab":    (222.676, 74.156),
+    "Pherkad":   (230.182, 71.834),
+    "Alderamin": (319.645, 62.585),
+    "Caph":      (2.295,   59.150),
+    "Schedar":   (10.127,  56.537),
+    "Gamma Cas": (14.177,  60.717),
+    "Ruchbah":   (21.454,  60.235),
+    "Segin":     (28.599,  63.670),
+    "Mizar":     (200.981, 54.925),
+    "Dubhe":     (165.932, 61.751),
+    "Merak":     (165.460, 56.383),
+}
+
+SIDEREAL_RATE = 15.041          # deg/hr, apparent sky rotation
+TICK_DEC = 50.0                 # dec circle the hourly RA ticks sit on
+
+
+# ---- geometry ---------------------------------------------------------------
+
+def sky_to_px(ra_deg, dec_deg, pole, k, phi, parity):
+    """Fixed-scale gnomonic-ish projection: radius = colatitude/scale, azimuth
+    = roll + parity*RA. `pole` is (px,py); k is deg/px; phi,parity set the roll
+    and handedness. Returns (x, y) image pixels."""
+    r = (90.0 - dec_deg) / k
+    az = np.radians(phi + parity * ra_deg)
+    return (pole[0] + r * np.cos(az), pole[1] + r * np.sin(az))
+
+
+def fit_wcs(anchors):
+    """Least-squares fit of (pole_x, pole_y, k, phi, parity) to a list of
+    (name, x, y) anchors using their catalogue RA/Dec. Returns dict."""
+    from scipy.optimize import least_squares
+    named = [(STARS[n], np.array([x, y], float)) for n, x, y in anchors
+             if n in STARS]
+    if len(named) < 3:
+        raise SystemExit("need >=3 anchors that are in the star catalogue")
+
+    def model(p, ra, dec):
+        px, py, k, phi, par = p
+        return np.array(sky_to_px(ra, dec, (px, py), k, phi, par))
+
+    def resid(p):
+        out = []
+        for (ra, dec), xy in named:
+            out += list(model(p, ra, dec) - xy)
+        return out
+
+    # Seed: pole near frame centre-ish, nominal astrocam binned scale.
+    xs = np.array([xy[0] for _, xy in named])
+    ys = np.array([xy[1] for _, xy in named])
+    p0 = [xs.mean(), ys.mean() + 200, 0.042, -330.0, 1.0]
+    sol = least_squares(resid, p0, method="lm")
+    px, py, k, phi, par = sol.x
+    res = np.array(resid(sol.x)).reshape(-1, 2)
+    rms = float(np.sqrt((res ** 2).sum(axis=1).mean()))
+    return {"pole": [float(px), float(py)], "k": float(k),
+            "phi": float(phi), "parity": float(par),
+            "rms_px": rms, "rms_deg": rms * float(k),
+            "n_anchors": len(named)}
+
+
+# ---- frame time -------------------------------------------------------------
+
+def frame_ref_utc(ref_frame: Path) -> datetime:
+    """UTC of the reference frame. FITS: DATE-OBS. JPEG sweep frame: interpolate
+    from the night's summary.json (first/last + frame index in the dir)."""
+    suf = ref_frame.suffix.lower()
+    if suf in (".fits", ".fit", ".fts", ".fz"):
+        from astropy.io import fits
+        with fits.open(str(ref_frame)) as h:
+            for hdu in h:
+                do = hdu.header.get("DATE-OBS")
+                if do:
+                    return datetime.fromisoformat(do.replace("Z", "+00:00"))
+    # JPEG: summary.json (walk up) + linear index map over the frames dir.
+    for d in [ref_frame.parent, *ref_frame.parents]:
+        sj = d / "summary.json"
+        if sj.is_file():
+            s = json.loads(sj.read_text())
+            t0 = datetime.fromisoformat(s["first_frame_utc"])
+            t1 = datetime.fromisoformat(s["last_frame_utc"])
+            n = len(list(ref_frame.parent.glob("*.jpg"))) or 1
+            import re
+            m = re.search(r"(\d+)", ref_frame.stem)
+            idx = int(m.group(1)) if m else 0
+            return t0 + (t1 - t0) * (idx / max(1, n - 1))
+    raise SystemExit(f"cannot determine UTC for {ref_frame} "
+                     "(no DATE-OBS, no summary.json)")
+
+
+# ---- .reg emission ----------------------------------------------------------
+
+def build_reg(wcs, margin):
+    """Return .reg text. Shapes authored in the reference orientation; splay
+    rotates them. `margin` widens the on-frame test so rotation can bring
+    off-frame shapes into view (frames are ~1640x1232)."""
+    pole = wcs["pole"]; k = wcs["k"]; phi = wcs["phi"]; par = wcs["parity"]
+    W, H = 1640, 1232
+
+    def s2p(ra, dec):
+        return sky_to_px(ra, dec, pole, k, phi, par)
+
+    def onframe(x, y, m):
+        return -m <= x <= W + m and -m <= y <= H + m
+
+    L = ["# DS9 EPOCH graticule (sky-fixed; splay rotates per frame time)",
+         "# tags: graticule / raticks / starnames. See _epoch.wcs.json.",
+         "global width=1", "image"]
+
+    def poly(pts, colour, tag):
+        flat = []
+        for x, y in pts:
+            flat += [f"{x:.1f}", f"{y:.1f}"]
+        L.append(f"polygon({','.join(flat)}) # color={colour} tag={{{tag}}}")
+
+    # Dec circles + labels.
+    for dec in (20, 30, 40, 50, 60, 70, 80):
+        pts = [s2p(ra, dec) for ra in np.arange(0, 360.5, 3.0)]
+        if any(onframe(x, y, margin) for x, y in pts):
+            poly(pts, "cyan", "graticule")
+        x, y = s2p(335, dec)
+        if onframe(x, y, 0):
+            L.append(f'circle({x:.1f},{y:.1f},1) # color=cyan '
+                     f'tag={{graticule}} text={{{dec} deg}}')
+
+    # RA spokes every 2h.
+    for rah in range(0, 24, 2):
+        ra = rah * 15
+        pts = [s2p(ra, dec) for dec in np.arange(18, 88, 1.5)]
+        if any(onframe(x, y, margin) for x, y in pts):
+            poly(pts, "orange", "graticule")
+
+    # Hourly RA ticks along the TICK_DEC circle + hour labels.
+    for rah in range(0, 24):
+        ra = rah * 15
+        a = s2p(ra, TICK_DEC - 1.6)
+        b = s2p(ra, TICK_DEC + 1.6)
+        if onframe(*a, 0) or onframe(*b, 0):
+            L.append(f'line({a[0]:.1f},{a[1]:.1f},{b[0]:.1f},{b[1]:.1f}) '
+                     f'# color=magenta tag={{raticks}}')
+            lx, ly = s2p(ra, TICK_DEC + 3.2)
+            if onframe(lx, ly, 0):
+                L.append(f'circle({lx:.1f},{ly:.1f},1) # color=magenta '
+                         f'tag={{raticks}} text={{{rah}h}}')
+
+    # Named stars.
+    for name, (ra, dec) in STARS.items():
+        x, y = s2p(ra, dec)
+        if onframe(x, y, 0):
+            L.append(f'circle({x:.1f},{y:.1f},9) # color=yellow '
+                     f'tag={{starnames}} text={{{name}}}')
+
+    # North celestial pole.
+    x, y = s2p(0, 90)
+    L.append(f'circle({x:.1f},{y:.1f},4) # color=red '
+             f'tag={{graticule}} text={{NCP}}')
+    return "\n".join(L) + "\n"
+
+
+# ---- main -------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Emit a rotatable RA/Dec graticule overlay for splay.")
+    ap.add_argument("--camera",
+                    help="camera name; output goes to its frames_root "
+                         "(via astro.config.CameraConfig). Overridden by --out.")
+    ap.add_argument("--out", type=Path,
+                    help="epoch root dir to write _epoch.reg / _epoch.wcs.json "
+                         "(default: the camera's frames_root).")
+    ap.add_argument("--ref-frame", type=Path, required=True,
+                    help="frame whose orientation the .reg is authored in; its "
+                         "UTC becomes ref_utc.")
+    ap.add_argument("--wcs-json", type=Path,
+                    help='ready fit {"pole":[x,y],"k":,"phi":,"parity":}.')
+    ap.add_argument("--anchor", nargs=3, action="append", metavar=("NAME", "X", "Y"),
+                    help="measured star pixel on the ref frame; repeat >=3 to "
+                         "fit the WCS. Ignored if --wcs-json given.")
+    ap.add_argument("--screen-spin", type=float, default=-1.0,
+                    help="rotation sign: -1 (default) = CCW as time advances "
+                         "on a y-down image; +1 for a mirrored mount.")
+    ap.add_argument("--margin", type=float, default=900.0,
+                    help="off-frame authoring margin in px (rotation may bring "
+                         "distant shapes into view).")
+    ap.add_argument("--notes", default="",
+                    help="free text stored in _epoch.wcs.json.")
+    args = ap.parse_args()
+
+    # Resolve output dir.
+    if args.out:
+        out_dir = args.out
+    elif args.camera:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from astro.config import CameraConfig
+        cfg = CameraConfig.load(args.camera)
+        out_dir = Path(cfg.frames_root).expanduser()
+    else:
+        raise SystemExit("need --out or --camera")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get the WCS: ready fit, or solve from anchors.
+    if args.wcs_json:
+        wcs = json.loads(args.wcs_json.read_text())
+        for key in ("pole", "k", "phi", "parity"):
+            if key not in wcs:
+                raise SystemExit(f"--wcs-json missing {key!r}")
+        fit_info = {k: wcs[k] for k in ("pole", "k", "phi", "parity")}
+    elif args.anchor:
+        anchors = [(n, float(x), float(y)) for n, x, y in args.anchor]
+        wcs = fit_wcs(anchors)
+        fit_info = wcs
+        print(f"fit: RMS {wcs['rms_px']:.1f}px = {wcs['rms_deg']:.2f}deg "
+              f"over {wcs['n_anchors']} anchors", file=sys.stderr)
+    else:
+        raise SystemExit("need --wcs-json or >=3 --anchor")
+
+    ref_utc = frame_ref_utc(args.ref_frame)
+
+    # Write outputs.
+    reg_text = build_reg(wcs, args.margin)
+    (out_dir / "_epoch.reg").write_text(reg_text)
+
+    wcs_sidecar = {
+        "pole": wcs["pole"],
+        "scale_deg_px": wcs["k"],
+        "parity": wcs["parity"],
+        "ref_utc": ref_utc.isoformat(),
+        "sidereal_rate": SIDEREAL_RATE,
+        "screen_spin": args.screen_spin,
+        "ref_frame": str(args.ref_frame),
+        "notes": args.notes,
+    }
+    (out_dir / "_epoch.wcs.json").write_text(json.dumps(wcs_sidecar, indent=1))
+
+    # Keep the raw fit for reproducibility / re-runs.
+    (out_dir / "_epoch.fit.json").write_text(json.dumps(fit_info, indent=1))
+
+    print(f"wrote {out_dir}/_epoch.reg  _epoch.wcs.json  _epoch.fit.json")
+    print(f"ref_utc = {ref_utc.isoformat()}  spin = {args.screen_spin:+g}")
+
+
+if __name__ == "__main__":
+    main()
