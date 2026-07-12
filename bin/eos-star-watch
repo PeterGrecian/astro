@@ -8,6 +8,7 @@ eos-focus-sweep --goto-best and exit. Exits nonzero on timeout.
 """
 
 import argparse
+import builtins
 import subprocess
 import sys
 import time
@@ -81,7 +82,7 @@ def main():
     # Log to a file in outdir as well as stdout, and never die on a
     # broken stdout pipe (e.g. the launching ssh session going away).
     logf = open(outdir / "watch.log", "a", buffering=1)
-    real_print = print
+    real_print = builtins.print
 
     def print(*a, **kw):  # noqa: A001
         kw.pop("flush", None)

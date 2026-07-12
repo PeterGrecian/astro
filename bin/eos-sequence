@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Long-exposure star sequence on the EOS 2000D over gphoto2/USB.
+
+Fires --shutter exposures back-to-back until --until (HH:MM local) or
+--count frames, whichever comes first. Frames go to the SD card
+(capturetarget=Memory card) so nothing is downloaded per frame — on the
+degraded/flaky USB link a CR2 download costs more than the exposure.
+Pull the card's files off by day.
+
+Each fire is verified from the PTP object-added events; battery is
+logged every --battery-every frames. Survives camera-busy retries and
+USB re-enumeration (waits for the camera to come back).
+"""
+
+import argparse
+import builtins
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def sh(cmd, timeout=900):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                          timeout=timeout)
+
+
+def cam_on_bus():
+    return "04a9" in sh("lsusb", timeout=30).stdout
+
+
+def get_config(name):
+    r = sh(f"gphoto2 --get-config {name}", timeout=60)
+    m = re.search(r"^Current: (.*)$", r.stdout, re.M)
+    return m.group(1) if m else None
+
+
+def fire(exposure_s):
+    """One exposure, no download. Press then release immediately (a held
+    press re-fires in continuous drive), then wait out the exposure +
+    card write. Returns the number of frames the camera reported
+    (FILEADDED events; RAW+JPEG emits one per file, so count unique
+    image numbers)."""
+    wait = int(exposure_s) + 8
+    r = sh(f"gphoto2 --set-config eosremoterelease=Immediate "
+           f'--set-config eosremoterelease="Release Full" '
+           f"--wait-event={wait}s",
+           timeout=wait + 60)
+    names = set(re.findall(r"FILEADDED\s+(\S+)\.", r.stdout))
+    return len(names)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--shutter", default="10.3",
+                    help="camera token, e.g. 10.3 = Canon 10\" (M mode)")
+    ap.add_argument("--iso", default="1600")
+    ap.add_argument("--aperture", default=None)
+    ap.add_argument("--format", dest="fmt",
+                    default="RAW + Large Fine JPEG")
+    ap.add_argument("--count", type=int, default=100000)
+    ap.add_argument("--until", default=None, help="HH:MM local stop time")
+    ap.add_argument("--battery-every", type=int, default=10)
+    ap.add_argument("--min-battery", type=int, default=0,
+                    help="stop when battery %% falls below this")
+    ap.add_argument("--outdir", default=None, help="log dir")
+    args = ap.parse_args()
+
+    outdir = Path(args.outdir or Path.home() / "tmp" / "eos-focus" /
+                  ("seq-" + datetime.now(timezone.utc).strftime("%m%dT%H%MZ")))
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    logf = open(outdir / "seq.log", "a", buffering=1)
+    real_print = builtins.print
+
+    def print(*a, **kw):  # noqa: A001
+        kw.pop("flush", None)
+        real_print(*a, file=logf, flush=True, **kw)
+        try:
+            real_print(*a, flush=True, **kw)
+        except (BrokenPipeError, OSError):
+            pass
+
+    deadline = None
+    if args.until:
+        h, m = map(int, args.until.split(":"))
+        now = datetime.now()
+        deadline = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        if deadline <= now:
+            from datetime import timedelta
+            deadline += timedelta(days=1)
+
+    exposure_s = float(args.shutter) if "/" not in args.shutter else \
+        float(args.shutter.split("/")[0]) / float(args.shutter.split("/")[1])
+
+    setup = (f'--set-config capturetarget="Memory card" '
+             f'--set-config imageformat="{args.fmt}" '
+             f"--set-config iso={args.iso} "
+             f"--set-config shutterspeed={args.shutter}")
+    if args.aperture:
+        setup += f" --set-config aperture={args.aperture}"
+    r = sh("gphoto2 " + setup, timeout=120)
+    if r.returncode != 0:
+        print(f"WARNING: setup grumbled:\n{r.stdout}\n{r.stderr}")
+    actual = (get_config("shutterspeed"), get_config("iso"),
+              get_config("aperture"), get_config("imageformat"))
+    print(f"[{datetime.now():%H:%M:%S}] sequence start: camera reads "
+          f"shutter {actual[0]}\" ISO {actual[1]} f/{actual[2]} "
+          f"'{actual[3]}' -> memory card; "
+          f"stop at {args.until or 'count/battery'}")
+    if actual[0] != args.shutter:
+        print(f"WARNING: shutter is {actual[0]}, requested {args.shutter}")
+
+    fired = misses = 0
+    while fired < args.count:
+        if deadline and datetime.now() >= deadline:
+            print(f"[{datetime.now():%H:%M:%S}] deadline reached")
+            break
+        if not cam_on_bus():
+            print(f"[{datetime.now():%H:%M:%S}] camera off bus; waiting 30s")
+            time.sleep(30)
+            continue
+        n = fire(exposure_s)
+        if n:
+            fired += n
+            misses = 0
+            if n > 1:
+                print(f"[{datetime.now():%H:%M:%S}] WARNING: {n} frames "
+                      f"from one press")
+            if fired % args.battery_every == 1:
+                batt = get_config("batterylevel")
+                shots = get_config("availableshots")
+                print(f"[{datetime.now():%H:%M:%S}] frame {fired}: "
+                      f"battery {batt}, card space {shots}")
+                if batt and batt.rstrip("%").isdigit() and \
+                        int(batt.rstrip("%")) < args.min_battery:
+                    print("battery below threshold; stopping")
+                    break
+        else:
+            misses += 1
+            print(f"[{datetime.now():%H:%M:%S}] no object-added "
+                  f"(miss {misses}); settling {int(exposure_s)}s")
+            time.sleep(exposure_s)
+            if misses >= 5:
+                print("5 consecutive misses; giving up")
+                sys.exit(1)
+    print(f"[{datetime.now():%H:%M:%S}] done: {fired} frames on card")
+
+
+if __name__ == "__main__":
+    main()
