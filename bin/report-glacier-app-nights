@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""report-glacier-app-nights — surface astro nights that were archived via the
+glacier-app *product* prototype (bucket glacier-app-archive) on the
+/astro/storage page, so the page reflects reality.
+
+Background: glacier-app is the storage-app product prototype (mostly images).
+In one session (2026-07-12) 17 eclipticam nights got shipped through it by
+mistake — astro cold storage belongs to cold-archive-night ->
+astro-berrylands-eu-west-1/cold. Rather than move them, we just tell the truth:
+these nights have a Deep Archive copy, in the glacier-app bucket, and the notes
+say so.
+
+Reads the glacier-app ledger (default: ~/glacier-app/ledger/ledger.jsonl),
+finds eclipticam-night-* archives, and upserts one deep-archive inventory row
+per night into astro-storage-inventory. Row shape mirrors
+cold-archive-night.upsert_inventory_row so the page renders it via the normal
+cold-row path; only `notes` and the bucket differ.
+
+This is a one-off reconciliation tool, not part of the nightly pipeline. Astro
+cold storage should go through cold-archive-night in future; glacier-app should
+not carry astro data.
+
+    report-glacier-app-nights --dry-run     # show rows, write nothing
+    report-glacier-app-nights --go          # upsert to DynamoDB
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+REGION = "eu-west-1"
+INVENTORY_TABLE = "astro-storage-inventory"
+BUCKET = "glacier-app-archive"
+LEDGER = Path.home() / "glacier-app" / "ledger" / "ledger.jsonl"
+CAMERA = "eclipticam-v3w"  # page camera label for these nights
+PREFIX = "eclipticam-night-"
+
+
+def collect(ledger: Path) -> dict:
+    """night -> {bytes, keys[], sha256s[]} for eclipticam-night-* archives."""
+    nights: dict[str, dict] = defaultdict(
+        lambda: {"bytes": 0, "keys": [], "sha256s": []})
+    for line in ledger.read_text().splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        arc = r.get("archive", "")
+        if not arc.startswith(PREFIX):
+            continue
+        night = arc[len(PREFIX):]
+        nights[night]["bytes"] += int(r["bytes"])
+        nights[night]["keys"].append(r["key"])
+        if r.get("sha256"):
+            nights[night]["sha256s"].append(r["sha256"])
+    return dict(nights)
+
+
+def row_for(night: str, info: dict) -> dict:
+    # loc points at the archive base (parts share this stem); one row per night.
+    base = f"s3://{BUCKET}/users/peter/archives/{PREFIX}{night}.tar"
+    return {
+        "night": night,
+        "loc": f"{CAMERA}#aws#{base}",
+        "camera": CAMERA,
+        "host": "aws",
+        "path": base,
+        "storage_class": "deep-archive",
+        "online": False,
+        "bytes": {"tarball": int(info["bytes"])},
+        "sha256": ",".join(info["sha256s"]),
+        "notes": (f"night tar in Deep Archive via glacier-app prototype "
+                  f"({len(info['keys'])} parts, bucket {BUCKET}) — "
+                  f"not the canonical astro cold path"),
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--ledger", type=Path, default=LEDGER)
+    ap.add_argument("--go", action="store_true",
+                    help="write to DynamoDB (default is dry-run)")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    if not args.ledger.is_file():
+        sys.exit(f"ledger not found: {args.ledger}")
+    nights = collect(args.ledger)
+    if not nights:
+        sys.exit("no eclipticam-night-* archives in ledger")
+
+    rows = [row_for(n, nights[n]) for n in sorted(nights)]
+    total = sum(r["bytes"]["tarball"] for r in rows)
+    print(f"{len(rows)} eclipticam nights in glacier-app "
+          f"({total/(1<<30):.1f} GiB):")
+    for r in rows:
+        print(f"  {r['night']}  {r['bytes']['tarball']/(1<<30):5.2f} GiB  "
+              f"{r['path']}")
+
+    if not args.go or args.dry_run:
+        print("\ndry-run: nothing written. Pass --go to upsert.")
+        return 0
+
+    import boto3
+    tbl = boto3.resource("dynamodb", region_name=REGION).Table(INVENTORY_TABLE)
+    for r in rows:
+        tbl.put_item(Item=r)
+    print(f"\nupserted {len(rows)} deep-archive rows into {INVENTORY_TABLE}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
