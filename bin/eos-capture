@@ -74,8 +74,11 @@ def newest_pair():
     return imgs[-2:] if imgs else None
 
 
-def grab(outdir, tag=""):
-    """Fire one frame, download RAW+JPEG to outdir named by muppet UTC.
+def grab(outdir, tag="", stem=None):
+    """Fire one frame, download RAW+JPEG to outdir. By default the filename
+    stem is the muppet UTC timestamp (authoritative); pass `stem` to override
+    (e.g. "foc_01" for focus frames keyed by diopter). The file mtime is set
+    to muppet's clock so it matches the name (the camera clock is +1h).
     Returns the JPG path, or None on failure."""
     os.makedirs(outdir, exist_ok=True)
     gp("--set-config", "viewfinder=0")
@@ -86,15 +89,20 @@ def grab(outdir, tag=""):
     pair = newest_pair()
     if not pair:
         return None
-    ts = utcnow().strftime("%Y%m%dT%H%M%SZ")
-    stem = f"{ts}{('_' + tag) if tag else ''}"
+    if stem is None:
+        ts = utcnow().strftime("%Y%m%dT%H%M%SZ")
+        stem = f"{ts}{('_' + tag) if tag else ''}"
+    now = time.time()
     jpg = None
     for fn in pair:
-        dest = os.path.join(outdir, f"{stem}_{fn}")
+        ext = fn.rsplit(".", 1)[-1].lower()
+        dest = os.path.join(outdir, f"{stem}.{ext}")
         gp("--folder", FOLDER, "--get-file", fn, "--filename", dest,
            "--force-overwrite", timeout=90)
-        if fn.upper().endswith(".JPG") and os.path.exists(dest):
-            jpg = dest
+        if os.path.exists(dest):
+            os.utime(dest, (now, now))   # mtime = muppet UTC, not camera +1h
+            if ext == "jpg":
+                jpg = dest
     return jpg
 
 
@@ -155,20 +163,21 @@ def cmd_focus(args):
         drive("Far", 3)
     results = []
     for s in range(args.steps):
-        jpg = grab(args.out, tag=f"g{s:02d}")
+        diopter = s * args.step   # Near-1-equivalent steps from the far stop
+        jpg = grab(args.out, stem=f"foc_{diopter:02d}")
         if jpg is None:
-            print(f"g{s:02d}: NO CAPTURE", flush=True)
+            print(f"foc_{diopter:02d}: NO CAPTURE", flush=True)
         else:
             m = laplacian_var(jpg, crop)
-            results.append((s, m))
+            results.append((diopter, m))
             mx = max(r[1] for r in results)
             bar = "#" * int(m / mx * 40)
-            print(f"g{s:02d}: sharp={m:8.1f} {bar}", flush=True)
+            print(f"foc_{diopter:02d}: sharp={m:8.1f} {bar}", flush=True)
         drive("Near", args.step)
     if results:
         best = max(results, key=lambda r: r[1])
-        print(f"\nBEST g{best[0]:02d} sharp={best[1]:.1f} "
-              f"(= {best[0]}x Near {args.step} from far stop)", flush=True)
+        print(f"\nBEST foc_{best[0]:02d} sharp={best[1]:.1f} "
+              f"(diopter = {best[0]} Near-1 steps from far stop)", flush=True)
         print("Note: whole-frame metric is weak on textured scenes — "
               "trust the eye in splay. Pass --crop x0,x1,y0,y1 to focus on a "
               "hard-edged region.")
