@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""eos-capture — capture EOS 2000D frames over gphoto2 with a sane workflow.
+
+Two modes:
+  eos-capture grab [--out DIR]            one frame, full workflow
+  eos-capture focus [--out DIR] [opts]    focus sweep (big steps)
+
+Workflow per frame (Peter's spec):
+  1. grab            — fire one card frame, download RAW+JPEG to --out
+  2. set-time        — stamp filename from muppet's UTC clock (authoritative;
+                       the camera clock drifts, muppet is NTP-synced). Also
+                       nudges the camera clock to UTC so EXIF is ~right.
+  3. measure-bright  — report centre-crop brightness so the NEXT shot's
+                       exposure can be adjusted toward a target.
+
+Hard-won constraints (see astro-canon STATE.md):
+  - entry-level body: only proprietary EOS capture opcodes -> eosremoterelease
+    is mandatory; split release from wait-and-download, wait >=7s.
+  - manualfocusdrive needs live view engaged (a --capture-preview) in the
+    SAME gphoto2 invocation; drive in BIG steps (Near/Far 3) — step 1 is
+    visually invisible.
+  - flaky mini-B tether: every gphoto2 call is timeout-wrapped; a failed
+    frame is skipped, not fatal.
+
+Runs on muppet (camera on USB). Deploy: commit on pip, `git pull` on muppet.
+"""
+import argparse
+import datetime
+import os
+import subprocess
+import sys
+import time
+
+import numpy as np
+from PIL import Image
+
+FOLDER = "/store_00020001/DCIM/100CANON"
+
+
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def gp(*args, timeout=60):
+    """Run gphoto2, timeout-wrapped. Returns CompletedProcess or None."""
+    try:
+        return subprocess.run(["gphoto2", *args],
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def set_camera_clock_utc():
+    """Nudge the camera clock to UTC. This body takes the epoch as UTC
+    directly (no local offset), verified 2026-07-14 against EXIF."""
+    epoch = int(time.time())
+    for _ in range(4):
+        r = gp("--set-config", f"datetime={epoch}")
+        if r is not None and not any(w in (r.stdout + r.stderr).lower()
+                                     for w in ("error", "busy", "ptp", "could not")):
+            return True
+        time.sleep(4)
+    return False
+
+
+def newest_pair():
+    """Return the newest [CR2, JPG] filenames on the card, or None."""
+    r = gp("--folder", FOLDER, "--list-files", timeout=30)
+    if r is None:
+        return None
+    names = [ln.split()[1] for ln in r.stdout.splitlines()
+             if ln.strip().startswith("#") and len(ln.split()) > 1]
+    imgs = sorted(n for n in names if n.upper().endswith((".CR2", ".JPG")))
+    return imgs[-2:] if imgs else None
+
+
+def grab(outdir, tag=""):
+    """Fire one frame, download RAW+JPEG to outdir named by muppet UTC.
+    Returns the JPG path, or None on failure."""
+    os.makedirs(outdir, exist_ok=True)
+    gp("--set-config", "viewfinder=0")
+    gp("--set-config", "eosremoterelease=Immediate")
+    ev = gp("--wait-event=16s", timeout=24)
+    if ev is None or "FILEADDED" not in (ev.stdout or ""):
+        return None
+    pair = newest_pair()
+    if not pair:
+        return None
+    ts = utcnow().strftime("%Y%m%dT%H%M%SZ")
+    stem = f"{ts}{('_' + tag) if tag else ''}"
+    jpg = None
+    for fn in pair:
+        dest = os.path.join(outdir, f"{stem}_{fn}")
+        gp("--folder", FOLDER, "--get-file", fn, "--filename", dest,
+           "--force-overwrite", timeout=90)
+        if fn.upper().endswith(".JPG") and os.path.exists(dest):
+            jpg = dest
+    return jpg
+
+
+def centre_brightness(jpg):
+    """Mean luminance of the centre half — the metric to steer next exposure."""
+    a = np.asarray(Image.open(jpg).convert("L")).astype(float)
+    h, w = a.shape
+    return float(a[h // 4:3 * h // 4, w // 4:3 * w // 4].mean())
+
+
+def laplacian_var(jpg, crop=None):
+    """Focus sharpness: variance of the 4-neighbour Laplacian (optional crop
+    as fractional (x0,x1,y0,y1))."""
+    a = np.asarray(Image.open(jpg).convert("L")).astype(float)
+    if crop:
+        h, w = a.shape
+        x0, x1, y0, y1 = crop
+        a = a[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
+    lap = (a[2:, 1:-1] + a[:-2, 1:-1] + a[1:-1, 2:] + a[1:-1, :-2]
+           - 4 * a[1:-1, 1:-1])
+    return float(lap.var())
+
+
+def drive(direction, amount):
+    """Relative focus move. Live view must be engaged in the SAME invocation."""
+    gp("--capture-preview", "--filename", "/tmp/eos-lv.jpg",
+       "--force-overwrite", "--set-config", f"manualfocusdrive={direction} {amount}")
+    gp("--set-config", "viewfinder=0")
+    time.sleep(0.4)
+
+
+def cmd_grab(args):
+    set_camera_clock_utc()
+    jpg = grab(args.out)
+    if jpg is None:
+        print("grab: FAILED (tether/capture)", file=sys.stderr)
+        return 1
+    b = centre_brightness(jpg)
+    print(f"{os.path.basename(jpg)}  centre_brightness={b:.1f}")
+    # brightness hint for the next shot
+    if b < 60:
+        print("  hint: underexposed — open up / slower shutter / higher ISO")
+    elif b > 200:
+        print("  hint: overexposed — stop down / faster shutter / lower ISO")
+    else:
+        print("  hint: exposure OK")
+    return 0
+
+
+def cmd_focus(args):
+    crop = None
+    if args.crop:
+        crop = tuple(float(x) for x in args.crop.split(","))
+    print(f"focus sweep -> {args.out}; far stop ({args.coarse}x Far 3), "
+          f"then {args.steps}x Near {args.step}", flush=True)
+    set_camera_clock_utc()
+    for _ in range(args.coarse):
+        drive("Far", 3)
+    results = []
+    for s in range(args.steps):
+        jpg = grab(args.out, tag=f"g{s:02d}")
+        if jpg is None:
+            print(f"g{s:02d}: NO CAPTURE", flush=True)
+        else:
+            m = laplacian_var(jpg, crop)
+            results.append((s, m))
+            mx = max(r[1] for r in results)
+            bar = "#" * int(m / mx * 40)
+            print(f"g{s:02d}: sharp={m:8.1f} {bar}", flush=True)
+        drive("Near", args.step)
+    if results:
+        best = max(results, key=lambda r: r[1])
+        print(f"\nBEST g{best[0]:02d} sharp={best[1]:.1f} "
+              f"(= {best[0]}x Near {args.step} from far stop)", flush=True)
+        print("Note: whole-frame metric is weak on textured scenes — "
+              "trust the eye in splay. Pass --crop x0,x1,y0,y1 to focus on a "
+              "hard-edged region.")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    g = sub.add_parser("grab", help="one frame, full workflow")
+    g.add_argument("--out", default="/mnt/bigdisk/canon/tmp")
+    g.set_defaults(func=cmd_grab)
+
+    f = sub.add_parser("focus", help="focus sweep with big steps")
+    f.add_argument("--out", default="/mnt/bigdisk/canon/tmp/garden-focus")
+    f.add_argument("--coarse", type=int, default=12, help="Far-3 steps to far stop")
+    f.add_argument("--steps", type=int, default=15, help="Near steps to sweep")
+    f.add_argument("--step", type=int, default=3, choices=(1, 2, 3), help="Near step size")
+    f.add_argument("--crop", default=None,
+                   help="metric crop as fractional x0,x1,y0,y1 (e.g. 0.3,0.7,0.2,0.6)")
+    f.set_defaults(func=cmd_focus)
+
+    args = ap.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
