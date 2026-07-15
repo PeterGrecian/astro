@@ -134,6 +134,19 @@ def drive(direction, amount):
     time.sleep(0.4)
 
 
+def take_up_backlash(direction, units):
+    """Drive `units` of Near-1-equivalent in `direction` to consume mechanical
+    slack. The EOS 2000D + EF-S 18-55 has ~13 Near-1 steps of lash: after a
+    direction reversal the first steps move nothing until the slack is taken
+    up. Call this once after reversing, BEFORE the measured sweep, so every
+    measured step actually moves the element. (Peter's 'out and back' fix.)"""
+    n3, rem = divmod(units, 3)
+    for _ in range(n3):
+        drive(direction, 3)
+    for _ in range(rem):
+        drive(direction, 1)
+
+
 def cmd_grab(args):
     set_camera_clock_utc()
     jpg = grab(args.out)
@@ -157,13 +170,18 @@ def cmd_focus(args):
     if args.crop:
         crop = tuple(float(x) for x in args.crop.split(","))
     print(f"focus sweep -> {args.out}; far stop ({args.coarse}x Far 3), "
-          f"then {args.steps}x Near {args.step}", flush=True)
+          f"take up {args.backlash} lash Near, then {args.steps}x Near "
+          f"{args.step}", flush=True)
     set_camera_clock_utc()
+    # rack to the far (infinity) stop — ends moving Far
     for _ in range(args.coarse):
         drive("Far", 3)
+    # take up the Near-direction backlash so measured steps actually move the
+    # element. diopter 0 is now the first genuinely-moved position past lash.
+    take_up_backlash("Near", args.backlash)
     results = []
     for s in range(args.steps):
-        diopter = s * args.step   # Near-1-equivalent steps from the far stop
+        diopter = s * args.step   # Near-1-equiv steps PAST the lash takeup
         jpg = grab(args.out, stem=f"foc_{diopter:02d}")
         if jpg is None:
             print(f"foc_{diopter:02d}: NO CAPTURE", flush=True)
@@ -198,6 +216,10 @@ def main():
     f.add_argument("--coarse", type=int, default=12, help="Far-3 steps to far stop")
     f.add_argument("--steps", type=int, default=15, help="Near steps to sweep")
     f.add_argument("--step", type=int, default=3, choices=(1, 2, 3), help="Near step size")
+    f.add_argument("--backlash", type=int, default=15,
+                   help="Near-1 units to take up after the far rack before "
+                        "sweeping, defeating focus lash (~13 observed). "
+                        "0 disables (reproduces the old naive sweep).")
     f.add_argument("--crop", default=None,
                    help="metric crop as fractional x0,x1,y0,y1 (e.g. 0.3,0.7,0.2,0.6)")
     f.set_defaults(func=cmd_focus)
