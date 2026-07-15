@@ -216,10 +216,12 @@ def main():
     f.add_argument("--coarse", type=int, default=12, help="Far-3 steps to far stop")
     f.add_argument("--steps", type=int, default=15, help="Near steps to sweep")
     f.add_argument("--step", type=int, default=3, choices=(1, 2, 3), help="Near step size")
-    f.add_argument("--backlash", type=int, default=15,
+    f.add_argument("--backlash", type=int, default=0,
                    help="Near-1 units to take up after the far rack before "
-                        "sweeping, defeating focus lash (~13 observed). "
-                        "0 disables (reproduces the old naive sweep).")
+                        "sweeping. NOTE: a 15-step takeup did NOT fix the "
+                        "stuck-then-burst drive behaviour (2026-07-15) — this "
+                        "is not classic lash. Default 0. Prefer finding focus "
+                        "by watching sharpness peak, not a saved step count.")
     f.add_argument("--crop", default=None,
                    help="metric crop as fractional x0,x1,y0,y1 (e.g. 0.3,0.7,0.2,0.6)")
     f.set_defaults(func=cmd_focus)
