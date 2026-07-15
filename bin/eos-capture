@@ -81,28 +81,29 @@ def grab(outdir, tag="", stem=None):
     to muppet's clock so it matches the name (the camera clock is +1h).
     Returns the JPG path, or None on failure."""
     os.makedirs(outdir, exist_ok=True)
-    gp("--set-config", "viewfinder=0")
-    gp("--set-config", "eosremoterelease=Immediate")
-    ev = gp("--wait-event=16s", timeout=24)
-    if ev is None or "FILEADDED" not in (ev.stdout or ""):
-        return None
-    pair = newest_pair()
-    if not pair:
-        return None
     if stem is None:
         ts = utcnow().strftime("%Y%m%dT%H%M%SZ")
         stem = f"{ts}{('_' + tag) if tag else ''}"
+    # Split release from wait-and-download (the recipe that actually works on
+    # this body). --wait-event-and-download pulls the frame whether it lands
+    # in Internal RAM or on the Memory card — unlike list-card-then-get-file,
+    # which only worked in card mode. Download to <stem>.%C so RAW+JPEG both
+    # arrive with their real extensions.
+    gp("--set-config", "viewfinder=0")
+    gp("--set-config", "eosremoterelease=Immediate")
+    dest_pat = os.path.join(outdir, f"{stem}.%C")
+    r = gp("--wait-event-and-download=10s", "--filename", dest_pat,
+           "--force-overwrite", timeout=30)
+    if r is None:
+        return None
     now = time.time()
     jpg = None
-    for fn in pair:
-        ext = fn.rsplit(".", 1)[-1].lower()
-        dest = os.path.join(outdir, f"{stem}.{ext}")
-        gp("--folder", FOLDER, "--get-file", fn, "--filename", dest,
-           "--force-overwrite", timeout=90)
-        if os.path.exists(dest):
-            os.utime(dest, (now, now))   # mtime = muppet UTC, not camera +1h
-            if ext == "jpg":
-                jpg = dest
+    for ext in ("jpg", "JPG", "cr2", "CR2"):
+        p = os.path.join(outdir, f"{stem}.{ext}")
+        if os.path.exists(p):
+            os.utime(p, (now, now))   # mtime = muppet UTC, not camera +1h
+            if ext.lower() == "jpg":
+                jpg = p
     return jpg
 
 
