@@ -233,6 +233,36 @@ def cmd_probe(args):
     return 0
 
 
+def cmd_moves(args):
+    """Drive through a sequence of target positions (Near-1 units from the far
+    stop) and capture at each, named <from>-<to>.jpg, reporting sharpness. Lets
+    us probe hysteresis: how sharp position Y is depends on where you came from.
+    First target is reached by racking to the far stop (pos 0) then Near to it."""
+    crop = tuple(float(x) for x in args.crop.split(",")) if args.crop else None
+    targets = [int(t) for t in args.targets.split(",")]
+    print(f"moves -> {args.out}; far rack ({args.coarse}x Far 3) = pos 0, "
+          f"then targets {targets}", flush=True)
+    set_camera_clock_utc()
+    for _ in range(args.coarse):
+        drive("Far", 3)
+    pos = 0
+    for t in targets:
+        frm = pos
+        delta = t - pos
+        if delta > 0:
+            drive("Near", delta)
+        elif delta < 0:
+            drive("Far", -delta)
+        pos = t
+        jpg = grab(args.out, stem=f"{frm:03d}-{t:03d}")
+        if jpg is None:
+            print(f"{frm:3d}->{t:3d}: NO CAPTURE", flush=True)
+        else:
+            m = laplacian_var(jpg, crop)
+            print(f"{frm:3d}->{t:3d}: sharp={m:8.1f}", flush=True)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -264,6 +294,16 @@ def main():
     p.add_argument("--maxamt", type=int, default=10, help="largest Near amount to try")
     p.add_argument("--crop", default=None, help="metric crop x0,x1,y0,y1")
     p.set_defaults(func=cmd_probe)
+
+    m = sub.add_parser("moves", help="drive through a list of positions, "
+                                     "capture <from>-<to>.jpg at each (hysteresis)")
+    m.add_argument("--targets", required=True,
+                   help="comma list of target positions in Near-1 units from "
+                        "the far stop, e.g. 6,20,6,30,6")
+    m.add_argument("--out", default="/mnt/bigdisk/canon/tmp/moves")
+    m.add_argument("--coarse", type=int, default=14, help="Far-3 steps to far stop")
+    m.add_argument("--crop", default=None, help="metric crop x0,x1,y0,y1")
+    m.set_defaults(func=cmd_moves)
 
     args = ap.parse_args()
     return args.func(args)
