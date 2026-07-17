@@ -2,11 +2,11 @@ night,camera,host,path,raw_bayer_bytes,binned_bytes,raw_sum8_bytes,binned_sum2_b
 2026-05-20,starcam,aws,s3://astro-berrylands-eu-west-1/cold/starcam/night/2026-05-20/starcam-night-2026-05-20.tar,0,0,0,0,5870551040,deep-archive,tar of squashed night (sum8+sum2); sha256 in sidecar + object metadata
 2026-05-20,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-20,0,0,3034776960,2832361920,0,local,squashed; sources deleted
 2026-05-20,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-20,0,0,3034776960,2832361920,0,usb-stick,squashed sum8+sum2; MANIFEST.sha256 verified
-2026-05-21,starcam,puppy,~/starcam-frames/night/2026-05-21,33114506845,9490578560,0,0,0,local,not yet squashed
+2026-05-21,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-21,0,0,5566740480,5175250560,0,local,squashed sum8+sum2; sources deleted; 1 truncated 01b frame quarantined
 2026-05-22,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-22,0,0,6063681600,0,0,local,no binned (never built); raw-sum8 only
 2026-05-22,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-22,0,0,6063681600,0,0,usb-stick,squashed sum8+sum2; MANIFEST.sha256 verified
 2026-05-23,starcam,puppy,~/starcam-frames/night/2026-05-23,33973688785,8800719148,0,0,0,local,not yet squashed; darkest night
-2026-05-24,starcam,puppy,~/starcam-frames/night/2026-05-24,32369871966,9280205761,0,0,0,local,not yet squashed
+2026-05-24,starcam,muppet,/mnt/bigdisk/starcam-frames/night/2026-05-24,0,0,5391210240,4989686400,0,local,squashed sum8+sum2; sources deleted
 2026-05-25,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-25,0,0,2340740160,2203122240,0,usb-stick,squashed sum8+sum2; MANIFEST.sha256 verified
 2026-05-25,starcam,puppy,~/starcam-frames/night/2026-05-25,0,0,2340740160,2203122240,0,local,squashed; sources retained on puppy
 2026-05-26,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-26,0,0,3415982400,3143828160,0,local,squashed; sources deleted
