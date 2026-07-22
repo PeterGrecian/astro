@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""eos-night-watch — overnight 'can we see stars yet?' ritual for the EOS 2000D.
+
+Every --interval (default 10 min): fire one diagnostic probe frame, measure
+overall brightness (the light-pollution / cloud signal), log it to a CSV
+time-series, and test for stars. When stars are CONFIRMED (two probes in a
+row with real compact sources AND a low/non-rising background), escalate to
+the science capture (eos-psf-dither: wide-open, focus-bracketed). Then resume
+watching.
+
+Site logic: light pollution -> cloud = BRIGHT (orange-lit), clear = darker.
+So the brightness median is the primary gauge; a FALLING median is a clearing.
+The all-night brightness curve is a deliverable even if it stays cloudy.
+
+Targets: real stars, but planes (moving compact sources) are also worth it up
+to ~1am under cloud — logged, but only stars trigger the long-exposure science
+run (planes move during a long sub).
+
+Uses the hard-won reliable plumbing (see astro-canon STATE.md): capture-preview
+in-invocation for any drive, one drive/invocation, timeout+retry, prime after
+start, embedded-JPEG fallback. Runs on muppet. numpy + PIL.
+"""
+import argparse, io, os, subprocess, time, csv
+import numpy as np
+from PIL import Image
+
+def gp(*a, t=45):
+    try: return subprocess.run(["gphoto2", *a], capture_output=True, text=True, timeout=t)
+    except subprocess.TimeoutExpired: return None
+
+def set_exposure(iso, shutter, aperture):
+    gp("--set-config", f"iso={iso}", "--set-config", f"shutterspeed={shutter}",
+       "--set-config", f"aperture={aperture}", t=20)
+
+def capture(stem, wait=12):
+    for e in (".CR2", ".JPG"):
+        try: os.remove(stem + e)
+        except FileNotFoundError: pass
+    gp("--set-config", "eosremoterelease=Immediate", t=25)
+    gp(f"--wait-event-and-download={wait}s", "--filename", stem + ".%C",
+       "--force-overwrite", t=wait+25)
+    return stem
+
+def fullres(stem):
+    if os.path.exists(stem + ".JPG"):
+        return np.asarray(Image.open(stem + ".JPG").convert("L"), dtype=float)
+    data = open(stem + ".CR2", "rb").read(); i = 0; best = None
+    while True:
+        s = data.find(b"\xff\xd8\xff", i)
+        if s < 0: break
+        e = data.find(b"\xff\xd9", s)
+        if e < 0: break
+        blob = data[s:e+2]; i = s + 2
+        try:
+            im = Image.open(io.BytesIO(blob)); im.load()
+            if im.size == (6000, 4000): best = blob; break
+        except Exception: pass
+    return np.asarray(Image.open(io.BytesIO(best)).convert("L"), dtype=float)
+
+def detect(g, thresh=40, min_blob=2):
+    """Return (n_sources, bright_frac). A source = a pixel > sky+thresh that is
+    part of a >=min_blob cluster (rejects single hot pixels crudely by counting
+    4-neighbours also above a lower threshold)."""
+    bg = np.median(g)
+    hi = g - bg
+    mask = hi > thresh
+    if not mask.any():
+        return 0, 0.0
+    # crude clustering: a candidate must have >=1 neighbour also above thresh/2
+    soft = hi > thresh/2
+    nb = (np.roll(soft,1,0)&np.roll(soft,-1,0)) | (np.roll(soft,1,1)&np.roll(soft,-1,1))
+    real = mask & nb
+    ys, xs = np.where(real)
+    return int(real.sum()), float(mask.mean())
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default=os.path.expanduser("~/tmp/canon-night"))
+    ap.add_argument("--interval", type=int, default=600, help="seconds between probes")
+    ap.add_argument("--iso", default="1600")
+    ap.add_argument("--shutter", default="4", help="diagnostic probe shutter (s token)")
+    ap.add_argument("--aperture", default="5.6")
+    ap.add_argument("--bg-clear", type=float, default=120,
+                    help="background median at/below this = possibly clear")
+    ap.add_argument("--sources-min", type=int, default=3,
+                    help="min real compact sources to call it 'stars'")
+    ap.add_argument("--confirm", type=int, default=2,
+                    help="consecutive positive probes before escalating")
+    ap.add_argument("--science-cmd",
+                    default=os.path.expanduser("~/bin/eos-psf-dither")
+                            + " --once --iso 3200 --shutter 15 --aperture 5.6"
+                            + " --out ~/tmp/canon-night/science",
+                    help="command to run when stars confirmed")
+    ap.add_argument("--no-escalate", action="store_true",
+                    help="log only; never auto-run the science capture")
+    args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
+
+    csv_path = os.path.join(args.out, "brightness.csv")
+    fh = open(csv_path, "a", newline="")
+    w = csv.writer(fh)
+    if fh.tell() == 0:
+        w.writerow(["t","frame","bg_median","bg_mean","bg_max","n_sources",
+                    "bright_frac","verdict"]); fh.flush()
+
+    # prime + set exposure once
+    gp("--capture-preview", "--filename", "/tmp/nw_prime.jpg", "--force-overwrite", t=30)
+    set_exposure(args.iso, args.shutter, args.aperture)
+    print(f"eos-night-watch -> {args.out}  interval={args.interval}s  "
+          f"probe ISO{args.iso}/{args.shutter}s/f{args.aperture}", flush=True)
+
+    hits = 0; last_bg = None
+    n = 0
+    while True:
+        t = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        stem = capture(os.path.join(args.out, f"probe_{n:04d}"))
+        try:
+            g = fullres(stem)
+        except Exception as ex:
+            print(f"[{t}] probe {n}: capture/read failed ({ex}); retry next tick", flush=True)
+            time.sleep(args.interval); n += 1; continue
+        bg = float(np.median(g)); mn = float(g.mean()); mx = float(g.max())
+        nsrc, bfrac = detect(g)
+        falling = (last_bg is not None and bg < last_bg - 3)
+        clear = bg <= args.bg_clear
+        stars = (nsrc >= args.sources_min) and (clear or falling)
+        verdict = "STARS" if stars else ("clear?" if clear else "cloud")
+        w.writerow([t, os.path.basename(stem), round(bg,1), round(mn,1),
+                    round(mx,0), nsrc, round(bfrac,5), verdict]); fh.flush()
+        print(f"[{t}] probe {n}: bg={bg:5.1f} max={mx:3.0f} sources={nsrc:4d} "
+              f"{'FALLING ' if falling else ''}-> {verdict}", flush=True)
+        last_bg = bg
+
+        if stars and not args.no_escalate:
+            hits += 1
+            if hits >= args.confirm:
+                print(f"[{t}] STARS CONFIRMED ({hits} in a row) -> science capture", flush=True)
+                os.makedirs(os.path.join(args.out, "science"), exist_ok=True)
+                subprocess.run(args.science_cmd, shell=True)
+                # after science, re-prime + restore probe exposure
+                gp("--capture-preview", "--filename", "/tmp/nw_prime.jpg",
+                   "--force-overwrite", t=30)
+                set_exposure(args.iso, args.shutter, args.aperture)
+                hits = 0
+        else:
+            hits = 0
+
+        n += 1
+        time.sleep(args.interval)
+
+if __name__ == "__main__":
+    main()
