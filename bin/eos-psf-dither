@@ -84,9 +84,18 @@ def set_exposure(iso, shutter, aperture=None):
 
 # ----- image loading (real JPG, else embedded full-res from CR2) ------------
 def fullres(stem):
+    """Return an L image, or None if neither the JPG nor a usable CR2 exists
+    (intermittent download failures must not crash the run)."""
     if os.path.exists(stem + ".JPG"):
-        return Image.open(stem + ".JPG").convert("L")
-    data = open(stem + ".CR2", "rb").read(); i = 0; best = None
+        try: return Image.open(stem + ".JPG").convert("L")
+        except Exception: pass
+    if not os.path.exists(stem + ".CR2"):
+        return None
+    try:
+        data = open(stem + ".CR2", "rb").read()
+    except Exception:
+        return None
+    i = 0; best = None
     while True:
         s = data.find(b"\xff\xd8\xff", i)
         if s < 0: break
@@ -98,6 +107,8 @@ def fullres(stem):
             if im.size == (6000, 4000): best = blob; break
         except Exception:
             pass
+    if best is None:
+        return None
     return Image.open(io.BytesIO(best)).convert("L")
 
 # ----- source detection + PSF fit -------------------------------------------
@@ -161,7 +172,10 @@ def psf_metrics(g, y, x, box=15):
 
 # ----- the run ---------------------------------------------------------------
 def analyse(stem):
-    g = np.asarray(fullres(stem), dtype=float)
+    im = fullres(stem)
+    if im is None:
+        return dict(bg=0.0, found=False)
+    g = np.asarray(im, dtype=float)
     bg = background(g)
     src = find_source(g)
     if src is None:
@@ -260,7 +274,13 @@ def main():
     while True:
         # brightness gate: shoot when low/falling (a gap). Take a probe frame.
         probe = capture(os.path.join(args.out, f"probe_{n:03d}"))
-        pg = np.asarray(fullres(probe), dtype=float)
+        pim = fullres(probe)
+        if pim is None:
+            print(f"[probe {n}] capture/download failed; retry next tick", flush=True)
+            n += 1
+            if args.once: break
+            time.sleep(20); continue
+        pg = np.asarray(pim, dtype=float)
         bg = background(pg)
         print(f"[probe {n}] background median = {bg:.1f}", flush=True)
         if args.bright_gate is None or bg <= args.bright_gate:

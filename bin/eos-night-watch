@@ -149,9 +149,12 @@ def main():
                     help="consecutive positive probes before escalating")
     ap.add_argument("--science-cmd",
                     default=os.path.expanduser("~/bin/eos-psf-dither")
-                            + " --once --iso 3200 --shutter 15 --aperture 5.6"
+                            + " --once --iso 800 --shutter 8 --aperture 5.6"
+                            + " --coarse-span 4 --dither-fine 8"
                             + " --out ~/tmp/canon-night/science",
-                    help="command to run when stars confirmed")
+                    help="command to run when stars confirmed. ISO800/8s: keeps "
+                         "the LP sky off saturation while stars/focus show "
+                         "(ISO3200/15s would clip the light-polluted background)")
     ap.add_argument("--no-escalate", action="store_true",
                     help="log only; never auto-run the science capture")
     args = ap.parse_args()
