@@ -17,10 +17,12 @@ Hard-won constraints (see astro-canon STATE.md):
   - entry-level body: only proprietary EOS capture opcodes -> eosremoterelease
     is mandatory; split release from wait-and-download, wait >=7s.
   - manualfocusdrive needs live view engaged (a --capture-preview) in the
-    SAME gphoto2 invocation; drive in BIG steps (Near/Far 3) — step 1 is
-    visually invisible.
+    SAME gphoto2 invocation (viewfinder=1 held open is a silent NO-OP).
+    STEP LADDER (2026-07-22): Near/Far 1 = fine (dead on coarse targets),
+    2 = MEDIUM = the real focus tool (daytime peak far sharper than Near-3 or
+    AF), 3 = coarse bracket. Prefer Near 2 for focus, Near 3 only to bracket.
   - flaky mini-B tether: every gphoto2 call is timeout-wrapped; a failed
-    frame is skipped, not fatal.
+    frame is skipped, not fatal. One drive per invocation (batching hangs).
 
 Runs on muppet (camera on USB). Deploy: commit on pip, `git pull` on muppet.
 """

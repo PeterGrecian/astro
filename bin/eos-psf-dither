@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""eos-psf-dither — night PSF / focus-dither tool for the EOS 2000D.
+
+Purpose (astro-canon strand, 2026-07-22): on a clear GAP (or any worthwhile
+moment), find the brightest compact source (star OR plane), sweep focus, and
+study the point-spread function. Built around three uses of the focus steps:
+
+  1. STEP-SIZE RATIO  — Near 1 (fine) / Near 2 (medium) / Near 3 (coarse) map
+     to different displacements. Near 1 looked "dead" on a daytime terrestrial
+     target (sub-metric motion) but on a star PSF even a sub-pixel shift shows.
+     Sweeping Near 1 at focus calibrates the fine:medium:coarse ratio.
+  2. SUBPIXEL DITHER  — Near-1 tiny steps shift the PSF a fraction of a pixel;
+     tracking the centroid to sub-pixel across steps gives dithered samples to
+     reconstruct super-resolved structure (beat the pixel sampling limit).
+  3. BREATHING / SAMPLING DITHER — focus changes magnification (focus breathing);
+     tracking the source's ABSOLUTE position vs focus step measures it, and the
+     positional dither also samples the pixel grid at varied phase.
+
+Focus mechanics (hard-won, see STATE.md):
+  - manualfocusdrive ONLY moves the element when --capture-preview is in the
+    SAME gphoto2 invocation. `viewfinder=1` held open = silent NO-OP. exit 0
+    does NOT mean the lens moved — verify by the metric.
+  - Ladder: Near 1 = fine (dead on coarse targets, live on PSF?), Near 2 =
+    the real focus tool (daytime peak Tenengrad 105 @ ~9 steps from far stop,
+    beats AF), Near 3 = coarse bracket. Switch stays on AF (One Shot).
+  - One drive per invocation (batching hangs); timeout + one retry per drive;
+    prime live view (bare --capture-preview + throwaway drive) after any start;
+    if drives hang RELIABLY, kill all gphoto2 and let load settle (stale
+    process pileup, not a wedge).
+
+Sky logic (light-pollution site): cloud = BRIGHT (orange-lit), clear = darker.
+So "worth shooting" = background brightness LOW or FALLING, not "dark". Planes
+are valid targets (moving point/streak) up to ~1am even under cloud.
+
+Runs on muppet (camera on USB). numpy + PIL + scipy.
+"""
+import argparse, io, os, subprocess, sys, time, csv
+import numpy as np
+from PIL import Image
+
+# ----- gphoto2 plumbing (the hard-won reliable forms) -----------------------
+def gp(*a, t=45):
+    try:
+        return subprocess.run(["gphoto2", *a], capture_output=True, text=True, timeout=t)
+    except subprocess.TimeoutExpired:
+        return None
+
+def prime():
+    """Absorb the first-call hang after any (re)start."""
+    gp("--capture-preview", "--filename", "/tmp/psf_prime.jpg", "--force-overwrite", t=30)
+    time.sleep(0.4)
+    _drive_once("Far", 3)   # throwaway
+
+def _drive_once(direction, amt):
+    return gp("--capture-preview",
+              "--set-config", f"manualfocusdrive={direction} {amt}",
+              "--set-config", "manualfocusdrive=None", t=50)
+
+def drive(direction, amt):
+    """One drive, capture-preview in-invocation, timeout + one retry."""
+    for _ in range(2):
+        if _drive_once(direction, amt) is not None:
+            return
+        prime()   # re-prime and retry once
+
+def rack_far(n=6):
+    for _ in range(n):
+        drive("Far", 3)
+
+def capture(stem):
+    for e in (".CR2", ".JPG"):
+        try: os.remove(stem + e)
+        except FileNotFoundError: pass
+    gp("--set-config", "viewfinder=0", t=15); time.sleep(0.7)
+    gp("--set-config", "eosremoterelease=Immediate", t=25)
+    gp("--wait-event-and-download=10s", "--filename", stem + ".%C",
+       "--force-overwrite", t=40)
+    return stem
+
+def set_exposure(iso, shutter, aperture=None):
+    args = ["--set-config", f"iso={iso}", "--set-config", f"shutterspeed={shutter}"]
+    if aperture: args += ["--set-config", f"aperture={aperture}"]
+    gp(*args, t=20)
+
+# ----- image loading (real JPG, else embedded full-res from CR2) ------------
+def fullres(stem):
+    if os.path.exists(stem + ".JPG"):
+        return Image.open(stem + ".JPG").convert("L")
+    data = open(stem + ".CR2", "rb").read(); i = 0; best = None
+    while True:
+        s = data.find(b"\xff\xd8\xff", i)
+        if s < 0: break
+        e = data.find(b"\xff\xd9", s)
+        if e < 0: break
+        blob = data[s:e+2]; i = s + 2
+        try:
+            im = Image.open(io.BytesIO(blob)); im.load()
+            if im.size == (6000, 4000): best = blob; break
+        except Exception:
+            pass
+    return Image.open(io.BytesIO(best)).convert("L")
+
+# ----- source detection + PSF fit -------------------------------------------
+def background(g):
+    """Robust sky/background level (median) — the LP/cloud brightness signal."""
+    return float(np.median(g))
+
+def find_source(g, min_fwhm=1.6):
+    """Brightest compact source (star or plane). Returns (y,x,peak) or None.
+    Rejects hot pixels by requiring the blob to be wider than min_fwhm px."""
+    bg = np.median(g)
+    hi = g - bg
+    yx = np.unravel_index(np.argmax(hi), hi.shape)
+    peak = hi[yx]
+    if peak < 8:                      # nothing above sky
+        return None
+    # crude width check: how many px within half-max around the peak
+    y, x = yx
+    r = 6
+    sub = hi[max(0,y-r):y+r+1, max(0,x-r):x+r+1]
+    if sub.size == 0: return None
+    npix_halfmax = (sub > peak/2).sum()
+    if npix_halfmax < 2:              # single hot pixel
+        return None
+    return (int(y), int(x), float(peak))
+
+def psf_metrics(g, y, x, box=15):
+    """Fit a 2D Gaussian around (y,x). Returns dict: fwhm_x, fwhm_y, peak,
+    cx, cy (subpixel centroid, full-frame coords), ellipticity, flux."""
+    from scipy.optimize import curve_fit
+    y0 = max(0, y-box); x0 = max(0, x-box)
+    sub = g[y0:y+box+1, x0:x+box+1].astype(float)
+    bg = np.median(g)
+    sub = sub - bg
+    sub[sub < 0] = 0
+    h, w = sub.shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    # intensity-weighted centroid (subpixel) as robust fallback + fit seed
+    tot = sub.sum()
+    if tot <= 0:
+        return None
+    cyv = (yy*sub).sum()/tot; cxv = (xx*sub).sum()/tot
+    def gauss2d(coords, amp, cx, cy, sx, sy, off):
+        yy, xx = coords
+        return (amp*np.exp(-(((xx-cx)**2)/(2*sx**2)+((yy-cy)**2)/(2*sy**2)))+off).ravel()
+    try:
+        p0 = (sub.max(), cxv, cyv, 2.0, 2.0, 0.0)
+        popt, _ = curve_fit(gauss2d, (yy, xx), sub.ravel(), p0=p0, maxfev=4000)
+        amp, cx, cy, sx, sy, off = popt
+        sx, sy = abs(sx), abs(sy)
+    except Exception:
+        # fall back to moments
+        amp = sub.max(); cx, cy = cxv, cyv
+        sx = np.sqrt(((xx-cxv)**2*sub).sum()/tot)
+        sy = np.sqrt(((yy-cyv)**2*sub).sum()/tot)
+        off = 0.0
+    k = 2.3548  # FWHM = 2.355 sigma
+    ell = abs(sx-sy)/max(sx, sy, 1e-6)
+    return dict(fwhm_x=sx*k, fwhm_y=sy*k, peak=float(amp),
+                cx=x0+cx, cy=y0+cy, ellipticity=ell, flux=float(tot))
+
+# ----- the run ---------------------------------------------------------------
+def analyse(stem):
+    g = np.asarray(fullres(stem), dtype=float)
+    bg = background(g)
+    src = find_source(g)
+    if src is None:
+        return dict(bg=bg, found=False)
+    y, x, peak = src
+    m = psf_metrics(g, y, x)
+    if m is None:
+        return dict(bg=bg, found=False)
+    m["bg"] = bg; m["found"] = True
+    return m
+
+def log_row(writer, fh, step_kind, step_i, res, stem):
+    row = dict(t=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+               frame=os.path.basename(stem), step_kind=step_kind, step_i=step_i,
+               bg=round(res.get("bg", 0), 1), found=res.get("found", False))
+    if res.get("found"):
+        for k in ("fwhm_x","fwhm_y","peak","cx","cy","ellipticity","flux"):
+            row[k] = round(res[k], 3)
+    writer.writerow(row); fh.flush()
+    return row
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default=os.path.expanduser("~/tmp/canon-psf"))
+    ap.add_argument("--iso", default="1600")
+    ap.add_argument("--shutter", default="2", help="camera token; 2 = 2s")
+    ap.add_argument("--aperture", default="5.6")
+    ap.add_argument("--focus-start", type=int, default=9,
+                    help="Near-2 steps from far stop for the focus estimate")
+    ap.add_argument("--coarse-span", type=int, default=5,
+                    help="Near-2 steps each side of --focus-start to sweep")
+    ap.add_argument("--dither-fine", type=int, default=12,
+                    help="Near-1 fine steps to dither across best focus (uses 1-3)")
+    ap.add_argument("--bright-gate", type=float, default=None,
+                    help="only run the sweep when background median <= this "
+                         "(LP: cloud=bright). Default: always run.")
+    ap.add_argument("--once", action="store_true",
+                    help="one focus+dither pass then exit (default: loop, "
+                         "gap-gated by brightness)")
+    args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
+
+    csv_path = os.path.join(args.out, "psf.csv")
+    fh = open(csv_path, "a", newline="")
+    writer = csv.DictWriter(fh, fieldnames=[
+        "t","frame","step_kind","step_i","bg","found",
+        "fwhm_x","fwhm_y","peak","cx","cy","ellipticity","flux"])
+    if fh.tell() == 0: writer.writeheader()
+
+    print(f"eos-psf-dither -> {args.out}  (csv: {csv_path})", flush=True)
+    prime()
+    set_exposure(args.iso, args.shutter, args.aperture)
+
+    def one_pass(tag):
+        # 1) rack to far stop (known zero), Near-2 to focus estimate
+        rack_far()
+        for _ in range(args.focus_start - args.coarse_span):
+            drive("Near", 2)
+        # 2) COARSE (Near-2) focus sweep across the peak, FWHM per step
+        best = None
+        print("== Near-2 focus sweep (fwhm; smaller=sharper) ==", flush=True)
+        for k in range(2*args.coarse_span + 1):
+            stem = capture(os.path.join(args.out, f"{tag}_n2_{k:02d}"))
+            res = analyse(stem); row = log_row(writer, fh, "near2", k, res, stem)
+            fw = min(res.get("fwhm_x",1e9), res.get("fwhm_y",1e9)) if res.get("found") else None
+            print(f"  n2[{k:02d}] bg={res.get('bg',0):6.1f} "
+                  f"fwhm={('%.2f'%fw) if fw else '   -  '} "
+                  f"found={res.get('found')}", flush=True)
+            if res.get("found") and (best is None or fw < best[0]):
+                best = (fw, k)
+            if k < 2*args.coarse_span:
+                drive("Near", 2)
+        if best is None:
+            print("  no source found in Near-2 sweep", flush=True); return
+        # 3) drive back to best focus (from far side for consistent lash)
+        back = (2*args.coarse_span - best[1])
+        for _ in range(back + 3): drive("Far", 2)   # overshoot Far
+        for _ in range(3):        drive("Near", 2)   # settle onto best from Near
+        # 4) FINE (Near-1) dither across best focus: ratio + subpixel + breathing
+        print(f"== Near-1 fine dither at best focus (n2 step {best[1]}) ==", flush=True)
+        for k in range(args.dither_fine + 1):
+            stem = capture(os.path.join(args.out, f"{tag}_n1_{k:02d}"))
+            res = analyse(stem); log_row(writer, fh, "near1", k, res, stem)
+            if res.get("found"):
+                print(f"  n1[{k:02d}] fwhm=({res['fwhm_x']:.2f},{res['fwhm_y']:.2f}) "
+                      f"centroid=({res['cx']:.2f},{res['cy']:.2f}) "
+                      f"peak={res['peak']:.0f} ell={res['ellipticity']:.2f}", flush=True)
+            else:
+                print(f"  n1[{k:02d}] no source (bg={res.get('bg',0):.1f})", flush=True)
+            if k < args.dither_fine:
+                drive("Near", 1)
+        print(f"PASS {tag} done", flush=True)
+
+    n = 0
+    while True:
+        # brightness gate: shoot when low/falling (a gap). Take a probe frame.
+        probe = capture(os.path.join(args.out, f"probe_{n:03d}"))
+        pg = np.asarray(fullres(probe), dtype=float)
+        bg = background(pg)
+        print(f"[probe {n}] background median = {bg:.1f}", flush=True)
+        if args.bright_gate is None or bg <= args.bright_gate:
+            one_pass(f"pass{n:03d}")
+        else:
+            print(f"  too bright (cloud); waiting (gate {args.bright_gate})", flush=True)
+        n += 1
+        if args.once:
+            break
+        time.sleep(20)
+
+if __name__ == "__main__":
+    main()
