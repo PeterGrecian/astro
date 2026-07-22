@@ -57,21 +57,68 @@ def fullres(stem):
         except Exception: pass
     return np.asarray(Image.open(io.BytesIO(best)).convert("L"), dtype=float)
 
-def detect(g, thresh=40, min_blob=2):
+_HOTPX = None
+def _load_hotpx(path):
+    global _HOTPX
+    if _HOTPX is None and path and os.path.exists(path):
+        try: _HOTPX = np.load(path)
+        except Exception: _HOTPX = None
+    return _HOTPX
+
+def detect(g, thresh=40, min_blob=2, hotpx_path=None):
     """Return (n_sources, bright_frac). A source = a pixel > sky+thresh that is
-    part of a >=min_blob cluster (rejects single hot pixels crudely by counting
-    4-neighbours also above a lower threshold)."""
+    part of a >=min_blob cluster AND not on the fixed hot-pixel map. Hot pixels
+    (fixed positions, present even in cloud) are the night-1/3 false-star trap."""
     bg = np.median(g)
     hi = g - bg
     mask = hi > thresh
     if not mask.any():
         return 0, 0.0
-    # crude clustering: a candidate must have >=1 neighbour also above thresh/2
     soft = hi > thresh/2
     nb = (np.roll(soft,1,0)&np.roll(soft,-1,0)) | (np.roll(soft,1,1)&np.roll(soft,-1,1))
     real = mask & nb
-    ys, xs = np.where(real)
+    hp = _load_hotpx(hotpx_path)
+    if hp is not None and hp.shape == real.shape:
+        real = real & ~hp
     return int(real.sum()), float(mask.mean())
+
+def streak_confirm(g, thresh=40, min_len=6, min_aspect=2.0):
+    """THE definitive star test (Peter's method): stars DRIFT with Earth's
+    rotation and STREAK in a long exposure; hot pixels are fixed to the sensor
+    and stay round dots. At 55mm ~13.8"/px, drift ~15"/s ~1.1 px/s, so a 20s
+    sub gives a ~24 px streak — trivially distinguishable from a dot.
+
+    Labels the bright pixels into blobs and, per blob, measures elongation via
+    the eigenvalues of its coordinate covariance (major/minor axis). A STREAK =
+    aspect >= min_aspect AND major axis >= min_len px. Returns
+    (n_streaks, n_dots, mean_angle_deg) — a consistent angle across streaks is
+    the drift direction (extra confirmation). Needs scipy.ndimage.label."""
+    from scipy import ndimage
+    bg = np.median(g)
+    hi = g - bg
+    mask = hi > thresh
+    if not mask.any():
+        return 0, 0, None
+    lbl, n = ndimage.label(mask)
+    n_streaks = n_dots = 0
+    angles = []
+    for i in range(1, n + 1):
+        ys, xs = np.where(lbl == i)
+        if len(ys) < 3:
+            n_dots += 1; continue
+        cov = np.cov(np.vstack([xs, ys]).astype(float))
+        evals, evecs = np.linalg.eigh(cov)
+        major = np.sqrt(max(evals[1], 1e-6)); minor = np.sqrt(max(evals[0], 1e-6))
+        aspect = major / max(minor, 1e-6)
+        length = 4 * major  # ~full extent
+        if aspect >= min_aspect and length >= min_len:
+            n_streaks += 1
+            v = evecs[:, 1]
+            angles.append(np.degrees(np.arctan2(v[1], v[0])) % 180)
+        else:
+            n_dots += 1
+    mean_ang = float(np.median(angles)) if angles else None
+    return n_streaks, n_dots, mean_ang
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -83,8 +130,21 @@ def main():
     ap.add_argument("--aperture", default="5.6")
     ap.add_argument("--bg-clear", type=float, default=120,
                     help="background median at/below this = possibly clear")
-    ap.add_argument("--sources-min", type=int, default=3,
-                    help="min real compact sources to call it 'stars'")
+    ap.add_argument("--sources-min", type=int, default=30,
+                    help="min real (hot-pixel-masked) compact sources to call it 'stars'")
+    ap.add_argument("--hotpx", default=os.path.expanduser("~/tmp/canon-night/hotpx.npy"),
+                    help="hot-pixel map .npy (fixed hot px excluded from detection)")
+    ap.add_argument("--streak-confirm", action="store_true", default=True,
+                    help="on candidates, fire a long sub and confirm stars by streaks")
+    ap.add_argument("--no-streak-confirm", dest="streak_confirm", action="store_false")
+    ap.add_argument("--streak-secs", default="20",
+                    help="long-exposure sub for the streak test (s token; ~24px/20s @55mm)")
+    ap.add_argument("--streak-iso", default="400",
+                    help="LOW iso for the streak sub — 20s at ISO1600 saturates the "
+                         "light-polluted sky; low ISO keeps the sky background off the "
+                         "255 ceiling while the star drift (geometric) is unchanged")
+    ap.add_argument("--streaks-min", type=int, default=3,
+                    help="min elongated sources (streaks) to confirm STARS")
     ap.add_argument("--confirm", type=int, default=2,
                     help="consecutive positive probes before escalating")
     ap.add_argument("--science-cmd",
@@ -102,7 +162,7 @@ def main():
     w = csv.writer(fh)
     if fh.tell() == 0:
         w.writerow(["t","frame","bg_median","bg_mean","bg_max","n_sources",
-                    "bright_frac","verdict"]); fh.flush()
+                    "n_streaks","verdict"]); fh.flush()
 
     # prime + set exposure once
     gp("--capture-preview", "--filename", "/tmp/nw_prime.jpg", "--force-overwrite", t=30)
@@ -121,15 +181,36 @@ def main():
             print(f"[{t}] probe {n}: capture/read failed ({ex}); retry next tick", flush=True)
             time.sleep(args.interval); n += 1; continue
         bg = float(np.median(g)); mn = float(g.mean()); mx = float(g.max())
-        nsrc, bfrac = detect(g)
+        nsrc, bfrac = detect(g, hotpx_path=args.hotpx)
         falling = (last_bg is not None and bg < last_bg - 3)
         clear = bg <= args.bg_clear
-        stars = (nsrc >= args.sources_min) and (clear or falling)
-        verdict = "STARS" if stars else ("clear?" if clear else "cloud")
+        candidate = (nsrc >= args.sources_min) and (clear or falling)
+
+        # STREAK CONFIRMATION (Peter's definitive test): if the cheap 4s probe
+        # flags candidates, fire a 20s sub — real stars DRIFT into streaks, hot
+        # pixels stay dots. Only real streaks count as STARS.
+        n_streaks = 0; drift_ang = None; stars = False
+        if candidate and args.streak_confirm:
+            print(f"[{t}] candidates ({nsrc}) — firing {args.streak_secs}s streak test "
+                  f"@ ISO{args.streak_iso} (low, to not saturate LP sky)", flush=True)
+            set_exposure(args.streak_iso, args.streak_secs, args.aperture)
+            _ss = int(float(args.streak_secs)) if "/" not in args.streak_secs else 20
+            sstem = capture(os.path.join(args.out, f"streak_{n:04d}"), wait=_ss+8)
+            try:
+                sg = fullres(sstem)
+                n_streaks, n_dots, drift_ang = streak_confirm(sg)
+                stars = n_streaks >= args.streaks_min
+                print(f"[{t}]   streaks={n_streaks} dots={n_dots} "
+                      f"drift={('%.0f deg'%drift_ang) if drift_ang is not None else '-'} "
+                      f"-> {'STARS CONFIRMED' if stars else 'no real streaks (hot px)'}", flush=True)
+            except Exception as ex:
+                print(f"[{t}]   streak frame failed ({ex})", flush=True)
+            set_exposure(args.iso, args.shutter, args.aperture)  # back to probe exp
+        verdict = "STARS" if stars else ("cand?" if candidate else ("clear?" if clear else "cloud"))
         w.writerow([t, os.path.basename(stem), round(bg,1), round(mn,1),
-                    round(mx,0), nsrc, round(bfrac,5), verdict]); fh.flush()
+                    round(mx,0), nsrc, n_streaks, verdict]); fh.flush()
         print(f"[{t}] probe {n}: bg={bg:5.1f} max={mx:3.0f} sources={nsrc:4d} "
-              f"{'FALLING ' if falling else ''}-> {verdict}", flush=True)
+              f"streaks={n_streaks} {'FALLING ' if falling else ''}-> {verdict}", flush=True)
         last_bg = bg
 
         if stars and not args.no_escalate:
