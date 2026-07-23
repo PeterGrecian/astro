@@ -32,8 +32,17 @@ def set_exposure(iso, shutter, aperture):
     gp("--set-config", f"iso={iso}", "--set-config", f"shutterspeed={shutter}",
        "--set-config", f"aperture={aperture}", t=20)
 
+def _find(stem, *exts):
+    """First existing stem+ext, trying each case. gphoto2 %C is lowercase
+    (cr2/jpg); matching only ".CR2"/".JPG" missed every frame. (2026-07-23.)"""
+    for e in exts:
+        for cand in (stem + e.lower(), stem + e.upper()):
+            if os.path.exists(cand):
+                return cand
+    return None
+
 def capture(stem, wait=12):
-    for e in (".CR2", ".JPG"):
+    for e in (".cr2", ".jpg", ".CR2", ".JPG"):
         try: os.remove(stem + e)
         except FileNotFoundError: pass
     # Use Press Full / Release Full, NOT Immediate. "Immediate" triggers AF
@@ -49,9 +58,13 @@ def capture(stem, wait=12):
     return stem
 
 def fullres(stem):
-    if os.path.exists(stem + ".JPG"):
-        return np.asarray(Image.open(stem + ".JPG").convert("L"), dtype=float)
-    data = open(stem + ".CR2", "rb").read(); i = 0; best = None
+    jpg = _find(stem, ".jpg")
+    if jpg:
+        return np.asarray(Image.open(jpg).convert("L"), dtype=float)
+    cr2 = _find(stem, ".cr2")
+    if not cr2:
+        raise FileNotFoundError(stem + ".cr2")   # caller retries next tick
+    data = open(cr2, "rb").read(); i = 0; best = None; best_px = 0
     while True:
         s = data.find(b"\xff\xd8\xff", i)
         if s < 0: break
@@ -60,8 +73,11 @@ def fullres(stem):
         blob = data[s:e+2]; i = s + 2
         try:
             im = Image.open(io.BytesIO(blob)); im.load()
-            if im.size == (6000, 4000): best = blob; break
+            px = im.size[0] * im.size[1]
+            if px > best_px: best = blob; best_px = px
         except Exception: pass
+    if best is None:
+        raise ValueError("no embedded jpeg in " + cr2)
     return np.asarray(Image.open(io.BytesIO(best)).convert("L"), dtype=float)
 
 _HOTPX = None

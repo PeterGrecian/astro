@@ -67,8 +67,18 @@ def rack_far(n=6):
     for _ in range(n):
         drive("Far", 3)
 
+def _find(stem, *exts):
+    """Return the first existing stem+ext, trying each case. gphoto2's %C
+    expands to a LOWERCASE extension (cr2/jpg), so matching only ".CR2"/".JPG"
+    missed every frame -> spurious "capture/download failed". (2026-07-23.)"""
+    for e in exts:
+        for cand in (stem + e.lower(), stem + e.upper()):
+            if os.path.exists(cand):
+                return cand
+    return None
+
 def capture(stem):
-    for e in (".CR2", ".JPG"):
+    for e in (".cr2", ".jpg", ".CR2", ".JPG"):
         try: os.remove(stem + e)
         except FileNotFoundError: pass
     gp("--set-config", "viewfinder=0", t=15); time.sleep(0.7)
@@ -93,13 +103,15 @@ def set_exposure(iso, shutter, aperture=None):
 def fullres(stem):
     """Return an L image, or None if neither the JPG nor a usable CR2 exists
     (intermittent download failures must not crash the run)."""
-    if os.path.exists(stem + ".JPG"):
-        try: return Image.open(stem + ".JPG").convert("L")
+    jpg = _find(stem, ".jpg")
+    if jpg:
+        try: return Image.open(jpg).convert("L")
         except Exception: pass
-    if not os.path.exists(stem + ".CR2"):
+    cr2 = _find(stem, ".cr2")
+    if not cr2:
         return None
     try:
-        data = open(stem + ".CR2", "rb").read()
+        data = open(cr2, "rb").read()
     except Exception:
         return None
     # Pick the LARGEST embedded JPEG (the full-res preview). Do NOT match an
