@@ -130,6 +130,12 @@ def main():
     ap.add_argument("--aperture", default="5.6")
     ap.add_argument("--bg-clear", type=float, default=120,
                     help="background median at/below this = possibly clear")
+    ap.add_argument("--bg-stop", type=float, default=210,
+                    help="background median at/above this = washed out (dawn / "
+                         "hopeless overcast); after --bg-stop-count such probes in "
+                         "a row, retire the watcher so it doesn't run into daylight")
+    ap.add_argument("--bg-stop-count", type=int, default=2,
+                    help="consecutive too-bright probes before self-terminating")
     ap.add_argument("--sources-min", type=int, default=30,
                     help="min real (hot-pixel-masked) compact sources to call it 'stars'")
     ap.add_argument("--hotpx", default=os.path.expanduser("~/tmp/canon-night/hotpx.npy"),
@@ -173,7 +179,7 @@ def main():
     print(f"eos-night-watch -> {args.out}  interval={args.interval}s  "
           f"probe ISO{args.iso}/{args.shutter}s/f{args.aperture}", flush=True)
 
-    hits = 0; last_bg = None
+    hits = 0; last_bg = None; bright_run = 0
     n = 0
     while True:
         t = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -215,6 +221,18 @@ def main():
         print(f"[{t}] probe {n}: bg={bg:5.1f} max={mx:3.0f} sources={nsrc:4d} "
               f"streaks={n_streaks} {'FALLING ' if falling else ''}-> {verdict}", flush=True)
         last_bg = bg
+
+        # SELF-TERMINATE when washed out (dawn / hopeless bright cloud). Only
+        # after N consecutive too-bright probes, so a single bright cloud
+        # passing over a good gap doesn't retire the watcher prematurely.
+        if bg >= args.bg_stop:
+            bright_run += 1
+            if bright_run >= args.bg_stop_count:
+                print(f"[{t}] bg={bg:.1f} >= {args.bg_stop} for {bright_run} probes "
+                      f"-> washed out, retiring watcher", flush=True)
+                break
+        else:
+            bright_run = 0
 
         if stars and not args.no_escalate:
             hits += 1
