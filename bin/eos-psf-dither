@@ -102,7 +102,12 @@ def fullres(stem):
         data = open(stem + ".CR2", "rb").read()
     except Exception:
         return None
-    i = 0; best = None
+    # Pick the LARGEST embedded JPEG (the full-res preview). Do NOT match an
+    # exact size: the EOS 2000D full-res JPEG is 6000x4000 but the raw is
+    # 6020x4015 and the biggest embedded preview may differ by a few px, so a
+    # hardcoded (6000,4000) match found nothing and the run reported "capture
+    # failed" on a perfectly good frame. (Cost real debugging 2026-07-23.)
+    i = 0; best = None; best_px = 0
     while True:
         s = data.find(b"\xff\xd8\xff", i)
         if s < 0: break
@@ -111,7 +116,8 @@ def fullres(stem):
         blob = data[s:e+2]; i = s + 2
         try:
             im = Image.open(io.BytesIO(blob)); im.load()
-            if im.size == (6000, 4000): best = blob; break
+            px = im.size[0] * im.size[1]
+            if px > best_px: best = blob; best_px = px
         except Exception:
             pass
     if best is None:
