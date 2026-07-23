@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""eos-focus-cycle — blind focus-experiment capture for the EOS 2000D on stars.
+
+Philosophy (astro-canon strand, 2026-07-23, after FIRST LIGHT): finding stars
+at all is hard; don't try to measure focus live. Instead CAPTURE BLIND across a
+deterministic focus grid, tagging every frame with its exact focus coordinate,
+and ANALYSE NEXT DAY (measure PSF FWHM + peak/area per frame, build the focus
+surface, find best focus, study the medium/fine step ratio + subpixel dither +
+breathing). The camera's only job is to cover the focus space reliably.
+
+The grid (Peter's spec):
+  MEDIUM (Near-2) setpoints: --focus-start +/- --medium-span  (default b9 +/-4)
+  FINE (Near-1) dither:      0 .. --fine-steps within each medium (default 0-8)
+  Per position: --subs 30s RAW subs (default 1).
+  Cycle the whole grid, REPEAT while the gap lasts.
+
+Traversal (Peter's choice): RE-RACK to the far hard stop and re-approach each
+medium setpoint fresh via anti-backlash (overshoot + return) — so every focus
+coordinate is reached the same way (hysteresis-consistent). Costs drive overhead
+but gives trustworthy coordinates for the experiment.
+
+Focus is the master control, NOT gain: last night's stars were FWHM ~30px
+(blob ~169px) because focus was never applied — defocus spreads light ~3000x,
+faking a need for high ISO. Fix the PSF and stars become bright points needing
+LESS gain. So: moderate ISO, RAW, and hunt focus.
+
+Drive plumbing = the hard-won reliable form (capture-preview in-invocation, one
+drive/invocation, prime after start, timeout+retry). 30s is the max reliable
+TIMED exposure (bulb >30s is an unsolved gphoto2 rabbit hole on this body).
+Runs on muppet.
+
+  eos-focus-cycle --out ~/tmp/canon-focus-YYYYMMDD
+  eos-focus-cycle --focus-start 9 --medium-span 4 --fine-steps 8 --subs 1 --secs 30
+"""
+import argparse, os, subprocess, time, csv
+
+def gp(*a, t=45):
+    try: return subprocess.run(["gphoto2", *a], capture_output=True, text=True, timeout=t)
+    except subprocess.TimeoutExpired: return None
+
+def _drive(direction, amt):
+    return gp("--capture-preview",
+              "--set-config", f"manualfocusdrive={direction} {amt}",
+              "--set-config", "manualfocusdrive=None", t=50)
+
+def drive(direction, amt):
+    for _ in range(2):
+        if _drive(direction, amt) is not None: return
+        prime()
+
+def prime():
+    gp("--capture-preview", "--filename", "/tmp/fc_prime.jpg", "--force-overwrite", t=30)
+    time.sleep(0.4); _drive("Far", 3)
+
+def rack_far(n=6):
+    for _ in range(n): drive("Far", 3)
+
+def capture(stem, wait):
+    """Fire one still. Drops live view first (a drive leaves LV engaged, and
+    capturing with LV up after a drive silently fails on this body), settles,
+    then releases. Retries once (re-prime) if no file downloads."""
+    for e in (".CR2", ".JPG"):
+        try: os.remove(stem + e)
+        except FileNotFoundError: pass
+    for attempt in range(2):
+        gp("--set-config", "viewfinder=0", t=15)
+        time.sleep(1.0)                       # settle after LV/drive
+        gp("--set-config", "eosremoterelease=Immediate", t=25)
+        gp(f"--wait-event-and-download={wait}s", "--filename", stem + ".%C",
+           "--force-overwrite", t=wait + 25)
+        if os.path.exists(stem + ".CR2"):
+            return True
+        # failed — re-prime live view and retry once
+        if attempt == 0:
+            prime()
+    return False
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default=os.path.expanduser(
+        "~/tmp/canon-focus-" + time.strftime("%Y%m%d")))
+    ap.add_argument("--iso", default="1600", help="moderate, fixed — focus>gain")
+    ap.add_argument("--secs", type=int, default=30, help="RAW sub exposure (max reliable timed)")
+    ap.add_argument("--aperture", default="5.6")
+    ap.add_argument("--focus-start", type=int, default=9,
+                    help="centre MEDIUM (Near-2 steps from far stop) — daytime car est.")
+    ap.add_argument("--medium-span", type=int, default=4,
+                    help="MEDIUM setpoints span focus-start +/- this")
+    ap.add_argument("--fine-steps", type=int, default=8, help="FINE (Near-1) dither 0..N")
+    ap.add_argument("--subs", type=int, default=1, help="RAW subs per (medium,fine) position")
+    ap.add_argument("--cycles", type=int, default=0, help="0 = loop until killed")
+    args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
+
+    man = open(os.path.join(args.out, "manifest.csv"), "a", newline="")
+    w = csv.writer(man)
+    if man.tell() == 0:
+        w.writerow(["t_utc", "frame", "cycle", "medium_near2", "fine_near1",
+                    "sub", "secs", "iso", "got_file"])
+        man.flush()
+
+    prime()
+    gp("--set-config", "imageformat=RAW",
+       "--set-config", f"iso={args.iso}",
+       "--set-config", f"aperture={args.aperture}",
+       "--set-config", f"shutterspeed={args.secs}", t=25)
+
+    mediums = list(range(args.focus_start - args.medium_span,
+                         args.focus_start + args.medium_span + 1))
+    wait = args.secs + 12
+    print(f"eos-focus-cycle -> {args.out}", flush=True)
+    print(f"  MEDIUM (Near-2) setpoints: {mediums}", flush=True)
+    print(f"  FINE (Near-1) dither: 0..{args.fine_steps}   subs/pos: {args.subs}   "
+          f"{args.secs}s RAW ISO{args.iso}", flush=True)
+    print(f"  grid = {len(mediums)}x{args.fine_steps+1} = "
+          f"{len(mediums)*(args.fine_steps+1)} positions/cycle", flush=True)
+
+    cyc = 0
+    while True:
+        cyc += 1
+        print(f"=== cycle {cyc} ===", flush=True)
+        for m in mediums:
+            # re-rack + re-approach this medium fresh (hysteresis-consistent)
+            rack_far()
+            for _ in range(m): drive("Near", 2)
+            for f in range(args.fine_steps + 1):
+                for s in range(args.subs):
+                    stem = os.path.join(args.out, f"c{cyc:02d}_m{m:02d}_f{f:02d}_s{s:02d}")
+                    got = capture(stem, wait)
+                    t = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    w.writerow([t, os.path.basename(stem), cyc, m, f, s,
+                                args.secs, args.iso, got]); man.flush()
+                    print(f"  c{cyc} m{m} f{f} s{s}: "
+                          f"{'CR2' if got else 'NO FILE'}", flush=True)
+                if f < args.fine_steps:
+                    drive("Near", 1)   # one fine step
+        if args.cycles and cyc >= args.cycles:
+            break
+    print("DONE", flush=True)
+
+if __name__ == "__main__":
+    main()

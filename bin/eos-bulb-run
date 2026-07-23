@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""eos-bulb-run — long-exposure (bulb) capture run for the EOS 2000D, built for
+STACKING: fire many minute-ish RAW subs, optionally bracketing focus across the
+run, so they can be coadded (CR2 -> FITS.fz via cr2-to-fits -> astrocam pipeline).
+
+Why bulb: the 2000D caps at 30s timed; 1-min+ integrations need bulb mode
+(shutterspeed=bulb, eosremoterelease Press Full -> hold -> Release Full).
+
+Capture design (see astro-canon STATE.md, 2026-07-23):
+  - RAW (CR2) only — JPEG's tone curve/8-bit destroy faint stars; stacking needs
+    linear data.
+  - Fixed moderate ISO (~1600) — above the read-noise floor, so higher ISO adds
+    ~zero info under light pollution AND costs highlight headroom. Brighten in
+    post (histogram stretch on linear data), don't crank ISO.
+  - Focus bracketing: cycle Near-2 focus steps across the run (Near 2 is the real
+    focus tool; see the focus breakthrough). Each focus setting gets several subs.
+  - Download to muppet as we go (RAW to host); card fills otherwise.
+
+Focus drive plumbing is the hard-won reliable form: --capture-preview in the
+SAME invocation as the drive, one drive/invocation, prime after start.
+
+  eos-bulb-run --secs 60 --iso 1600 --count 30 --out ~/tmp/canon-bulb
+  eos-bulb-run --secs 60 --focus-bracket 5 --focus-step-every 4 ...
+"""
+import argparse, os, subprocess, time
+import numpy as np
+
+def gp(*a, t=45):
+    try: return subprocess.run(["gphoto2", *a], capture_output=True, text=True, timeout=t)
+    except subprocess.TimeoutExpired: return None
+
+def prime():
+    gp("--capture-preview", "--filename", "/tmp/bulb_prime.jpg", "--force-overwrite", t=30)
+    time.sleep(0.4)
+    _drive("Far", 3)  # throwaway to absorb first-call hang
+
+def _drive(direction, amt):
+    return gp("--capture-preview",
+              "--set-config", f"manualfocusdrive={direction} {amt}",
+              "--set-config", "manualfocusdrive=None", t=50)
+
+def drive(direction, amt):
+    for _ in range(2):
+        if _drive(direction, amt) is not None: return
+        prime()
+
+def bulb_expose(secs):
+    """Open shutter for `secs` via bulb, then close. Returns nothing; caller
+    downloads. shutterspeed must already be 'bulb'."""
+    gp("--set-config", "eosremoterelease=Press Full", t=15)
+    time.sleep(secs)
+    gp("--set-config", "eosremoterelease=Release Full", t=15)
+
+def download(stem):
+    gp("--wait-event-and-download=15s", "--filename", stem + ".%C",
+       "--force-overwrite", t=45)
+    return stem
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default=os.path.expanduser("~/tmp/canon-bulb"))
+    ap.add_argument("--secs", type=int, default=60, help="bulb exposure seconds per sub")
+    ap.add_argument("--iso", default="1600")
+    ap.add_argument("--aperture", default="5.6")
+    ap.add_argument("--count", type=int, default=30, help="number of subs")
+    ap.add_argument("--focus-bracket", type=int, default=0,
+                    help="if >0, cycle this many Near-2 focus settings across the run")
+    ap.add_argument("--focus-step-every", type=int, default=4,
+                    help="subs per focus setting before stepping (with --focus-bracket)")
+    ap.add_argument("--focus-start", type=int, default=9,
+                    help="Near-2 steps from far stop for the first/only focus setting")
+    args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
+
+    prime()
+    # exposure config: RAW, bulb, fixed ISO/aperture
+    gp("--set-config", "imageformat=RAW", t=20)
+    gp("--set-config", f"iso={args.iso}", "--set-config", f"aperture={args.aperture}",
+       "--set-config", "shutterspeed=bulb", t=20)
+    # capturetarget: keep on card + download (both), so a dropped download isn't lost
+    print(f"eos-bulb-run -> {args.out}  {args.secs}s x{args.count} "
+          f"RAW ISO{args.iso} f{args.aperture}"
+          + (f"  focus-bracket {args.focus_bracket}x (step every {args.focus_step_every})"
+             if args.focus_bracket else "  fixed focus"), flush=True)
+
+    # go to the starting focus (rack far stop, Near-2 to focus-start)
+    def goto_focus(near2_steps):
+        for _ in range(6): drive("Far", 3)      # rack to far hard stop
+        for _ in range(near2_steps): drive("Near", 2)
+
+    if args.focus_bracket:
+        # bracket spans focus-start-span .. focus-start+span-ish; simplest: start at
+        # focus-start and step Near 2 by 1 each new setting.
+        cur_focus = args.focus_start
+        goto_focus(cur_focus)
+    else:
+        goto_focus(args.focus_start)
+
+    for n in range(args.count):
+        if args.focus_bracket and n > 0 and n % args.focus_step_every == 0:
+            drive("Near", 2)  # step focus one Near-2 unit
+            cur_focus += 1
+            print(f"  -> focus step: now {cur_focus} Near-2 from far stop", flush=True)
+        stem = os.path.join(args.out, f"sub_{n:04d}")
+        t0 = time.time()
+        bulb_expose(args.secs)
+        download(stem)
+        got = os.path.exists(stem + ".CR2")
+        foc = f" foc{cur_focus}" if args.focus_bracket else ""
+        print(f"  sub {n:04d}{foc}: {args.secs}s exposure, "
+              f"{'CR2 saved' if got else 'NO FILE (download failed)'} "
+              f"[{time.time()-t0:.0f}s]", flush=True)
+    print("DONE", flush=True)
+
+if __name__ == "__main__":
+    main()
