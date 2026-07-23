@@ -72,14 +72,16 @@ def capture(stem):
         try: os.remove(stem + e)
         except FileNotFoundError: pass
     gp("--set-config", "viewfinder=0", t=15); time.sleep(0.7)
-    # Press the shutter AND download in one invocation, then RELEASE it.
-    # Leaving eosremoterelease=Immediate held (no matching =None) keeps the
-    # camera busy -> 0x2019 PTP Device Busy wedge on the next config write.
+    # Use Press Full / Release Full, NOT Immediate. "Immediate" triggers AF
+    # first; on a dark/blank sky AF cannot lock, so the shutter stays
+    # half-pressed and the camera wedges busy (0x2019 PTP Device Busy /
+    # -110), which only a 12V power pull clears. "Press Full" fires the
+    # shutter directly with no AF wait; always follow with "Release Full".
     # (Cost real debugging 2026-07-23; see STATE reset ladder.)
-    gp("--set-config", "eosremoterelease=Immediate",
+    gp("--set-config", "eosremoterelease=Press Full",
        "--wait-event-and-download=10s", "--filename", stem + ".%C",
        "--force-overwrite", t=45)
-    gp("--set-config", "eosremoterelease=None", t=15)
+    gp("--set-config", "eosremoterelease=Release Full", t=15)
     return stem
 
 def set_exposure(iso, shutter, aperture=None):
