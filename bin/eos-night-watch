@@ -36,9 +36,14 @@ def capture(stem, wait=12):
     for e in (".CR2", ".JPG"):
         try: os.remove(stem + e)
         except FileNotFoundError: pass
-    gp("--set-config", "eosremoterelease=Immediate", t=25)
-    gp(f"--wait-event-and-download={wait}s", "--filename", stem + ".%C",
+    # Press + download in one invocation, then RELEASE. Leaving
+    # eosremoterelease=Immediate held (no matching =None) keeps the camera
+    # busy -> 0x2019 PTP Device Busy wedge on the next config write, which
+    # only a 12V power pull clears. (Cost real debugging 2026-07-23.)
+    gp("--set-config", "eosremoterelease=Immediate",
+       f"--wait-event-and-download={wait}s", "--filename", stem + ".%C",
        "--force-overwrite", t=wait+25)
+    gp("--set-config", "eosremoterelease=None", t=15)
     return stem
 
 def fullres(stem):

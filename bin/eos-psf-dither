@@ -72,9 +72,14 @@ def capture(stem):
         try: os.remove(stem + e)
         except FileNotFoundError: pass
     gp("--set-config", "viewfinder=0", t=15); time.sleep(0.7)
-    gp("--set-config", "eosremoterelease=Immediate", t=25)
-    gp("--wait-event-and-download=10s", "--filename", stem + ".%C",
-       "--force-overwrite", t=40)
+    # Press the shutter AND download in one invocation, then RELEASE it.
+    # Leaving eosremoterelease=Immediate held (no matching =None) keeps the
+    # camera busy -> 0x2019 PTP Device Busy wedge on the next config write.
+    # (Cost real debugging 2026-07-23; see STATE reset ladder.)
+    gp("--set-config", "eosremoterelease=Immediate",
+       "--wait-event-and-download=10s", "--filename", stem + ".%C",
+       "--force-overwrite", t=45)
+    gp("--set-config", "eosremoterelease=None", t=15)
     return stem
 
 def set_exposure(iso, shutter, aperture=None):
