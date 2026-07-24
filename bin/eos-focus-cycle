@@ -55,25 +55,114 @@ def prime():
 def rack_far(n=6):
     for _ in range(n): drive("Far", 3)
 
+def _find(stem, *exts):
+    """First existing stem+ext, trying each case. gphoto2 %C expands to a
+    LOWERCASE extension (cr2/jpg); matching only ".CR2" missed every frame
+    and reported spurious "NO FILE". (astro-canon 2026-07-23.)"""
+    for e in exts:
+        for cand in (stem + e.lower(), stem + e.upper()):
+            if os.path.exists(cand):
+                return cand
+    return None
+
 def capture(stem, wait):
     """Fire one still. Drops live view first (a drive leaves LV engaged, and
     capturing with LV up after a drive silently fails on this body), settles,
-    then releases. Retries once (re-prime) if no file downloads."""
-    for e in (".CR2", ".JPG"):
+    then releases. Retries once (re-prime) if no file downloads.
+
+    Uses Press Full / Release Full, NOT Immediate: "Immediate" triggers AF
+    first, and on a dark sky AF cannot lock so the shutter hangs half-pressed
+    and the camera wedges busy (0x2019 PTP Device Busy / -110), curable only
+    by a 12V power pull. "Press Full" fires directly; always release after.
+    (astro-canon 2026-07-23 — cost real debugging.)"""
+    for e in (".cr2", ".jpg", ".CR2", ".JPG"):
         try: os.remove(stem + e)
         except FileNotFoundError: pass
     for attempt in range(2):
         gp("--set-config", "viewfinder=0", t=15)
         time.sleep(1.0)                       # settle after LV/drive
-        gp("--set-config", "eosremoterelease=Immediate", t=25)
-        gp(f"--wait-event-and-download={wait}s", "--filename", stem + ".%C",
+        gp("--set-config", "eosremoterelease=Press Full",
+           f"--wait-event-and-download={wait}s", "--filename", stem + ".%C",
            "--force-overwrite", t=wait + 25)
-        if os.path.exists(stem + ".CR2"):
+        gp("--set-config", "eosremoterelease=Release Full", t=15)
+        if _find(stem, ".cr2"):
             return True
         # failed — re-prime live view and retry once
         if attempt == 0:
             prime()
     return False
+
+# ---- sun altitude (dependency-free NOAA formula; muppet has no ephem) -------
+def sun_altitude_deg(lat, lon, when=None):
+    """Sun altitude in degrees at (lat, lon), UTC `when`. NOAA solar-position
+    approximation, good to a few arc-minutes — ample for a -12 deg twilight
+    gate. Matches astrocam's sun_altitude_night_deg convention (astro/state.py)
+    without needing the ephem dependency on muppet's system python."""
+    import math, datetime as _dt
+    when = when or _dt.datetime.now(_dt.timezone.utc)
+    # fractional day-of-year and hour
+    jan1 = _dt.datetime(when.year, 1, 1, tzinfo=_dt.timezone.utc)
+    doy = (when - jan1).total_seconds() / 86400.0  # 0-based
+    hour = when.hour + when.minute/60 + when.second/3600
+    ga = 2*math.pi/365.0 * (doy + (hour-12)/24.0)           # fractional-year angle
+    # equation of time (minutes) and solar declination (rad)
+    eqtime = 229.18*(0.000075 + 0.001868*math.cos(ga) - 0.032077*math.sin(ga)
+                     - 0.014615*math.cos(2*ga) - 0.040849*math.sin(2*ga))
+    decl = (0.006918 - 0.399912*math.cos(ga) + 0.070257*math.sin(ga)
+            - 0.006758*math.cos(2*ga) + 0.000907*math.sin(2*ga)
+            - 0.002697*math.cos(3*ga) + 0.00148*math.sin(3*ga))
+    time_offset = eqtime + 4*lon                            # minutes (lon east +)
+    tst = hour*60 + time_offset                             # true solar time (min)
+    ha = math.radians(tst/4.0 - 180.0)                      # hour angle (rad)
+    latr = math.radians(lat)
+    cz = (math.sin(latr)*math.sin(decl)
+          + math.cos(latr)*math.cos(decl)*math.cos(ha))
+    cz = max(-1.0, min(1.0, cz))
+    return 90.0 - math.degrees(math.acos(cz))
+
+def wait_for_dark(lat, lon, night_alt=-12.0, poll=120):
+    """Block until the sun is below night_alt degrees (nautical twilight, the
+    astrocam night threshold). Returns immediately if already dark."""
+    import datetime as _dt
+    while True:
+        alt = sun_altitude_deg(lat, lon)
+        t = _dt.datetime.now().strftime("%H:%M")
+        if alt <= night_alt:
+            print(f"[{t}] sun alt {alt:+.1f} deg <= {night_alt} -> DARK, starting", flush=True)
+            return
+        print(f"[{t}] sun alt {alt:+.1f} deg > {night_alt}; waiting for dark "
+              f"(poll {poll}s)", flush=True)
+        time.sleep(poll)
+
+# ---- boosted-JPEG delivery (stretch linear raw so faint stars show) ---------
+def deliver_jpeg(cr2_path, jpg_path, lo_pct=50.0, hi_pct=99.9):
+    """Percentile-stretch the LINEAR raw to an 8-bit JPEG for viewing. The
+    camera JPEG crushes faint stars below its tone curve (first-light lesson);
+    stretching linear raw is how stars that are invisible in JPEG emerge.
+    Best-effort: needs rawpy; skips silently if unavailable."""
+    try:
+        import rawpy, numpy as np
+        from PIL import Image
+        raw = rawpy.imread(cr2_path)
+        g = raw.postprocess(use_camera_wb=True, no_auto_bright=True,
+                            output_bps=16, half_size=True, gamma=(1, 1))
+        l = g.astype("float32").mean(2)
+        lo, hi = np.percentile(l, [lo_pct, hi_pct])
+        s = np.clip((l - lo) / max(hi - lo, 1) * 255, 0, 255).astype("uint8")
+        Image.fromarray(s).save(jpg_path, quality=90)
+        return True
+    except Exception as ex:
+        print(f"    (jpeg deliver skipped: {ex})", flush=True)
+        return False
+
+# Peter's swapped d-schedule: d = MEDIUM (Near-2) steps from the infinity hard
+# stop. Groups of 3 spaced by 3 (max spread), each group shot twice so every d
+# gets a PAIR 3 images (~3 min) apart for motion/blink confirmation. Groups
+# walk the comb down 9-6-3 / 8-5-2 / 6-3-0 / 7-4-1 covering d=0..9; the 630/741
+# swap evens out the twice-sampled d=3 and d=6 (gap 14->8 min). Medium-only for
+# now; Near-1 fine dither added once the sharpest d is known.
+DEFAULT_D_SCHEDULE = [9,6,3, 9,6,3,  8,5,2, 8,5,2,
+                      6,3,0, 6,3,0,  7,4,1, 7,4,1]
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -83,22 +172,41 @@ def main():
     ap.add_argument("--iso", default="1600", help="moderate, fixed — focus>gain")
     ap.add_argument("--secs", type=int, default=30, help="RAW sub exposure (max reliable timed)")
     ap.add_argument("--aperture", default="5.6")
-    ap.add_argument("--focus-start", type=int, default=9,
-                    help="centre MEDIUM (Near-2 steps from far stop) — daytime car est.")
-    ap.add_argument("--medium-span", type=int, default=4,
-                    help="MEDIUM setpoints span focus-start +/- this")
-    ap.add_argument("--fine-steps", type=int, default=8, help="FINE (Near-1) dither 0..N")
-    ap.add_argument("--subs", type=int, default=1, help="RAW subs per (medium,fine) position")
-    ap.add_argument("--cycles", type=int, default=0, help="0 = loop until killed")
+    ap.add_argument("--schedule", default=None,
+                    help="comma-separated d-schedule (MEDIUM/Near-2 steps from ∞ "
+                         "hard stop). Default = Peter's swapped 24-image pass "
+                         "(pairs 3 min apart, d=0..9).")
+    ap.add_argument("--passes", type=int, default=0,
+                    help="0 = loop the schedule until killed / until dawn")
+    ap.add_argument("--no-jpeg", action="store_true",
+                    help="skip boosted-JPEG delivery (raws only)")
+    ap.add_argument("--no-sun-gate", action="store_true",
+                    help="start immediately; do NOT wait for astronomical dark")
+    ap.add_argument("--night-alt", type=float, default=-12.0,
+                    help="sun altitude (deg) at/below which it's 'dark' (nautical)")
+    ap.add_argument("--lat", type=float, default=51.394801, help="Surbiton")
+    ap.add_argument("--lon", type=float, default=-0.292259, help="Surbiton")
+    ap.add_argument("--stop-alt", type=float, default=-9.0,
+                    help="stop at dawn when sun rises above this altitude (deg)")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
+    jpg_dir = os.path.join(args.out, "jpeg")
+    if not args.no_jpeg:
+        os.makedirs(jpg_dir, exist_ok=True)
+
+    schedule = ([int(x) for x in args.schedule.split(",")]
+                if args.schedule else DEFAULT_D_SCHEDULE)
 
     man = open(os.path.join(args.out, "manifest.csv"), "a", newline="")
     w = csv.writer(man)
     if man.tell() == 0:
-        w.writerow(["t_utc", "frame", "cycle", "medium_near2", "fine_near1",
-                    "sub", "secs", "iso", "got_file"])
+        w.writerow(["t_utc", "frame", "pass", "seq_i", "d_near2",
+                    "secs", "iso", "got_file", "jpeg"])
         man.flush()
+
+    # --- gate on astronomical dark (astrocam-style sunset table) -------------
+    if not args.no_sun_gate:
+        wait_for_dark(args.lat, args.lon, args.night_alt)
 
     prime()
     gp("--set-config", "imageformat=RAW",
@@ -106,36 +214,41 @@ def main():
        "--set-config", f"aperture={args.aperture}",
        "--set-config", f"shutterspeed={args.secs}", t=25)
 
-    mediums = list(range(args.focus_start - args.medium_span,
-                         args.focus_start + args.medium_span + 1))
     wait = args.secs + 12
     print(f"eos-focus-cycle -> {args.out}", flush=True)
-    print(f"  MEDIUM (Near-2) setpoints: {mediums}", flush=True)
-    print(f"  FINE (Near-1) dither: 0..{args.fine_steps}   subs/pos: {args.subs}   "
-          f"{args.secs}s RAW ISO{args.iso}", flush=True)
-    print(f"  grid = {len(mediums)}x{args.fine_steps+1} = "
-          f"{len(mediums)*(args.fine_steps+1)} positions/cycle", flush=True)
+    print(f"  d-schedule ({len(schedule)}/pass): {schedule}", flush=True)
+    print(f"  {args.secs}s RAW ISO{args.iso} f{args.aperture}   "
+          f"jpeg={'off' if args.no_jpeg else 'on'}", flush=True)
 
-    cyc = 0
+    p = 0
     while True:
-        cyc += 1
-        print(f"=== cycle {cyc} ===", flush=True)
-        for m in mediums:
-            # re-rack + re-approach this medium fresh (hysteresis-consistent)
+        p += 1
+        print(f"=== pass {p} ===", flush=True)
+        for i, d in enumerate(schedule):
+            # re-rack + re-approach this d fresh (hysteresis-consistent)
             rack_far()
-            for _ in range(m): drive("Near", 2)
-            for f in range(args.fine_steps + 1):
-                for s in range(args.subs):
-                    stem = os.path.join(args.out, f"c{cyc:02d}_m{m:02d}_f{f:02d}_s{s:02d}")
-                    got = capture(stem, wait)
-                    t = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    w.writerow([t, os.path.basename(stem), cyc, m, f, s,
-                                args.secs, args.iso, got]); man.flush()
-                    print(f"  c{cyc} m{m} f{f} s{s}: "
-                          f"{'CR2' if got else 'NO FILE'}", flush=True)
-                if f < args.fine_steps:
-                    drive("Near", 1)   # one fine step
-        if args.cycles and cyc >= args.cycles:
+            for _ in range(d): drive("Near", 2)
+            stem = os.path.join(args.out, f"p{p:02d}_i{i:02d}_d{d:02d}")
+            got = capture(stem, wait)
+            jpg = ""
+            if got and not args.no_jpeg:
+                cr2 = _find(stem, ".cr2")
+                jp = os.path.join(jpg_dir, os.path.basename(stem) + ".jpg")
+                if cr2 and deliver_jpeg(cr2, jp):
+                    jpg = os.path.basename(jp)
+            t = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            w.writerow([t, os.path.basename(stem), p, i, d,
+                        args.secs, args.iso, got, jpg]); man.flush()
+            print(f"  p{p} i{i:02d} d{d}: {'CR2' if got else 'NO FILE'}"
+                  f"{' +jpg' if jpg else ''}", flush=True)
+            # dawn cutoff: stop once the sun climbs back up
+            if not args.no_sun_gate:
+                alt = sun_altitude_deg(args.lat, args.lon)
+                if alt >= args.stop_alt:
+                    print(f"  sun alt {alt:+.1f} >= {args.stop_alt} -> dawn, "
+                          f"stopping", flush=True)
+                    print("DONE", flush=True); return
+        if args.passes and p >= args.passes:
             break
     print("DONE", flush=True)
 
