@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# eos-focus-tonight — arm tonight's focus-cycle run, detached + logged.
+#
+# Waits for astronomical dark by itself (sun < -12 deg, nautical), loops
+# Peter's swapped d-schedule (30s RAW subs + boosted JPEGs named d-first for
+# splay-by-d), stops at dawn. Survives logout via systemd-run — nohup/setsid
+# over ssh died on logout; systemd-run --user is the reliable detach
+# (astro-canon STATE). Runs on muppet.
+#
+#   eos-focus-tonight [OUTDIR]
+#   default OUTDIR = ~/tmp/canon-focus-YYYYMMDD
+#
+# Pass extra eos-focus-cycle args after OUTDIR, e.g. to override the schedule:
+#   eos-focus-tonight ~/tmp/canon-focus-test --no-sun-gate --schedule 9,6,3 --passes 1
+set -euo pipefail
+OUT="${1:-$HOME/tmp/canon-focus-$(date +%Y%m%d)}"
+shift || true
+UNIT="eos-focus-$(date +%Y%m%d-%H%M)"
+mkdir -p "$OUT"
+echo "arming $UNIT -> $OUT"
+systemd-run --user --unit="$UNIT" --setenv=HOME="$HOME" \
+  "$HOME/bin/eos-focus-cycle" --out "$OUT" "$@"
+echo
+echo "watch:   journalctl --user -u $UNIT -f"
+echo "status:  systemctl --user status $UNIT"
+echo "stop:    systemctl --user stop $UNIT"
+echo "jpegs:   $OUT/jpeg/   (splay groups by d value)"
