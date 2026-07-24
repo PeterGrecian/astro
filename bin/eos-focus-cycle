@@ -233,9 +233,14 @@ def main():
             jpg = ""
             if got and not args.no_jpeg:
                 cr2 = _find(stem, ".cr2")
-                jp = os.path.join(jpg_dir, os.path.basename(stem) + ".jpg")
+                # Deliver the JPEG named d-FIRST (d09_p01_i00) so a plain
+                # name-sort in splay groups every frame of one focus d
+                # together, in time (pass) order — blink a d-block to see
+                # stars drift. (Raw CR2 stays pass-first = capture order.)
+                jname = f"d{d:02d}_p{p:02d}_i{i:02d}.jpg"
+                jp = os.path.join(jpg_dir, jname)
                 if cr2 and deliver_jpeg(cr2, jp):
-                    jpg = os.path.basename(jp)
+                    jpg = jname
             t = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             w.writerow([t, os.path.basename(stem), p, i, d,
                         args.secs, args.iso, got, jpg]); man.flush()
