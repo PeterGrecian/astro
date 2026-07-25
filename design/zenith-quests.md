@@ -181,6 +181,45 @@ The number is deliberately provocative and splits into two thresholds:
   step is T1, which *measures* what's realistic and re-anchors the headline
   number from evidence rather than ambition.
 
+### The distortion field as an ID bridge — bright stars carry the faint ones
+
+**The enabling idea (Peter, 2026-07-25):** don't try to plate-solve each faint
+star independently — most are too faint to anchor a solve. Instead use the
+**lens-distortion field as a vector field** (already what `standing-plate-solve`
+produces: `solve-field --tweak-order 3` → a **SIP-distortion WCS**, and v3w is a
+*fixed* camera so a given pixel (x,y) always maps to the same sky direction —
+the field is static per camera, measured once, refined per night; see the
+2026-07-05 worklog "the vector field is then the correction due to lens
+distortion and atmospherics" + `standing-plate-solve.md`).
+
+The chain:
+1. **The bright stars anchor the field.** Enough bright, catalogued stars
+   plate-solve to pin the WCS + SIP distortion across the whole sensor. This is
+   the vector field: pixel → true sky coordinate, distortion and all.
+2. **Evaluate the field at a faint detection.** Because the field is smooth and
+   dense (anchored everywhere by the bright grid), you can read off the sky
+   coordinate of *any* (x,y) — including a faint blob that could never solve on
+   its own. **Relative position to nearby bright stars does the work**: the
+   faint star sits at a known offset in a locally-known distortion field.
+3. **Cross-match locally, deep.** With a predicted sky coordinate + a tight
+   error box (the field is good to sub-pixel near anchors), match against a
+   *fainter* catalogue tier (Gaia goes to mag ~20) at that exact spot — a
+   1-star local match, not a blind global solve. Contrast/threshold is the only
+   remaining gate, not astrometry.
+
+**Why this is the key to "identify 10,000":** it converts identification from
+"can this faint star independently plate-solve?" (no, for most) into "does the
+bright-star-anchored distortion field predict a catalogue star here?" (yes,
+wherever the field reaches) — so **the bright stars bridge to the dark ones.**
+The seen-vs-identified gap then narrows to wherever the field is well-anchored
+and the catalogue is deep enough, rather than to the plate-solve floor.
+
+**What it needs (beyond the plate-solve tools already listed):** confidence
+that the SIP field extrapolates/interpolates faithfully into the faint regime
+(validate on medium stars first — ones bright enough to self-solve AND close to
+the faint floor — check the field predicts their positions), and a deep
+catalogue tier (Gaia DR3) for the local cross-match.
+
 ## Status / dependencies (what these quests need built)
 - **Plate solve as a standing tool** — have the recipe (astrometry.net on the
   derot window) but not a per-night automated solve. Needed for all three.
@@ -191,8 +230,12 @@ The number is deliberately provocative and splits into two thresholds:
 - **Deep de-streaked stacking** — exists (detrans-deep); M51 pushes it hardest.
 - **Binocular half + Pi camera bracket** — Quest 5's only hardware; already
   owned (afocal T1 needs no surgery at all).
-- **Source-extraction + catalogue cross-match** — Quest 6's core: run source
-  extraction over a deep stack (the "see" count), then plate-solve and match
-  against a star catalogue (Gaia/Tycho) for the "identify" count. Builds on the
-  plate-solve and sensitivity tools above — the new piece is the catalogue
-  cross-match and the seen-vs-identified completeness plot.
+- **Source-extraction + distortion-field-bridged cross-match** — Quest 6's
+  core: source extraction over a deep stack (the "see" count), then — rather
+  than solving each faint star — evaluate the bright-star-anchored **SIP
+  distortion field** (from `standing-plate-solve`) at each faint detection to
+  predict its sky coordinate, and do a **local** match against a deep catalogue
+  (Gaia DR3) there (the "identify" count). New pieces: the field-evaluate-at-(x,y)
+  → local-cross-match step, a Gaia DR3 tier, and the seen-vs-identified
+  completeness plot. Validate the field extrapolates faithfully into the faint
+  regime on self-solvable medium stars first.
