@@ -1,4 +1,4 @@
-# Zenith quests — M51, Algol, Polaris A/B, Mizar & Alcor, Polaris B by binocular
+# Zenith quests — M51, Algol, Polaris A/B, Mizar & Alcor, Polaris B by binocular, See 100k / ID 10k
 
 **Targets to attempt at/near the zenith (and the pole), begun 2026-07-06.** The zenith
 is where a Pi camera performs best: airmass ~1, near-zero refraction, tightest
@@ -145,6 +145,42 @@ preserve phase, so one tube it is.
 - **Graduated wins:** T1 see B at all (afocal, stack + wing-subtract); T2 clean
   split at prime focus; T3 the Cepheid light curve.
 
+## Quest 6 — see 100,000, identify 10,000 (the completeness quest)
+
+**Added 2026-07-25.** Not a split or a light curve — a **counting** quest: how
+deep does this rig actually go, and how much of what it records can we *name*?
+The number is deliberately provocative and splits into two thresholds:
+
+- **SEE ~100,000** — raw *detections*: how many star-like sources clear the
+  noise floor across a deep stacked field (or a mosaic of zenith fields). This
+  is a pure sensitivity/limiting-magnitude result — every faint blob counts,
+  named or not. Whether 100k is reachable is itself the question; it sets the
+  ambition and falls out of the completeness curve, not a guess.
+- **IDENTIFY ~10,000** — *cataloged* sources: of those detections, how many
+  plate-solve to a real catalogue entry (Gaia / Tycho / etc.) with a magnitude
+  and an ID. The ~10× gap between seen and identified is the interesting part —
+  it *is* the completeness curve made concrete (the faint tail is real photons
+  but below the catalogue/plate-solve floor), and it quantifies how much of the
+  sky this garden rig can turn from "a dot" into "a known star."
+
+- **Why it fits the zenith set:** same fixed near-zenith fields, up for months,
+  stack-forever discipline — deeper stack = more of both numbers, no motion to
+  fight. It is the natural *aggregate* result the other quests' single targets
+  don't give: the whole-field answer to "what can this instrument do."
+- **Method (already in the shared toolkit above):** deep de-streaked stack →
+  source extraction (detection count = the "see" number) → **plate solve +
+  catalogue cross-match** (matched count = the "identify" number). The
+  frequency-vs-magnitude / sensitivity plot IS the deliverable: N(detected) and
+  N(identified) vs magnitude, with the divergence between the two curves showing
+  where identification runs out before detection does.
+- **Graduated wins:** T1 count + identify **1,000** in one deep zenith field
+  (proves the extract→solve→cross-match pipeline end-to-end); T2 **10,000
+  identified** across stacked/mosaicked fields; T3 chase the **100,000 seen**
+  detection ceiling and publish the seen-vs-identified completeness curve.
+- **Note the moving target:** "maybe 10,000, maybe 100,000" — the honest first
+  step is T1, which *measures* what's realistic and re-anchors the headline
+  number from evidence rather than ambition.
+
 ## Status / dependencies (what these quests need built)
 - **Plate solve as a standing tool** — have the recipe (astrometry.net on the
   derot window) but not a per-night automated solve. Needed for all three.
@@ -155,3 +191,8 @@ preserve phase, so one tube it is.
 - **Deep de-streaked stacking** — exists (detrans-deep); M51 pushes it hardest.
 - **Binocular half + Pi camera bracket** — Quest 5's only hardware; already
   owned (afocal T1 needs no surgery at all).
+- **Source-extraction + catalogue cross-match** — Quest 6's core: run source
+  extraction over a deep stack (the "see" count), then plate-solve and match
+  against a star catalogue (Gaia/Tycho) for the "identify" count. Builds on the
+  plate-solve and sensitivity tools above — the new piece is the catalogue
+  cross-match and the seen-vs-identified completeness plot.
