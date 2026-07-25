@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""eos-power — off/on/cycle the EOS 2000D's 12V dummy-battery feed.
+
+The 12V rail is the ONLY reset that clears a Class-B firmware wedge (0x2019
+PTP Device Busy / -110); the camera power switch does NOT, because the
+dummy-battery PSU holds the USB device alive across a switch flip (astro-canon
+STATE, Reset ladder). A GPIO relay on a fleet Pi switches this 12V feed, so a
+wedge can be cleared remotely instead of by a human pulling the plug.
+
+  eos-power off      # cut 12V (rail down)
+  eos-power on       # restore 12V
+  eos-power cycle    # off, wait --secs, on  (the STATE-validated ~10s pull)
+  eos-power status   # best-effort: is the camera enumerated on muppet?
+
+HARDWARE (TBD — fill these three in once the relay is wired):
+  RELAY_HOST : the fleet Pi driving the relay GPIO
+  RELAY_PIN  : BCM pin the relay is on
+  RELAY_ACTIVE_HIGH : True if driving the pin HIGH powers the camera ON
+
+Until they're set, off/on/cycle print what they WOULD do and exit non-zero, so
+the recovery protocol degrades safely (logs "power-cycle unavailable" rather
+than silently doing nothing). Swap _relay_set() for the real gpio command.
+"""
+import argparse, subprocess, sys, time
+
+# ---- hardware config (TBD) --------------------------------------------------
+RELAY_HOST = None          # e.g. "homepi"  (ssh target on the fleet)
+RELAY_PIN = None           # e.g. 17        (BCM pin)
+RELAY_ACTIVE_HIGH = True   # True: pin HIGH = camera powered
+CYCLE_SECS = 10            # STATE: pull ~10s to drop the logic rail
+
+def _configured():
+    return RELAY_HOST is not None and RELAY_PIN is not None
+
+def _relay_set(powered: bool) -> bool:
+    """Drive the relay so the camera is powered (True) or not (False).
+    Returns True on success. Fill in the real gpio command here.
+
+    Intended form (gpioset on the fleet Pi over ssh) once wired:
+        level = 1 if (powered == RELAY_ACTIVE_HIGH) else 0
+        ssh RELAY_HOST 'gpioset gpiochip0 RELAY_PIN=level'
+    (or pinctrl / a small HTTP endpoint — whatever the relay Pi runs).
+    """
+    if not _configured():
+        print(f"eos-power: relay not configured (RELAY_HOST/RELAY_PIN unset) — "
+              f"would set camera power {'ON' if powered else 'OFF'}",
+              file=sys.stderr)
+        return False
+    level = 1 if (powered == RELAY_ACTIVE_HIGH) else 0
+    try:
+        subprocess.run(
+            ["ssh", RELAY_HOST, f"gpioset gpiochip0 {RELAY_PIN}={level}"],
+            check=True, timeout=15, capture_output=True, text=True)
+        return True
+    except Exception as ex:
+        print(f"eos-power: relay command failed: {ex}", file=sys.stderr)
+        return False
+
+# ---- status (best effort, host-independent of the relay) --------------------
+def camera_enumerated() -> bool:
+    """Is the EOS on muppet's USB bus? (04a9:32e1). Run this ON muppet."""
+    try:
+        out = subprocess.run(["lsusb"], capture_output=True, text=True,
+                             timeout=10).stdout
+        return "04a9:32e1" in out
+    except Exception:
+        return False
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("action", choices=["off", "on", "cycle", "status"])
+    ap.add_argument("--secs", type=int, default=CYCLE_SECS,
+                    help="off-duration for cycle (default ~10s, STATE-validated)")
+    args = ap.parse_args()
+
+    if args.action == "status":
+        up = camera_enumerated()
+        print(f"camera {'enumerated' if up else 'NOT on bus'}")
+        sys.exit(0 if up else 1)
+
+    if args.action == "off":
+        sys.exit(0 if _relay_set(False) else 2)
+    if args.action == "on":
+        sys.exit(0 if _relay_set(True) else 2)
+    if args.action == "cycle":
+        ok = _relay_set(False)
+        if not ok:
+            sys.exit(2)
+        print(f"eos-power: 12V off, waiting {args.secs}s for rail to drop…",
+              flush=True)
+        time.sleep(args.secs)
+        ok = _relay_set(True) and ok
+        print("eos-power: 12V restored", flush=True)
+        sys.exit(0 if ok else 2)
+
+if __name__ == "__main__":
+    main()

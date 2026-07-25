@@ -1,0 +1,24 @@
+[Unit]
+Description=EOS 2000D nightly focus-cycle capture (astro-canon; sun-gated, self-recovering)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+Group=peter
+WorkingDirectory=/home/peter
+# eos-focus-cycle self-gates on the sun (waits for dark, stops at dawn) and
+# loops the d-schedule every night; --passes 0 = run forever. Output dir is
+# dated per-invocation. On a wedge it recovers (gentle release -> grace window
+# -> eos-power 12V cycle as last resort, capped by --power-budget).
+# NB: %h expands to the SERVICE MANAGER's home (/root for a system service),
+# not User=peter's — so hardcode the path. (astro-canon 2026-07-25.)
+ExecStart=/home/peter/bin/eos-focus-cycle --out /home/peter/tmp/canon-focus-nightly
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

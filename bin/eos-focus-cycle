@@ -55,6 +55,84 @@ def prime():
 def rack_far(n=6):
     for _ in range(n): drive("Far", 3)
 
+# ---- wedge detection + graduated recovery -----------------------------------
+# Lesson (astro-canon 2026-07-24, seen live): most "busy" states are TRANSIENT
+# and self-clear within a minute — do NOT power-cycle on the first sign. The
+# 12V relay is the LAST resort, gated behind a grace window and a nightly cap,
+# so a genuine hard fault self-heals but a transient never thrashes the relay.
+
+def wedged():
+    """True if a config WRITE is rejected (PTP Device Busy / -110) — the
+    Class-B / busy signature. A write is the discriminating test; reads keep
+    working while wedged."""
+    r = gp("--set-config", "iso=1600", t=20)
+    if r is None:                      # timeout — treat as wedged
+        return True
+    blob = (r.stdout + r.stderr).lower()
+    return ("device busy" in blob or "0x2019" in blob
+            or "i/o in progress" in blob or "-110" in blob)
+
+def gentle_release():
+    """Clear a held shutter / live view — the cheap fix for a transient busy."""
+    gp("--set-config", "eosremoterelease=Release Full", t=15)
+    gp("--set-config", "eosremoterelease=None", t=15)
+    gp("--set-config", "viewfinder=0", t=15)
+
+def recover(iso, aperture, secs, grace=90, poll=15, power_cycle=True,
+            power_budget=None):
+    """Bring the camera back to a writable state. Graduated:
+      1. gentle release + settle, re-test (handles the common transient).
+      2. grace window: poll up to `grace`s for a self-clear (many do).
+      3. LAST resort: eos-power cycle (12V pull), if enabled + budget left.
+      4. after any cycle: wait for re-enumeration, PRIME, restore exposure.
+    Returns True if recovered. `power_budget` is a 1-element list [n] (remaining
+    power-cycles tonight); decremented on use so the caller can cap thrashing."""
+    if not wedged():
+        return True
+    print("  [recover] busy detected — gentle release + settle", flush=True)
+    gentle_release(); time.sleep(15)
+    if not wedged():
+        print("  [recover] cleared (transient)", flush=True); return True
+    # grace window: give it time to self-clear before touching power
+    print(f"  [recover] still busy — grace window {grace}s (poll {poll}s)", flush=True)
+    waited = 0
+    while waited < grace:
+        time.sleep(poll); waited += poll
+        gentle_release()
+        if not wedged():
+            print(f"  [recover] self-cleared after {waited}s", flush=True)
+            return True
+    # last resort: 12V power cycle
+    if not power_cycle:
+        print("  [recover] still wedged; power-cycle disabled — giving up", flush=True)
+        return False
+    if power_budget is not None and power_budget[0] <= 0:
+        print("  [recover] still wedged but power-cycle budget exhausted", flush=True)
+        return False
+    print("  [recover] LAST RESORT: eos-power cycle (12V pull)", flush=True)
+    pc = subprocess.run(["eos-power", "cycle"], capture_output=True, text=True)
+    if power_budget is not None:
+        power_budget[0] -= 1
+    if pc.returncode != 0:
+        print(f"  [recover] eos-power unavailable/failed: "
+              f"{pc.stderr.strip()[:120]}", flush=True)
+        return False
+    # wait for re-enumeration, then prime + restore exposure
+    print("  [recover] waiting for camera to re-enumerate…", flush=True)
+    for _ in range(20):
+        time.sleep(3)
+        if subprocess.run(["eos-power", "status"]).returncode == 0:
+            break
+    time.sleep(3)
+    prime()
+    gp("--set-config", "imageformat=RAW", "--set-config", f"iso={iso}",
+       "--set-config", f"aperture={aperture}",
+       "--set-config", f"shutterspeed={secs}", t=25)
+    ok = not wedged()
+    print(f"  [recover] post-cycle: {'RECOVERED' if ok else 'STILL WEDGED'}",
+          flush=True)
+    return ok
+
 def _find(stem, *exts):
     """First existing stem+ext, trying each case. gphoto2 %C expands to a
     LOWERCASE extension (cr2/jpg); matching only ".CR2" missed every frame
@@ -188,7 +266,15 @@ def main():
     ap.add_argument("--lon", type=float, default=-0.292259, help="Surbiton")
     ap.add_argument("--stop-alt", type=float, default=-9.0,
                     help="stop at dawn when sun rises above this altitude (deg)")
+    ap.add_argument("--no-power-cycle", action="store_true",
+                    help="never invoke eos-power (recover by gentle release + "
+                         "grace window only; no 12V relay cycle)")
+    ap.add_argument("--power-budget", type=int, default=4,
+                    help="max 12V power-cycles per run (caps relay thrashing on "
+                         "a hard fault); 0 = unlimited")
     args = ap.parse_args()
+    # mutable budget the recovery protocol decrements (0 = unlimited)
+    power_budget = None if args.power_budget == 0 else [args.power_budget]
     os.makedirs(args.out, exist_ok=True)
     jpg_dir = os.path.join(args.out, "jpeg")
     if not args.no_jpeg:
@@ -197,16 +283,31 @@ def main():
     schedule = ([int(x) for x in args.schedule.split(",")]
                 if args.schedule else DEFAULT_D_SCHEDULE)
 
+    # --- gate on astronomical dark FIRST (astrocam-style sunset table) -------
+    # so a persistent service sleeps through the day, then wakes at dusk.
+    if not args.no_sun_gate:
+        wait_for_dark(args.lat, args.lon, args.night_alt)
+
+    # Now that we know which night we're capturing, put this night's data in a
+    # dated subdir (the date the night belongs to — before midnight UTC uses
+    # today, after uses yesterday). One long-running service thus separates
+    # nights automatically instead of piling them into one folder.
+    if not args.no_sun_gate:
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+        night = (now - _dt.timedelta(hours=12)).strftime("%Y-%m-%d")
+        args.out = os.path.join(args.out, night)
+        os.makedirs(args.out, exist_ok=True)
+        jpg_dir = os.path.join(args.out, "jpeg")
+        if not args.no_jpeg:
+            os.makedirs(jpg_dir, exist_ok=True)
+
     man = open(os.path.join(args.out, "manifest.csv"), "a", newline="")
     w = csv.writer(man)
     if man.tell() == 0:
         w.writerow(["t_utc", "frame", "pass", "seq_i", "d_near2",
                     "secs", "iso", "got_file", "jpeg"])
         man.flush()
-
-    # --- gate on astronomical dark (astrocam-style sunset table) -------------
-    if not args.no_sun_gate:
-        wait_for_dark(args.lat, args.lon, args.night_alt)
 
     prime()
     gp("--set-config", "imageformat=RAW",
@@ -230,6 +331,16 @@ def main():
             for _ in range(d): drive("Near", 2)
             stem = os.path.join(args.out, f"p{p:02d}_i{i:02d}_d{d:02d}")
             got = capture(stem, wait)
+            if not got:
+                # NO FILE = the wedge tell. Try graduated recovery, then
+                # re-rack + re-shoot this frame once (the lens position is lost
+                # after a power cycle, so re-approach d fresh).
+                if recover(args.iso, args.aperture, args.secs,
+                           power_cycle=not args.no_power_cycle,
+                           power_budget=power_budget):
+                    rack_far()
+                    for _ in range(d): drive("Near", 2)
+                    got = capture(stem, wait)
             jpg = ""
             if got and not args.no_jpeg:
                 cr2 = _find(stem, ".cr2")
