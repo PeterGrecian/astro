@@ -56,10 +56,17 @@ def rack_far(n=6):
     for _ in range(n): drive("Far", 3)
 
 # ---- wedge detection + graduated recovery -----------------------------------
-# Lesson (astro-canon 2026-07-24, seen live): most "busy" states are TRANSIENT
-# and self-clear within a minute — do NOT power-cycle on the first sign. The
-# 12V relay is the LAST resort, gated behind a grace window and a nightly cap,
-# so a genuine hard fault self-heals but a transient never thrashes the relay.
+# Past behaviour is BIMODAL, not a spectrum (astro-canon STATE, Reset ladder):
+#   Mode A — transient PTP "busy": clears within ~15s of a gentle release
+#            (post-long-exposure busy, half-pressed shutter). The common case.
+#   Mode B — true Class-B firmware wedge: NEVER self-clears — survives settle,
+#            USB re-enum, and even a muppet reboot. Only a 12V power-down cures
+#            it. Hit 3x this session, each needing a pull.
+# The two are distinguishable fast: if a gentle release + a couple of settles
+# hasn't cleared it, it's Mode B and waiting longer is futile. So: gentle
+# release first (kills Mode A cheaply), a SHORT 60s grace window (catches a
+# slightly-slow Mode A without dead-waiting on a Mode B), then the 12V relay as
+# LAST resort — capped per night so a Mode B never thrashes the relay.
 
 def wedged():
     """True if a config WRITE is rejected (PTP Device Busy / -110) — the
@@ -78,7 +85,7 @@ def gentle_release():
     gp("--set-config", "eosremoterelease=None", t=15)
     gp("--set-config", "viewfinder=0", t=15)
 
-def recover(iso, aperture, secs, grace=90, poll=15, power_cycle=True,
+def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
             power_budget=None):
     """Bring the camera back to a writable state. Graduated:
       1. gentle release + settle, re-test (handles the common transient).
