@@ -38,6 +38,27 @@ def gp(*a, t=45):
     try: return subprocess.run(["gphoto2", *a], capture_output=True, text=True, timeout=t)
     except subprocess.TimeoutExpired: return None
 
+# Resolve eos-power robustly — a systemd system service has a minimal PATH that
+# does NOT include ~/bin, so a bare "eos-power" raises FileNotFoundError (which
+# crashed the whole run + thrashed via Restart=always, 2026-07-25). Look it up
+# next to this script and in ~/bin, and always return None instead of raising.
+import shutil
+_EOS_POWER = (shutil.which("eos-power")
+              or os.path.join(os.path.dirname(os.path.abspath(__file__)), "eos-power"))
+if not (os.path.isfile(_EOS_POWER) and os.access(_EOS_POWER, os.X_OK)):
+    _hb = os.path.expanduser("~/bin/eos-power")
+    _EOS_POWER = _hb if os.access(_hb, os.X_OK) else None
+
+def _eos_power(*a, t=60):
+    """Run eos-power <args>; return the CompletedProcess, or None if the binary
+    is missing / not runnable (never raises)."""
+    if _EOS_POWER is None:
+        return None
+    try:
+        return subprocess.run([_EOS_POWER, *a], capture_output=True, text=True, timeout=t)
+    except Exception:
+        return None
+
 def _drive(direction, amt):
     return gp("--capture-preview",
               "--set-config", f"manualfocusdrive={direction} {amt}",
@@ -117,18 +138,23 @@ def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
         print("  [recover] still wedged but power-cycle budget exhausted", flush=True)
         return False
     print("  [recover] LAST RESORT: eos-power cycle (12V pull)", flush=True)
-    pc = subprocess.run(["eos-power", "cycle"], capture_output=True, text=True)
     if power_budget is not None:
         power_budget[0] -= 1
-    if pc.returncode != 0:
-        print(f"  [recover] eos-power unavailable/failed: "
-              f"{pc.stderr.strip()[:120]}", flush=True)
+    pc = _eos_power("cycle")
+    if pc is None or pc.returncode != 0:
+        # Missing binary / relay not wired / cycle failed. Degrade gracefully —
+        # NEVER crash (a crash + Restart=always thrashes all night; happened
+        # 2026-07-25 when eos-power wasn't on the service PATH).
+        why = "not found" if pc is None else pc.stderr.strip()[:120]
+        print(f"  [recover] power-cycle unavailable ({why}) — cannot clear a "
+              f"Mode-B wedge without the relay; giving up on this frame", flush=True)
         return False
     # wait for re-enumeration, then prime + restore exposure
     print("  [recover] waiting for camera to re-enumerate…", flush=True)
     for _ in range(20):
         time.sleep(3)
-        if subprocess.run(["eos-power", "status"]).returncode == 0:
+        st = _eos_power("status")
+        if st is not None and st.returncode == 0:
             break
     time.sleep(3)
     prime()
@@ -279,6 +305,9 @@ def main():
     ap.add_argument("--power-budget", type=int, default=4,
                     help="max 12V power-cycles per run (caps relay thrashing on "
                          "a hard fault); 0 = unlimited")
+    ap.add_argument("--max-consec-fail", type=int, default=6,
+                    help="stop cleanly after this many consecutive failed frames "
+                         "(camera unrecoverable — don't thrash the whole night)")
     args = ap.parse_args()
     # mutable budget the recovery protocol decrements (0 = unlimited)
     power_budget = None if args.power_budget == 0 else [args.power_budget]
@@ -329,6 +358,7 @@ def main():
           f"jpeg={'off' if args.no_jpeg else 'on'}", flush=True)
 
     p = 0
+    consec_fail = 0
     while True:
         p += 1
         print(f"=== pass {p} ===", flush=True)
@@ -364,6 +394,17 @@ def main():
                         args.secs, args.iso, got, jpg]); man.flush()
             print(f"  p{p} i{i:02d} d{d}: {'CR2' if got else 'NO FILE'}"
                   f"{' +jpg' if jpg else ''}", flush=True)
+            # circuit breaker: if the camera is unrecoverable (e.g. Mode-B wedge
+            # with no working relay), don't grind the whole night failing every
+            # frame. After --max-consec-fail failures in a row, exit CLEANLY
+            # (code 0) so systemd does NOT instantly restart into the same wall.
+            consec_fail = 0 if got else consec_fail + 1
+            if consec_fail >= args.max_consec_fail:
+                print(f"  {consec_fail} consecutive failures — camera "
+                      f"unrecoverable (Mode-B wedge / no relay?). Stopping "
+                      f"cleanly to avoid a night of thrashing.", flush=True)
+                print("DONE (aborted: camera unrecoverable)", flush=True)
+                return
             # dawn cutoff: stop once the sun climbs back up
             if not args.no_sun_gate:
                 alt = sun_altitude_deg(args.lat, args.lon)

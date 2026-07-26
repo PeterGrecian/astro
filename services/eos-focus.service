@@ -15,8 +15,14 @@ WorkingDirectory=/home/peter
 # NB: %h expands to the SERVICE MANAGER's home (/root for a system service),
 # not User=peter's — so hardcode the path. (astro-canon 2026-07-25.)
 ExecStart=/home/peter/bin/eos-focus-cycle --out /home/peter/tmp/canon-focus-nightly
+# ~/bin is not on a system service's PATH — add it so eos-power resolves.
+Environment=PATH=/home/peter/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Restart=always
-RestartSec=30
+# 15 min, not 30s: a normal run exits at dawn and just re-enters wait-for-dark;
+# but if the camera is unrecoverable the tool aborts cleanly after N fails, and
+# this backoff stops a 63-restarts/night thrash (seen 2026-07-25). Worst case
+# ~4 restarts/hour instead of ~120.
+RestartSec=900
 StandardOutput=journal
 StandardError=journal
 
