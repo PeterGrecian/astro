@@ -66,20 +66,31 @@ _ALERT = (shutil.which("alert")
           or (os.path.expanduser("~/super/bin/alert")
               if os.access(os.path.expanduser("~/super/bin/alert"), os.X_OK) else None))
 
-def page(title, detail="", critical=True):
-    """Page Peter via xMatters (Slack + xMatters HIGH on --critical). Best
-    effort — never raises, never blocks the run if alerting is down."""
+def _alert(sev, title, detail=""):
+    """Fire super/bin/alert at severity `sev` (e.g. --info Slack-only, --warn,
+    --critical=Slack+xMatters HIGH). Best effort — never raises/blocks."""
     if _ALERT is None:
-        print(f"  [page] alert tool not found — would page: {title}", flush=True)
+        print(f"  [alert] alert tool not found — would {sev}: {title}", flush=True)
         return
-    sev = "--critical" if critical else "--warn"
     try:
         subprocess.run([_ALERT, sev, "--source", "astro-canon-eos",
                         "--detail", detail, title],
                        capture_output=True, text=True, timeout=30)
-        print(f"  [page] xMatters {sev}: {title}", flush=True)
+        print(f"  [alert] {sev}: {title}", flush=True)
     except Exception as ex:
-        print(f"  [page] alert failed: {ex}", flush=True)
+        print(f"  [alert] failed: {ex}", flush=True)
+
+def slack(title, detail=""):
+    """Slack-only heads-up (no xMatters page). For 'a reset was attempted but
+    did not clear the wedge' — the smart-plug chain (homepi/Wi-Fi/matter-server)
+    is not generally reliable, so Peter wants to know when a cycle misfires even
+    if the run later recovers or aborts."""
+    _alert("--info", title, detail)
+
+def page(title, detail="", critical=True):
+    """Page Peter via xMatters (Slack + xMatters HIGH on --critical). Best
+    effort — never raises, never blocks the run if alerting is down."""
+    _alert("--critical" if critical else "--warn", title, detail)
 
 def _drive(direction, amt):
     return gp("--capture-preview",
@@ -164,12 +175,16 @@ def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
         power_budget[0] -= 1
     pc = _eos_power("cycle")
     if pc is None or pc.returncode != 0:
-        # Missing binary / relay not wired / cycle failed. Degrade gracefully —
-        # NEVER crash (a crash + Restart=always thrashes all night; happened
-        # 2026-07-25 when eos-power wasn't on the service PATH).
-        why = "not found" if pc is None else pc.stderr.strip()[:120]
-        print(f"  [recover] power-cycle unavailable ({why}) — cannot clear a "
-              f"Mode-B wedge without the relay; giving up on this frame", flush=True)
+        # The reset command itself FAILED (plug unreachable / matter-server down
+        # / binary missing). The smart-plug chain is not generally reliable, so
+        # Slack Peter — the reset didn't even run. Degrade gracefully, NEVER
+        # crash (a crash + Restart=always thrashes all night; 2026-07-25).
+        why = "not found" if pc is None else pc.stderr.strip()[:160]
+        print(f"  [recover] power-cycle command FAILED ({why})", flush=True)
+        slack("EOS power-cycle FAILED to run — camera still wedged",
+              detail=(f"eos-power cycle did not execute ({why}). Smart-plug "
+                      f"chain (homepi/Wi-Fi/matter-server) may be down. Camera "
+                      f"stays wedged; may need a manual pull."))
         return False
     # wait for re-enumeration, then prime + restore exposure
     print("  [recover] waiting for camera to re-enumerate…", flush=True)
@@ -186,6 +201,17 @@ def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
     ok = not wedged()
     print(f"  [recover] post-cycle: {'RECOVERED' if ok else 'STILL WEDGED'}",
           flush=True)
+    if not ok:
+        # The reset RAN (rc=0) but did NOT clear the wedge — the silent-failure
+        # case. Could be: the plug toggled but didn't actually cut power (Matter
+        # reported success without acting), the rail didn't drop long enough, or
+        # it's not a power-clearable state. Slack Peter so a misfiring reset is
+        # never silent, even though the run will keep trying / eventually abort.
+        slack("EOS reset ran but did NOT clear the wedge",
+              detail=(f"eos-power cycle returned success but the camera is still "
+                      f"wedged after re-enumeration. Smart-plugs aren't reliable "
+                      f"— the plug may not have actually cut power. Manual pull "
+                      f"likely needed."))
     return ok
 
 def _find(stem, *exts):
