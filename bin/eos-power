@@ -4,57 +4,102 @@
 The 12V rail is the ONLY reset that clears a Class-B firmware wedge (0x2019
 PTP Device Busy / -110); the camera power switch does NOT, because the
 dummy-battery PSU holds the USB device alive across a switch flip (astro-canon
-STATE, Reset ladder). A GPIO relay on a fleet Pi switches this 12V feed, so a
-wedge can be cleared remotely instead of by a human pulling the plug.
+STATE, Reset ladder). A **Matter smart plug** switches mains to the DR-E10
+dummy-battery adapter, so a wedge can be cleared remotely instead of by a human
+pulling the plug. (This is strand option (b): reuse a smart mains plug rather
+than a GPIO relay in the 12V line — coarser, whole-adapter, but no new
+hardware. Commissioned 2026-07-26; see home-automation STATE.)
 
-  eos-power off      # cut 12V (rail down)
-  eos-power on       # restore 12V
+  eos-power off      # cut mains to the DR-E10 adapter (12V rail down)
+  eos-power on       # restore mains (rail up)
   eos-power cycle    # off, wait --secs, on  (the STATE-validated ~10s pull)
   eos-power status   # best-effort: is the camera enumerated on muppet?
 
-HARDWARE (TBD — fill these three in once the relay is wired):
-  RELAY_HOST : the fleet Pi driving the relay GPIO
-  RELAY_PIN  : BCM pin the relay is on
-  RELAY_ACTIVE_HIGH : True if driving the pin HIGH powers the camera ON
+HARDWARE (Matter smart plug via HA python-matter-server WebSocket API):
+  MATTER_WS   : ws:// URL of the matter-server (homepi:5580)
+  MATTER_NODE : commissioned node id of the plug feeding the DR-E10 adapter
+  PLUG_ON_POWERS_CAMERA : True if plug ON = mains present = camera powered
+                          (normal wiring; the plug feeds the adapter directly)
 
-Until they're set, off/on/cycle print what they WOULD do and exit non-zero, so
-the recovery protocol degrades safely (logs "power-cycle unavailable" rather
-than silently doing nothing). Swap _relay_set() for the real gpio command.
+If the plug can't be reached, off/on/cycle print the failure and exit non-zero,
+so the recovery protocol degrades safely (logs "power-cycle unavailable" rather
+than silently doing nothing).
 """
-import argparse, subprocess, sys, time
+import argparse, asyncio, json, subprocess, sys, time
 
-# ---- hardware config (TBD) --------------------------------------------------
-RELAY_HOST = None          # e.g. "homepi"  (ssh target on the fleet)
-RELAY_PIN = None           # e.g. 17        (BCM pin)
-RELAY_ACTIVE_HIGH = True   # True: pin HIGH = camera powered
+# ---- hardware config (Matter smart plug) ------------------------------------
+MATTER_WS = "ws://homepi.local:5580/ws"   # HA python-matter-server WS API
+MATTER_NODE = 4                           # Currys Sandstrom plug (node 4)
+PLUG_ON_POWERS_CAMERA = True              # plug ON = mains up = camera powered
+ONOFF_CLUSTER = 6                         # Matter On/Off cluster id
 CYCLE_SECS = 10            # STATE: pull ~10s to drop the logic rail
 
 def _configured():
-    return RELAY_HOST is not None and RELAY_PIN is not None
+    return MATTER_WS is not None and MATTER_NODE is not None
+
+async def _plug_command(cmd_name: str) -> bool:
+    """Send an On/Off cluster command to the plug over the matter-server WS.
+    Auto-discovers the On/Off endpoint from the node's attributes.
+    """
+    try:
+        import websockets
+    except ImportError:
+        print("eos-power: python 'websockets' module not installed",
+              file=sys.stderr)
+        return False
+    try:
+        async with websockets.connect(MATTER_WS, max_size=None,
+                                       open_timeout=10) as ws:
+            await ws.recv()  # server info banner
+
+            async def call(mid, command, args=None):
+                p = {"message_id": str(mid), "command": command}
+                if args is not None:
+                    p["args"] = args
+                await ws.send(json.dumps(p))
+                while True:
+                    m = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
+                    if m.get("message_id") == str(mid):
+                        return m
+
+                # find the On/Off endpoint for our node
+            nodes = (await call(1, "get_nodes")).get("result", [])
+            node = next((n for n in nodes
+                         if n.get("node_id") == MATTER_NODE), None)
+            if node is None:
+                print(f"eos-power: node {MATTER_NODE} not commissioned",
+                      file=sys.stderr)
+                return False
+            ep = next((int(k.split("/")[0])
+                       for k in node.get("attributes", {})
+                       if k.endswith(f"/{ONOFF_CLUSTER}/0")), None)
+            if ep is None:
+                print(f"eos-power: node {MATTER_NODE} has no On/Off cluster",
+                      file=sys.stderr)
+                return False
+            r = await call(2, "device_command",
+                           {"node_id": MATTER_NODE, "endpoint_id": ep,
+                            "cluster_id": ONOFF_CLUSTER,
+                            "command_name": cmd_name, "payload": {}})
+            if r.get("error_code"):
+                print(f"eos-power: plug {cmd_name} failed: {r}", file=sys.stderr)
+                return False
+            return True
+    except Exception as ex:
+        print(f"eos-power: matter-server unreachable ({MATTER_WS}): {ex}",
+              file=sys.stderr)
+        return False
 
 def _relay_set(powered: bool) -> bool:
-    """Drive the relay so the camera is powered (True) or not (False).
-    Returns True on success. Fill in the real gpio command here.
-
-    Intended form (gpioset on the fleet Pi over ssh) once wired:
-        level = 1 if (powered == RELAY_ACTIVE_HIGH) else 0
-        ssh RELAY_HOST 'gpioset gpiochip0 RELAY_PIN=level'
-    (or pinctrl / a small HTTP endpoint — whatever the relay Pi runs).
-    """
+    """Switch the plug so the camera is powered (True) or not (False).
+    Returns True on success."""
     if not _configured():
-        print(f"eos-power: relay not configured (RELAY_HOST/RELAY_PIN unset) — "
+        print(f"eos-power: plug not configured (MATTER_WS/MATTER_NODE unset) — "
               f"would set camera power {'ON' if powered else 'OFF'}",
               file=sys.stderr)
         return False
-    level = 1 if (powered == RELAY_ACTIVE_HIGH) else 0
-    try:
-        subprocess.run(
-            ["ssh", RELAY_HOST, f"gpioset gpiochip0 {RELAY_PIN}={level}"],
-            check=True, timeout=15, capture_output=True, text=True)
-        return True
-    except Exception as ex:
-        print(f"eos-power: relay command failed: {ex}", file=sys.stderr)
-        return False
+    cmd = "On" if (powered == PLUG_ON_POWERS_CAMERA) else "Off"
+    return asyncio.run(_plug_command(cmd))
 
 # ---- status (best effort, host-independent of the relay) --------------------
 def camera_enumerated() -> bool:
