@@ -220,6 +220,69 @@ that the SIP field extrapolates/interpolates faithfully into the faint regime
 the faint floor — check the field predicts their positions), and a deep
 catalogue tier (Gaia DR3) for the local cross-match.
 
+### The time axis — frames from different times densify the field and confirm identity
+
+**The extension (Peter, 2026-07-25):** the spatial bridge above works at one
+instant; the *point of using images from different times* is that it makes the
+bridge both denser and self-validating. The camera is fixed but the sky rotates,
+so **a given catalogued bright star drifts across the sensor** night to night
+and across the season. Two consequences:
+
+1. **The field densifies over time.** Tonight's bright stars anchor the SIP
+   field only where they happen to sit tonight. But as bright anchors sweep
+   through every region of the sensor over weeks, you accumulate anchor
+   measurements on a **dense grid traced by their tracks** — the field goes from
+   "anchored at ~dozens of positions" to "anchored almost everywhere a bright
+   star has ever been." That is what lets you **identify a faint star sitting
+   *between* the bright ones**: on some other night a *different* bright star
+   drifts into that faint star's neighbourhood and tightens the local field
+   prediction right there. Different times bring different bright neighbours to
+   bear on the same faint gap.
+
+2. **Persistence across time = identity.** A real faint star sits at the same
+   sky coordinate every night; its field-predicted (x,y) tracks the sidereal
+   drift exactly, frame to frame, under many *different* anchoring
+   configurations. A hot pixel, cosmic ray, satellite, or noise blob does not.
+   So identification is confirmed not from one frame's geometry but from the
+   **consistency of a detection's predicted catalogue position across many
+   frames** — you "work down from mag 1 step by step to something deep" in
+   *time* as well as in space. This is what converts a marginal blob into a
+   named star: it re-appears where the moving field says a catalogue star should
+   be, every clear night.
+
+**Storage consequence (drives the `astro-storage-discussion` strand):** the deep
+stack alone collapses time and gives only the *see* number. The *identify*
+number lives in **per-frame detected-source tables + each frame's field-fit**,
+because identity comes from cross-time persistence and multi-configuration field
+agreement — which only survive if per-frame detections are kept. Those tables
+are ~KB/frame (x, y, flux, time) and are the identification dataset. See the
+strand for the retention rule (keep accumulator + source tables + standing field
+forever; free raw pixels after a rolling window).
+
+### Our own catalogue — number the stars as we find them (Peter, 2026-07-25)
+
+Don't make identification Gaia-or-nothing. Build a **local catalogue** as the
+permanent spine: when a detection persists across enough frames (persistence =
+identity), **mint it a local ID** (`SC-000001`…) recording mean field-predicted
+position, light curve, frame-appearance count, classification, and — as an
+*attribute, not a gate* — a Gaia DR3 cross-match if one exists.
+
+- **Our index is primary; Gaia is a cross-walk.** Persistent detections that
+  *don't* match Gaia (below the catalogue/plate-solve floor, or in field gaps)
+  stay as real named-by-us sources. This **unmatched-but-persistent set is the
+  "see vs identify" gap turned into records** — the concrete science of what this
+  garden rig sees that the catalogue doesn't reach.
+- **A running tally** (total minted; fraction Gaia-matched; both vs magnitude)
+  *is* the seen-vs-identified completeness curve, accumulating live every night
+  rather than computed once — cheap aggregates over the catalogue.
+- **Classification falls out of cross-time positional behaviour for free:** sky
+  position fixed (tracks sidereal drift exactly) → **star**; appears once/twice
+  with no persistence → **false detection** (cosmic ray, hot pixel, plane, noise)
+  → reject; persists but position **moves smoothly** → **wandering star**
+  (planet, asteroid, satellite) → flag into a moving-object table. So "identify
+  wanderers or false detections" is not a separate feature — it is what the
+  local catalogue *is*, once identity is defined as cross-time persistence.
+
 ## Status / dependencies (what these quests need built)
 - **Plate solve as a standing tool** — have the recipe (astrometry.net on the
   derot window) but not a per-night automated solve. Needed for all three.
