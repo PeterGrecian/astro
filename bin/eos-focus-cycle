@@ -59,6 +59,28 @@ def _eos_power(*a, t=60):
     except Exception:
         return None
 
+# Resolve the alert tool the same robust way (super/bin isn't on the service
+# PATH either). Used to xMatters-PAGE Peter when the camera is stuck and the
+# tool cannot recover it (Mode-B wedge with no working power-cycle).
+_ALERT = (shutil.which("alert")
+          or (os.path.expanduser("~/super/bin/alert")
+              if os.access(os.path.expanduser("~/super/bin/alert"), os.X_OK) else None))
+
+def page(title, detail="", critical=True):
+    """Page Peter via xMatters (Slack + xMatters HIGH on --critical). Best
+    effort — never raises, never blocks the run if alerting is down."""
+    if _ALERT is None:
+        print(f"  [page] alert tool not found — would page: {title}", flush=True)
+        return
+    sev = "--critical" if critical else "--warn"
+    try:
+        subprocess.run([_ALERT, sev, "--source", "astro-canon-eos",
+                        "--detail", detail, title],
+                       capture_output=True, text=True, timeout=30)
+        print(f"  [page] xMatters {sev}: {title}", flush=True)
+    except Exception as ex:
+        print(f"  [page] alert failed: {ex}", flush=True)
+
 def _drive(direction, amt):
     return gp("--capture-preview",
               "--set-config", f"manualfocusdrive={direction} {amt}",
@@ -308,6 +330,9 @@ def main():
     ap.add_argument("--max-consec-fail", type=int, default=6,
                     help="stop cleanly after this many consecutive failed frames "
                          "(camera unrecoverable — don't thrash the whole night)")
+    ap.add_argument("--no-page", action="store_true",
+                    help="don't xMatters-page on unrecoverable camera (default: "
+                         "page once per night via super/bin/alert --critical)")
     args = ap.parse_args()
     # mutable budget the recovery protocol decrements (0 = unlimited)
     power_budget = None if args.power_budget == 0 else [args.power_budget]
@@ -403,6 +428,24 @@ def main():
                 print(f"  {consec_fail} consecutive failures — camera "
                       f"unrecoverable (Mode-B wedge / no relay?). Stopping "
                       f"cleanly to avoid a night of thrashing.", flush=True)
+                # PAGE Peter — the tool is out of options and the night is being
+                # lost. Once per night only (a marker in the out dir), so the
+                # 15-min service restarts don't re-page all night.
+                if not args.no_page:
+                    marker = os.path.join(args.out, ".paged")
+                    if not os.path.exists(marker):
+                        page("EOS camera wedged — capture stuck, no data",
+                             detail=(f"eos-focus-cycle: {consec_fail} consecutive "
+                                     f"failed frames, recovery could not clear it "
+                                     f"(Mode-B wedge; power-cycle relay "
+                                     f"{'unavailable' if _EOS_POWER is None else 'ineffective'}). "
+                                     f"Night {os.path.basename(args.out)} is being "
+                                     f"lost — needs a manual 12V pull."))
+                        try:
+                            open(marker, "w").write(time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                                  time.gmtime()))
+                        except Exception:
+                            pass
                 print("DONE (aborted: camera unrecoverable)", flush=True)
                 return
             # dawn cutoff: stop once the sun climbs back up
