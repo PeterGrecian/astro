@@ -123,15 +123,17 @@ def rack_far(n=6):
 # LAST resort — capped per night so a Mode B never thrashes the relay.
 
 def wedged():
-    """True if a config WRITE is rejected (PTP Device Busy / -110) — the
-    Class-B / busy signature. A write is the discriminating test; reads keep
-    working while wedged."""
+    """True if a config WRITE does not succeed cleanly. A write is the
+    discriminating test; reads keep working while wedged. Success-based, NOT a
+    blacklist of known error strings: the 2026-07-26 night was lost to a wedge
+    flavour ("PTP Timeout" / port-timeout -10) that the old busy/0x2019/-110
+    blacklist didn't match, so recovery never engaged and the relay never
+    fired. Any error on the write = wedged; a healthy write is silent, rc 0."""
     r = gp("--set-config", "iso=1600", t=20)
     if r is None:                      # timeout — treat as wedged
         return True
     blob = (r.stdout + r.stderr).lower()
-    return ("device busy" in blob or "0x2019" in blob
-            or "i/o in progress" in blob or "-110" in blob)
+    return r.returncode != 0 or "error" in blob
 
 def gentle_release():
     """Clear a held shutter / live view — the cheap fix for a transient busy."""
@@ -140,29 +142,41 @@ def gentle_release():
     gp("--set-config", "viewfinder=0", t=15)
 
 def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
-            power_budget=None):
+            power_budget=None, force=False):
     """Bring the camera back to a writable state. Graduated:
       1. gentle release + settle, re-test (handles the common transient).
       2. grace window: poll up to `grace`s for a self-clear (many do).
       3. LAST resort: eos-power cycle (12V pull), if enabled + budget left.
       4. after any cycle: wait for re-enumeration, PRIME, restore exposure.
     Returns True if recovered. `power_budget` is a 1-element list [n] (remaining
-    power-cycles tonight); decremented on use so the caller can cap thrashing."""
-    if not wedged():
+    power-cycles tonight); decremented on use so the caller can cap thrashing.
+    `force=True` escalates even when the wedged() probe passes — for a
+    probe-blind wedge (config writes succeed but captures keep producing no
+    file): gentle release, then straight to the power cycle. The grace window
+    is skipped because it polls wedged(), which by definition can't see this
+    state."""
+    w = wedged()
+    if not w and not force:
         return True
-    print("  [recover] busy detected — gentle release + settle", flush=True)
-    gentle_release(); time.sleep(15)
-    if not wedged():
-        print("  [recover] cleared (transient)", flush=True); return True
-    # grace window: give it time to self-clear before touching power
-    print(f"  [recover] still busy — grace window {grace}s (poll {poll}s)", flush=True)
-    waited = 0
-    while waited < grace:
-        time.sleep(poll); waited += poll
-        gentle_release()
+    blind = force and not w
+    if blind:
+        print("  [recover] FORCED — probe passes but frames keep failing; "
+              "gentle release then power cycle", flush=True)
+        gentle_release(); time.sleep(15)
+    else:
+        print("  [recover] busy detected — gentle release + settle", flush=True)
+        gentle_release(); time.sleep(15)
         if not wedged():
-            print(f"  [recover] self-cleared after {waited}s", flush=True)
-            return True
+            print("  [recover] cleared (transient)", flush=True); return True
+        # grace window: give it time to self-clear before touching power
+        print(f"  [recover] still busy — grace window {grace}s (poll {poll}s)", flush=True)
+        waited = 0
+        while waited < grace:
+            time.sleep(poll); waited += poll
+            gentle_release()
+            if not wedged():
+                print(f"  [recover] self-cleared after {waited}s", flush=True)
+                return True
     # last resort: 12V power cycle
     if not power_cycle:
         print("  [recover] still wedged; power-cycle disabled — giving up", flush=True)
@@ -422,10 +436,15 @@ def main():
             if not got:
                 # NO FILE = the wedge tell. Try graduated recovery, then
                 # re-rack + re-shoot this frame once (the lens position is lost
-                # after a power cycle, so re-approach d fresh).
+                # after a power cycle, so re-approach d fresh). On the third
+                # consecutive failing frame, force the power cycle even if the
+                # wedged() probe passes — a camera that answers config writes
+                # but won't produce files is wedged in a probe-blind way, and
+                # one relay click is cheaper than losing the night.
                 if recover(args.iso, args.aperture, args.secs,
                            power_cycle=not args.no_power_cycle,
-                           power_budget=power_budget):
+                           power_budget=power_budget,
+                           force=(consec_fail == 2)):
                     rack_far()
                     for _ in range(d): drive("Near", 2)
                     got = capture(stem, wait)
