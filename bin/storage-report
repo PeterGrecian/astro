@@ -55,7 +55,15 @@ DEFAULT_CAMERAS = ["astrocam"]
 # longer emit them. camera-name -> list of root dirs (globbed, ~ expanded).
 EXTRA_STREAMS = {
     "starcam": ["~/starcam-frames/night", "~/starcam-backup",
-                "/mnt/bigdisk/starcam-backup"],
+                "/mnt/bigdisk/starcam-backup",
+                # bigstore consolidated store + photodisk shelf backup
+                "/mnt/bigstore/astro-data/starcam-frames/night",
+                "/mnt/photodisk/backups/starcam-backup"],
+    # astrocam on bigstore uses bare <date>/ dirs (no night/ mode), so the
+    # locate-based scan_host can't reach it — pick it up as an extra stream.
+    # bigdisk holds an astrocam copy in the same bare-date layout.
+    "astrocam": ["/mnt/bigstore/astro-data/astrocam-frames",
+                 "/mnt/bigdisk/astrocam-frames"],
 }
 
 # Cameras whose frames live in a <root>/<mode>/<date>/... tree (day AND night
@@ -64,7 +72,13 @@ EXTRA_STREAMS = {
 # date-level deliverables — undercounting the disk. For these we scan the whole
 # <mode>/<date>/ subtree per night instead. camera -> root dirs (globbed).
 MODE_DATED_STREAMS = {
-    "eclipticam": ["~/eclipticam-frames"],
+    "eclipticam": ["~/eclipticam-frames",
+                   # bigstore consolidated eclipticam + bigdisk/bigdisk2 copies
+                   # + photodisk shelf backup (all night/<date>/ layout).
+                   "/mnt/bigstore/astro-data/eclipticam-frames",
+                   "/mnt/bigdisk/eclipticam-frames",
+                   "/mnt/bigdisk2/eclipticam-frames",
+                   "/mnt/photodisk/backups/eclipticam-frames"],
 }
 # Only night mode is inventoried (2026-07-05, peter): day frames and the
 # date-level deliverables are derived/disposable and just noise on the
@@ -534,7 +548,13 @@ def mount_point_of(path: Path) -> Path:
 # the camera roots). bigdisk2 holds no camera root yet but is astro warm
 # space; /mnt/ssd is eclipticam's astro disk. Globbed, so absent ones are
 # skipped silently.
-EXTRA_MOUNT_GLOBS = ["/mnt/bigdisk", "/mnt/bigdisk2", "/mnt/ssd"]
+# Known astro mounts to report capacity for (beyond the camera-root paths).
+# "/" is included so capture hosts whose data lives on the root disk (puppy's
+# ~/*-frames, muppet's OSD + home) get their root NVMe reported — the real
+# data disk, not a throwaway SD card. bigstore = consolidated store,
+# photodisk = shelf backup.
+EXTRA_MOUNT_GLOBS = ["/", "/mnt/bigstore", "/mnt/bigdisk", "/mnt/bigdisk2",
+                     "/mnt/photodisk", "/mnt/ssd"]
 
 # Filesystem types that belong to ANOTHER host — don't report them as this
 # host's capacity (e.g. muppet NFS-mounts puppy's starcam-frames; that disk
