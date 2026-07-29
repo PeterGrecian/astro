@@ -30,8 +30,8 @@
   "location_file": "location.json",
   "sky_clear_max_stops": 4.0,
   "sky_clear_max_stops_notes": "Dark-trough brightness above which the night is called 'cloudy' (cloud-glow/light pollution) and the chart draws the clear/cloudy line. Per-sensor because 'stops above pedestal' is sensor-relative. astrocam (raw 10-bit, pedestal 512, only ~10.5 stops to twilight) sits at ~0-2 stops on a clear dark trough and ~6-7 on a fully cloudy night (e.g. 2026-06-15), so 4 stops divides them. NOT the 10 used for v3w, which has a 16-bit container and far more headroom.",
-  "state": {"sun_altitude_night_deg": -10.0},
-  "state_notes": "Night starts at sun -10 deg below horizon (ephem), matching eclipticam-v3w/v1 at the same site so all cameras transition together. Was the -12 default before 2026-06-20.",
+  "state": {"sun_altitude_night_deg": -10.0, "sun_altitude_day_deg": -8.0},
+  "state_notes": "Night starts at sun -10 deg below horizon (ephem), matching eclipticam-v3w/v1 at the same site so all cameras transition together. Was the -12 default before 2026-06-20. sun_altitude_day_deg (-8) gives a small hysteresis band for astrocam-v3-gate (the sun-altitude service gate) so the boundary does not flap. NB: astro-state's brightness tier currently MISCLASSIFIES because the imx708 pedestal is STALE; the v3 night service is gated on sun altitude only (astrocam_v3_gate.py) until the pedestal is remeasured.",
   "reference_nights": ["2026-06-10"],
   "reference_nights_notes": "Known dark/clear baseline overlaid on the combined-brightness chart (drawn coloured dashed). Same reference night as eclipticam-v3w. The latest night is drawn bold dashed black.",
   "privacy_file": null

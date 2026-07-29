@@ -1,0 +1,14 @@
+// Allow user peter to start/stop the astrocam v3 streaming services
+// without polkit auth. Needed so astrocam-v3-gate.service (running as
+// peter) can toggle the night streaming daemon on the sun-altitude
+// day/night boundary. Mirrors eclipticam's 50-eclipticam.rules.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "peter") {
+        var unit = action.lookup("unit");
+        if (unit == "astrocam-v3-night.service" ||
+            unit == "astrocam-v3-uploader.service") {
+            return polkit.Result.YES;
+        }
+    }
+});
