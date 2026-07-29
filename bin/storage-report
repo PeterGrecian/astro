@@ -512,8 +512,8 @@ def dedup_aliases(inv: list[dict]) -> list[dict]:
     is a bind mount of /mnt/ssd), or overlapping scan roots. Identity is
     the resolved path's (st_dev, st_ino) per (night, camera); anything
     that resolves to the same inode is one copy, not two. Of the aliases,
-    keep the home-dir path (reported as ~/... on the page — preferred)."""
-    home = str(Path.home())
+    keep the canonical /mnt/<disk>/... path so the copy is attributed to the
+    real disk, not a ~/ symlink into it."""
     by_key: dict[tuple, dict] = {}
     out = []
     for it in inv:
@@ -527,8 +527,13 @@ def dedup_aliases(inv: list[dict]) -> list[dict]:
         if cur is None:
             by_key[key] = it
             out.append(it)
-        elif it["path"].startswith(home) and not cur["path"].startswith(home):
-            # same storage, nicer name — swap the kept row's identity
+        elif it["path"].startswith("/mnt/") and not cur["path"].startswith("/mnt/"):
+            # Same physical storage via two names (e.g. ~/astrocam-frames is a
+            # symlink to /mnt/bigdisk/astrocam-frames — same dev/ino). Keep the
+            # canonical /mnt/<disk>/... name so the row is attributed to the
+            # real disk (bd), not the home symlink (mup). Matches scan_capacity,
+            # which already prefers /mnt names. (Was: preferred ~/home — that
+            # put symlinked bigdisk data under the wrong column.)
             cur.update(it)
     return out
 
