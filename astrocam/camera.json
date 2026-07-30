@@ -1,6 +1,12 @@
 {
   "name": "astrocam",
   "host": "astrocam",
+  "position_index": 2,
+  "position_index_notes": "Which physical camera/lens generation is installed. INCREMENT whenever the camera, lens or mounting is changed — each index is a distinct calibration epoch (plate scale, pole, FOV, orientation, pedestal) that must NOT be mixed across the boundary. Stamped into every FITS as POSINDEX so each frame self-identifies its epoch regardless of config drift. Registry below.",
+  "position_registry": {
+    "1": {"label": "av2", "sensor": "imx219", "camera": "Pi Camera Module v2", "bayer": "BGGR", "resolution": [3280, 2464], "dates": "..2026-07-28", "notes": "Original v2. Fixed-lens (twist-focus). Downstream 180 rotation via rotate_180=true. pedestal 512, plate_scale 0.0190, pole_prior [1945,1823]."},
+    "2": {"label": "av3s", "sensor": "imx708", "camera": "Pi Camera Module v3 (standard)", "bayer": "RGGB", "resolution": [4608, 2592], "dates": "2026-07-29..", "notes": "v3 standard swap. Software focus lp=1.0 (dithered 0.5-1.5). 180 rotation IN-CAPTURE (rotate_180=false). pedestal 105. plate_scale/pole/occlusion from v2 are STALE and must be re-solved."}
+  },
   "sensor": "imx708",
   "bayer": "RGGB",
   "resolution": [4608, 2592],

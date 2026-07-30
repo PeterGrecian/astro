@@ -59,6 +59,10 @@ def main() -> int:
     cfg_cam = CameraConfig.load("astrocam")
     cap = cfg_cam.get("capture") or {}
     frames_root = cfg_cam.frames_root
+    # Camera/lens generation index -> stamped as POSINDEX in every FITS so
+    # each frame self-identifies its calibration epoch (imx219/v2=1,
+    # imx708/v3s=2). See camera.json position_registry.
+    position_index = cfg_cam.get("position_index")
 
     exposure_us = _param("ASTROCAM_EXPOSURE_US", cap.get("night_exposure_us"),
                          59_900_000, int)
@@ -85,7 +89,7 @@ def main() -> int:
 
     logging.info(f"capture params: exposure_us={exposure_us} gain={gain} "
                  f"lens_position={lens_position} pedestal={pedestal} "
-                 f"focus_dither={focus_dither}")
+                 f"focus_dither={focus_dither} position_index={position_index}")
 
     cfg = StreamingConfig(
         cam_idx=CAM_IDX,
@@ -106,6 +110,7 @@ def main() -> int:
         frames_root=frames_root,
         mode="night",
         focus_dither=focus_dither,
+        position_index=position_index,
     )
     reason = run(cfg)
     logging.info(f"exiting cleanly (reason={reason})")

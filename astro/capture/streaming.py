@@ -60,6 +60,12 @@ class StreamingConfig:
     camera: str = ""                       # canonical camera name for brightness.csv path
     frames_root: Optional[Path] = None     # NFS root; if None, brightness.csv stays in buffer_dir
     mode: str = "night"                    # recorded per-row in brightness.csv
+    # Camera/lens generation index (camera.json position_index). Stamped as
+    # POSINDEX into every FITS so a frame self-identifies its calibration
+    # epoch — the boundary across which plate scale / pole / FOV / pedestal
+    # change and must NOT be mixed. None = don't write the header (cameras
+    # that don't track position generations, e.g. eclipticam, stay unchanged).
+    position_index: Optional[int] = None
     # Focus-dither experiment: step LensPosition per frame in a sawtooth
     # {"base": 3.15, "top": 5.15, "step": 0.10}. None = fixed lens_position
     # (normal capture). When set, each frame's commanded + reported focus is
@@ -185,6 +191,9 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         h["BAYERPAT"] = cfg.bayer_pattern
         h["DATE-OBS"] = datetime.fromtimestamp(epoch_ms/1000, tz=timezone.utc).isoformat()
         h["CAMERA"] = cfg.camera_name
+        if cfg.position_index is not None:
+            h["POSINDEX"] = (cfg.position_index,
+                             "camera/lens generation (camera.json position_index)")
         h["MEAN"] = mean
         h["PER_S"] = per_s
         if lp_cmd is not None:   # focus-dither run: record the per-frame focus
