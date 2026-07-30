@@ -1,0 +1,7 @@
+[Unit]
+Description=astrocam CPU temperature logger (one CSV row per tick)
+
+[Service]
+Type=oneshot
+User=peter
+ExecStart=/home/peter/astrocam-templog.sh
