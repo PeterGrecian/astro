@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """astrocam long-running capture loop, picamera2 streaming.
 
+DEPRECATED / RETIRED 2026-07-29 by the imx708 (Camera Module v3) swap.
+astrocam night capture is now done by astrocam_v3_night_daemon.py over the
+shared astro.capture.streaming engine (astrocam-v3-night.service, gated by
+astrocam-v3-gate.timer). This file is the OLD imx219 (v2) loop and is NOT
+run (astrocam-capture.service is disabled). It is imx219-specific throughout
+— BGGR debayer, SBGGR10 raw, 3280x2464, short-exposure x8 coadd — and the
+CAMERA/RESOLUTION/exposure constants below are all imx219 values that do NOT
+match the installed imx708. Do NOT re-enable without a full imx708 rewrite;
+use the streaming daemon instead. Kept for reference/history.
+
+--- original docstring follows ---
+
 Like starcam: a single Picamera2 video pipeline runs continuously with
 double-buffered raw frames. Each iteration pulls the most recent completed
 frame via capture_request() while the next is already exposing.
@@ -194,7 +206,7 @@ def write_fits(coadd, out_path, exposure_us, gain, n_coadd, t_start, t_end):
     hdu.header["BAYERPAT"] = "BGGR"
     hdu.header["DATE-OBS"] = t_start.isoformat()
     hdu.header["DATE-END"] = t_end.isoformat()
-    hdu.header["CAMERA"] = "imx219"
+    hdu.header["CAMERA"] = "imx219"  # RETIRED imx219 loop; live imx708 capture sets imx708 in astro.capture.streaming
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(out_path, overwrite=True)
 
 
