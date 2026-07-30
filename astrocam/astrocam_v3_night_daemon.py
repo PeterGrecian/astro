@@ -80,11 +80,11 @@ def main() -> int:
         focus_dither = None
     elif focus_dither is not None or os.environ.get("ASTROCAM_FOCUS_DITHER") == "1":
         base = float(os.environ.get("ASTROCAM_FD_BASE",
-                                    (focus_dither or {}).get("base", 0.5)))
+                                    (focus_dither or {}).get("base", 0.9)))
         top = float(os.environ.get("ASTROCAM_FD_TOP",
                                    (focus_dither or {}).get("top", 1.5)))
         step = float(os.environ.get("ASTROCAM_FD_STEP",
-                                    (focus_dither or {}).get("step", 0.1)))
+                                    (focus_dither or {}).get("step", 0.05)))
         focus_dither = {"base": base, "top": top, "step": step}
 
     logging.info(f"capture params: exposure_us={exposure_us} gain={gain} "
