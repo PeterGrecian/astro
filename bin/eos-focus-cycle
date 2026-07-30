@@ -328,14 +328,22 @@ def deliver_jpeg(cr2_path, jpg_path, lo_pct=50.0, hi_pct=99.9):
         print(f"    (jpeg deliver skipped: {ex})", flush=True)
         return False
 
-# Peter's swapped d-schedule: d = MEDIUM (Near-2) steps from the infinity hard
-# stop. Groups of 3 spaced by 3 (max spread), each group shot twice so every d
-# gets a PAIR 3 images (~3 min) apart for motion/blink confirmation. Groups
-# walk the comb down 9-6-3 / 8-5-2 / 6-3-0 / 7-4-1 covering d=0..9; the 630/741
-# swap evens out the twice-sampled d=3 and d=6 (gap 14->8 min). Medium-only for
-# now; Near-1 fine dither added once the sharpest d is known.
-DEFAULT_D_SCHEDULE = [9,6,3, 9,6,3,  8,5,2, 8,5,2,
-                      6,3,0, 6,3,0,  7,4,1, 7,4,1]
+# d-schedule: d = MEDIUM (Near-2) steps from the infinity hard stop. Groups of
+# 3 spaced by 3 (max spread), each group shot twice so every d gets a PAIR ~3
+# images (~3 min) apart for motion/blink confirmation.
+#
+# PEAK-HUNT range d5..d15 (2026-07-30): the 2026-07-28 PSF analysis
+# (eos-star-psf) found focus SHARP and FLAT across d5..d9 (best d8, 2.54px
+# cross-streak) with the shelf NEVER turning back up — so the true peak may lie
+# PAST d9. This schedule drops the always-blurred d0..d4 and reaches to d15
+# (6 steps past the old far end) while keeping d5 as the low-side anchor (d5 was
+# essentially tied for sharpest). Every setpoint 5..15 is covered with a 3-min
+# pair; d8/d9/d11/d12 get extra samples (harmless). 30 images/pass.
+# Prior default (d0..d9) preserved in git history / --schedule if the peak
+# turns out to be below d5 after all.
+DEFAULT_D_SCHEDULE = [15,12,9, 15,12,9,  14,11,8, 14,11,8,
+                      13,10,7, 13,10,7,  11,8,5,  11,8,5,
+                      6,9,12,  6,9,12]
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -347,8 +355,9 @@ def main():
     ap.add_argument("--aperture", default="5.6")
     ap.add_argument("--schedule", default=None,
                     help="comma-separated d-schedule (MEDIUM/Near-2 steps from ∞ "
-                         "hard stop). Default = Peter's swapped 24-image pass "
-                         "(pairs 3 min apart, d=0..9).")
+                         "hard stop). Default = peak-hunt 30-image pass "
+                         "(pairs ~3 min apart, d=5..15). Pass the old "
+                         "d=0..9 comb explicitly if hunting below d5.")
     ap.add_argument("--passes", type=int, default=0,
                     help="0 = loop the schedule until killed / until dawn")
     ap.add_argument("--no-jpeg", action="store_true",
