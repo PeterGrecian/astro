@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""eos-star-psf — per-focus-d star PSF measurement for the EOS 2000D
+focus-cycle nights, working on the LINEAR GREEN Bayer plane.
+
+Why green-only, cross-streak
+----------------------------
+The 2000D shoots 30 s subs, so every star DRIFTS into a short streak
+(~12 px/min sidereal). A round-Gaussian FWHM would then measure the
+DRIFT, not the focus. So we measure the streak's CROSS-WIDTH (its minor
+axis) — that is the focus PSF, immune to trailing. We work on the green
+Bayer plane only: 2 of every 4 photosites, no demosaic (so no moire /
+interpolation smear), and on this fine sensor green alone is a faithful
+focus metric — no R/B white-balance scaling needed (Peter's call).
+
+Method (reuses fit-distortion-trails' trail extraction idiom)
+-------------------------------------------------------------
+per CR2:
+  green plane  = average of the two G photosites of each RGGB 2x2 tile
+  subtract local background (varying LP sky)
+  asinh-stretch -> threshold -> connected components
+  keep compact star blobs (area, and NOT the fixed reflection artifact
+    at ~(1170,1585) half-res which is masked)
+  per blob, PCA the pixel coords:
+    long  axis  = drift direction (streak length, ~focus-independent)
+    minor axis  = CROSS-STREAK width = sqrt(smaller eigenvalue) = FOCUS
+  record cross-streak width, streak length, peak, flux, position, d
+
+Outputs into the night dir:
+  psf.csv   one row per detected star (frame, d, x, y, cross_w, len, peak, flux)
+  psf.npz   green-plane star STAMPS + metadata, for eos-psf-view to render
+            heat maps on a matplotlib-equipped box (pip).
+
+No plotting here (muppet has no matplotlib): decode+measure near the data,
+render near the display. See eos-psf-view.
+"""
+import argparse
+import glob
+import os
+import re
+import sys
+import numpy as np
+import rawpy
+from scipy import ndimage
+
+# Fixed internal-reflection artifact, HALF-RES coords (STATE.md astro-canon).
+# The green plane is half-res per axis, so this maps ~directly. Mask a disc.
+ART_XY = (1170, 1585)
+ART_R = 95
+
+STAMP = 21  # half-size of a saved star stamp (px, green-plane resolution)
+
+
+def green_plane(path):
+    """Average the two G photosites per RGGB tile -> half-res linear green."""
+    with rawpy.imread(path) as raw:
+        img = raw.raw_image_visible.astype(np.float32)
+        col = raw.raw_colors_visible
+    # find the two green positions inside the 2x2 CFA tile
+    gpos = [(y, x) for y in (0, 1) for x in (0, 1) if col[y, x] in (1, 3)]
+    planes = []
+    hh = (img.shape[0] // 2) * 2
+    ww = (img.shape[1] // 2) * 2
+    for (y0, x0) in gpos:
+        planes.append(img[y0:hh:2, x0:ww:2])
+    h = min(p.shape[0] for p in planes)
+    w = min(p.shape[1] for p in planes)
+    return np.mean([p[:h, :w] for p in planes], axis=0)
+
+
+def subtract_local_background(img, kernel=51):
+    """Downsample-median-upsample sky subtraction (from fit-distortion-trails)."""
+    import cv2
+    from scipy.ndimage import median_filter
+    k = max(3, kernel | 1)
+    small = cv2.resize(img, (img.shape[1] // 4, img.shape[0] // 4),
+                       interpolation=cv2.INTER_AREA)
+    bg_small = median_filter(small, size=max(3, k // 4 | 1))
+    bg = cv2.resize(bg_small, (img.shape[1], img.shape[0]),
+                    interpolation=cv2.INTER_LINEAR)
+    return np.clip(img - bg, 0, None)
+
+
+def stretch_u8(img, lo_pct=50.0, hi_pct=99.9):
+    lo = np.percentile(img, lo_pct)
+    hi = np.percentile(img, hi_pct)
+    x = np.clip((img - lo) / max(hi - lo, 1e-6), 0, None)
+    s = np.arcsinh(x * 10.0) / np.arcsinh(10.0)
+    return np.clip(s * 255.0, 0, 255).astype(np.uint8)
+
+
+def d_of(name):
+    m = re.search(r'd(\d\d)', name)
+    return int(m.group(1)) if m else None
+
+
+def measure_frame(bg, u8, thresh, min_px, max_px, ignore_bottom_frac=0.12,
+                  peak_min=800.0):
+    """Detect star blobs, return list of dicts with cross-streak width etc.
+
+    Vectorised: label once, filter to blobs in [min_px, max_px] by area via
+    np.bincount (cheap), then do the PCA/photometry ONLY on those few blobs
+    using each label's bounding-box slice — never a full-array scan per
+    label (that was O(labels x pixels) and hung on noisy frames)."""
+    binary = (u8 > thresh)
+    lbl, n = ndimage.label(binary)
+    out = []
+    if n == 0:
+        return out
+    areas = np.bincount(lbl.ravel())          # areas[0] = background
+    keep = np.where((areas >= min_px) & (areas <= max_px))[0]
+    keep = keep[keep != 0]
+    if keep.size == 0:
+        return out
+    H = bg.shape[0]
+    y_cut = int(H * (1.0 - ignore_bottom_frac))   # drop tree/foreground band
+    slices = ndimage.find_objects(lbl)        # bounding box per label
+    for i in keep:
+        sl = slices[i - 1]
+        if sl is None:
+            continue
+        sub = (lbl[sl] == i)
+        ys, xs = np.where(sub)
+        xs = xs + sl[1].start
+        ys = ys + sl[0].start
+        cx, cy = xs.mean(), ys.mean()
+        if cy > y_cut:                         # foreground band at frame bottom
+            continue
+        # skip the fixed reflection artifact
+        if (cx - ART_XY[0]) ** 2 + (cy - ART_XY[1]) ** 2 < ART_R ** 2:
+            continue
+        pts = np.column_stack([xs.astype(float), ys.astype(float)])
+        cov = np.cov((pts - pts.mean(axis=0)).T)
+        if cov.shape != (2, 2):
+            continue
+        evals, _ = np.linalg.eigh(cov)        # ascending
+        cross_sigma = float(np.sqrt(max(evals[0], 0)))   # minor axis => focus
+        long_sigma = float(np.sqrt(max(evals[1], 1e-9)))
+        elong = long_sigma / max(cross_sigma, 1e-3)
+        vals = bg[ys, xs]
+        peak = float(vals.max())
+        if peak < peak_min:                    # noise clump, not a real star
+            continue
+        out.append(dict(x=cx, y=cy, cross_w=2.3548 * cross_sigma,
+                        length=2.3548 * long_sigma, elong=elong,
+                        peak=peak, flux=float(vals.sum()),
+                        area=int(areas[i])))
+    return out
+
+
+def stamp_at(bg, cx, cy, half=STAMP):
+    H, W = bg.shape
+    x0, x1 = int(cx) - half, int(cx) + half + 1
+    y0, y1 = int(cy) - half, int(cy) + half + 1
+    if x0 < 0 or y0 < 0 or x1 > W or y1 > H:
+        return None
+    return bg[y0:y1, x0:x1].astype(np.float32)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("night", help="night dir (…/canon-focus-nightly/YYYY-MM-DD) "
+                                   "or a date; CR2s read from it")
+    ap.add_argument("--dmin", type=int, default=3, help="lowest focus-d to measure")
+    ap.add_argument("--dmax", type=int, default=9)
+    ap.add_argument("--thresh", type=int, default=150,
+                    help="u8 detection threshold (asinh-stretched; sky noise "
+                         "floor ~60, so keep well above it)")
+    ap.add_argument("--min-px", type=int, default=6)
+    ap.add_argument("--max-px", type=int, default=600,
+                    help="reject blobs bigger than this (glow/foreground)")
+    ap.add_argument("--elong-min", type=float, default=1.3,
+                    help="min elongation to accept as a drifted star")
+    ap.add_argument("--top-stamps", type=int, default=400,
+                    help="brightest N stars to save stamps for (npz)")
+    ap.add_argument("--limit", type=int, default=0, help="max frames (debug)")
+    args = ap.parse_args()
+
+    night = args.night
+    if not os.path.isdir(night):
+        night = os.path.expanduser(f"~/tmp/canon-focus-nightly/{args.night}")
+    files = sorted(glob.glob(os.path.join(night, "*.cr2")) +
+                   glob.glob(os.path.join(night, "*.CR2")))
+    files = [f for f in files if (d_of(os.path.basename(f)) or -1) >= args.dmin
+             and (d_of(os.path.basename(f)) or 99) <= args.dmax]
+    if args.limit:
+        files = files[:args.limit]
+    if not files:
+        print(f"no CR2s in {night} for d{args.dmin}..d{args.dmax}", file=sys.stderr)
+        return 1
+    print(f"{len(files)} frames, d{args.dmin}..d{args.dmax}, from {night}")
+
+    rows = []
+    stamps = []          # (cross_w, peak, d, x, y, stamp_array)
+    for k, f in enumerate(files):
+        base = os.path.basename(f)
+        d = d_of(base)
+        try:
+            g = green_plane(f)
+        except Exception as e:
+            print(f"  skip {base}: {e}", file=sys.stderr)
+            continue
+        bg = subtract_local_background(g)
+        u8 = stretch_u8(bg)
+        stars = measure_frame(bg, u8, args.thresh, args.min_px, args.max_px)
+        stars = [s for s in stars if s["elong"] >= args.elong_min]
+        for s in stars:
+            rows.append((base, d, s["x"], s["y"], s["cross_w"], s["length"],
+                         s["elong"], s["peak"], s["flux"], s["area"]))
+            st = stamp_at(bg, s["x"], s["y"])
+            if st is not None:
+                stamps.append((s["cross_w"], s["peak"], d, s["x"], s["y"], st))
+        if stars:
+            cw = np.median([s["cross_w"] for s in stars])
+            print(f"  [{k+1}/{len(files)}] {base} d{d}: {len(stars):3d} stars, "
+                  f"median cross-width {cw:.2f}px")
+        else:
+            print(f"  [{k+1}/{len(files)}] {base} d{d}: no stars")
+
+    # write CSV
+    csv_path = os.path.join(night, "psf.csv")
+    import csv as _csv
+    with open(csv_path, "w", newline="") as fh:
+        w = _csv.writer(fh)
+        w.writerow(["frame", "d", "x", "y", "cross_w", "length", "elong",
+                    "peak", "flux", "area"])
+        w.writerows(rows)
+    print(f"\nwrote {len(rows)} star rows -> {csv_path}")
+
+    # save top-N brightest stamps for rendering
+    stamps.sort(key=lambda t: t[1], reverse=True)
+    keep = stamps[:args.top_stamps]
+    if keep:
+        npz_path = os.path.join(night, "psf.npz")
+        # pad/skip odd-sized stamps to a common shape
+        shp = keep[0][5].shape
+        arr = np.stack([s[5] for s in keep if s[5].shape == shp])
+        meta = np.array([(s[0], s[1], s[2], s[3], s[4])
+                         for s in keep if s[5].shape == shp], dtype=float)
+        np.savez_compressed(npz_path, stamps=arr, meta=meta,
+                            meta_cols=np.array(["cross_w", "peak", "d", "x", "y"]))
+        print(f"wrote {len(arr)} star stamps -> {npz_path}")
+
+    # per-d cross-streak V-curve
+    print("\n=== per-d cross-streak width (green plane px; focus V-curve) ===")
+    print(f"{'d':>2} | {'median':>7} | {'p25':>6} | {'n stars':>7}")
+    best = None
+    for d in range(args.dmin, args.dmax + 1):
+        cw = [r[4] for r in rows if r[1] == d]
+        if not cw:
+            print(f"{d:>2} |    --   |   --   |   0")
+            continue
+        med = float(np.median(cw))
+        p25 = float(np.percentile(cw, 25))
+        print(f"{d:>2} | {med:7.2f} | {p25:6.2f} | {len(cw):7d}")
+        if best is None or med < best[1]:
+            best = (d, med)
+    if best:
+        print(f"\nSHARPEST (min cross-width): d{best[0]}  ({best[1]:.2f}px)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

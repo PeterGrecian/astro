@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""eos-psf-view — render EOS focus-cycle star-PSF heat maps from the
+psf.npz / psf.csv produced by eos-star-psf, then open them in splay.
+
+Runs on a matplotlib box (pip); reads the measurement artifacts copied
+from muppet. Produces the views Peter asked for:
+
+  --stamps   grid of individual star cutouts as heat maps (green counts)
+             — 'the spread across the cells', PSF shape per star.
+  --field    whole-frame heat map of cross-streak WIDTH vs (x,y) — reveals
+             field curvature / corner-vs-centre focus differences.
+  --vcurve   the per-d cross-streak V-curve as a line plot.
+
+Cross-streak width (minor axis of the drifted streak) is the focus
+metric — trailing-immune. Green Bayer plane only.
+
+Outputs PNGs to a scratch dir and launches splay on them.
+"""
+import argparse
+import os
+import subprocess
+import sys
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+# APS-C green-plane dimensions (half-res per axis): ~3010 x 2007
+FRAME_W, FRAME_H = 3010, 2007
+
+
+def load(night):
+    npz = np.load(os.path.join(night, "psf.npz"), allow_pickle=True)
+    stamps = npz["stamps"]
+    meta = npz["meta"]              # cols: cross_w, peak, d, x, y
+    cols = list(npz["meta_cols"])
+    import csv
+    rows = []
+    with open(os.path.join(night, "psf.csv")) as fh:
+        for r in csv.DictReader(fh):
+            rows.append(r)
+    return stamps, meta, cols, rows
+
+
+def render_stamps(stamps, meta, outdir, ncol=8, nmax=64):
+    """Grid of per-star heat maps, brightest first, labelled with d + width."""
+    idx = np.argsort(-meta[:, 1])[:nmax]     # by peak
+    n = len(idx)
+    nrow = (n + ncol - 1) // ncol
+    fig, axes = plt.subplots(nrow, ncol, figsize=(ncol * 1.5, nrow * 1.6))
+    axes = np.atleast_2d(axes)
+    for a in axes.ravel():
+        a.axis("off")
+    for k, i in enumerate(idx):
+        ax = axes[k // ncol, k % ncol]
+        st = stamps[i]
+        ax.imshow(st, cmap="inferno", origin="upper",
+                  norm=matplotlib.colors.PowerNorm(0.5))
+        cw, pk, d = meta[i, 0], meta[i, 1], int(meta[i, 2])
+        ax.set_title(f"d{d}  w={cw:.1f}", fontsize=6)
+        ax.axis("off")
+    fig.suptitle("EOS star PSF stamps (green plane, inferno, sqrt) — "
+                 "label: focus-d, cross-streak width px", fontsize=9)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    p = os.path.join(outdir, "psf_stamps.png")
+    fig.savefig(p, dpi=130)
+    plt.close(fig)
+    return p
+
+
+def render_stamps_by_d(stamps, meta, outdir, per_d=8):
+    """One row per focus-d, brightest `per_d` stars — the d3..d9 comparison."""
+    ds = sorted(set(int(x) for x in meta[:, 2]))
+    fig, axes = plt.subplots(len(ds), per_d,
+                             figsize=(per_d * 1.4, len(ds) * 1.5))
+    axes = np.atleast_2d(axes)
+    for a in axes.ravel():
+        a.axis("off")
+    for r, d in enumerate(ds):
+        sel = np.where(meta[:, 2] == d)[0]
+        sel = sel[np.argsort(-meta[sel, 1])][:per_d]
+        for c, i in enumerate(sel):
+            ax = axes[r, c]
+            ax.imshow(stamps[i], cmap="inferno", origin="upper",
+                      norm=matplotlib.colors.PowerNorm(0.5))
+            ax.set_title(f"w={meta[i,0]:.1f}", fontsize=6)
+            ax.axis("off")
+        axes[r, 0].set_ylabel(f"d{d}", fontsize=9)
+        axes[r, 0].axis("on")
+        axes[r, 0].set_xticks([]); axes[r, 0].set_yticks([])
+    fig.suptitle("EOS star PSF by focus-d (rows) — brightest stars, "
+                 "green plane; w = cross-streak width px", fontsize=9)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    p = os.path.join(outdir, "psf_by_d.png")
+    fig.savefig(p, dpi=130)
+    plt.close(fig)
+    return p
+
+
+def render_field(rows, outdir, d_filter=None):
+    """Cross-streak width vs (x,y): field-curvature map. If d_filter given,
+    only that d; else all — coloured by width."""
+    xs, ys, ws, ds = [], [], [], []
+    for r in rows:
+        d = int(r["d"])
+        if d_filter is not None and d != d_filter:
+            continue
+        xs.append(float(r["x"])); ys.append(float(r["y"]))
+        ws.append(float(r["cross_w"])); ds.append(d)
+    if not xs:
+        return None
+    xs, ys, ws = np.array(xs), np.array(ys), np.array(ws)
+    fig, ax = plt.subplots(figsize=(9, 6))
+    vmin, vmax = np.percentile(ws, 5), np.percentile(ws, 95)
+    sc = ax.scatter(xs, ys, c=ws, s=28, cmap="viridis_r",
+                    vmin=vmin, vmax=vmax, edgecolors="none")
+    ax.set_xlim(0, FRAME_W); ax.set_ylim(FRAME_H, 0)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x (green-plane px)"); ax.set_ylabel("y")
+    ttl = "cross-streak width vs position"
+    ttl += f" — d{d_filter}" if d_filter is not None else " — all d"
+    ax.set_title(ttl + "  (darker = sharper)")
+    fig.colorbar(sc, ax=ax, label="cross-streak width (px)")
+    tag = f"d{d_filter}" if d_filter is not None else "all"
+    p = os.path.join(outdir, f"psf_field_{tag}.png")
+    fig.tight_layout(); fig.savefig(p, dpi=130); plt.close(fig)
+    return p
+
+
+def render_vcurve(rows, outdir):
+    from collections import defaultdict
+    byd = defaultdict(list)
+    for r in rows:
+        byd[int(r["d"])].append(float(r["cross_w"]))
+    ds = sorted(byd)
+    med = [np.median(byd[d]) for d in ds]
+    p25 = [np.percentile(byd[d], 25) for d in ds]
+    p75 = [np.percentile(byd[d], 75) for d in ds]
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    ax.fill_between(ds, p25, p75, alpha=0.2, color="#007AFF")
+    ax.plot(ds, med, "-o", color="#007AFF")
+    best = ds[int(np.argmin(med))]
+    ax.axvline(best, color="#FF3B30", ls="--", label=f"sharpest d{best}")
+    ax.set_xlabel("focus-d (Near-2 steps from ∞ stop)")
+    ax.set_ylabel("cross-streak width (px, green)")
+    ax.set_title("EOS focus V-curve — cross-streak width per d")
+    ax.legend()
+    p = os.path.join(outdir, "psf_vcurve.png")
+    fig.tight_layout(); fig.savefig(p, dpi=130); plt.close(fig)
+    return p
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("night", help="dir holding psf.npz/psf.csv")
+    ap.add_argument("--stamps", action="store_true")
+    ap.add_argument("--by-d", action="store_true")
+    ap.add_argument("--field", action="store_true")
+    ap.add_argument("--field-d", type=int, default=None,
+                    help="field map for a single d")
+    ap.add_argument("--vcurve", action="store_true")
+    ap.add_argument("--all", action="store_true", help="render everything")
+    ap.add_argument("--no-splay", action="store_true")
+    ap.add_argument("--outdir", default=None)
+    args = ap.parse_args()
+
+    night = args.night
+    outdir = args.outdir or os.path.join(
+        os.environ.get("SCRATCH", os.path.expanduser("~/tmp")), "eos-psf-view")
+    os.makedirs(outdir, exist_ok=True)
+
+    stamps, meta, cols, rows = load(night)
+    made = []
+    do_all = args.all or not any([args.stamps, args.by_d, args.field,
+                                  args.vcurve, args.field_d is not None])
+    if args.stamps or do_all:
+        made.append(render_stamps(stamps, meta, outdir))
+    if args.by_d or do_all:
+        made.append(render_stamps_by_d(stamps, meta, outdir))
+    if args.vcurve or do_all:
+        made.append(render_vcurve(rows, outdir))
+    if args.field or do_all:
+        made.append(render_field(rows, outdir))
+    if args.field_d is not None:
+        made.append(render_field(rows, outdir, d_filter=args.field_d))
+    made = [m for m in made if m]
+    for m in made:
+        print("wrote", m)
+    if made and not args.no_splay:
+        subprocess.Popen(["splay", outdir],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"\nsplay {outdir}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
