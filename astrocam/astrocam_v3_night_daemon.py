@@ -68,7 +68,7 @@ def main() -> int:
                          59_900_000, int)
     gain = _param("ASTROCAM_GAIN", cap.get("night_gain"), 1.0, float)
     lens_position = _param("ASTROCAM_LENS_POSITION", cap.get("lens_position"),
-                           1.0, float)
+                           1.4, float)
     pedestal = _param("ASTROCAM_PEDESTAL", cfg_cam.get("pedestal"), 512, int)
 
     # Focus dither: on by default from camera.json's capture.focus_dither
@@ -80,11 +80,11 @@ def main() -> int:
         focus_dither = None
     elif focus_dither is not None or os.environ.get("ASTROCAM_FOCUS_DITHER") == "1":
         base = float(os.environ.get("ASTROCAM_FD_BASE",
-                                    (focus_dither or {}).get("base", 0.9)))
+                                    (focus_dither or {}).get("base", 1.3)))
         top = float(os.environ.get("ASTROCAM_FD_TOP",
-                                   (focus_dither or {}).get("top", 2.0)))
+                                   (focus_dither or {}).get("top", 1.6)))
         step = float(os.environ.get("ASTROCAM_FD_STEP",
-                                    (focus_dither or {}).get("step", 0.05)))
+                                    (focus_dither or {}).get("step", 0.02)))
         focus_dither = {"base": base, "top": top, "step": step}
 
     logging.info(f"capture params: exposure_us={exposure_us} gain={gain} "
