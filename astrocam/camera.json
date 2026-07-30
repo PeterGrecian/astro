@@ -15,8 +15,8 @@
     "night_gain": 1.0,
     "lens_position": 1.0,
     "lens_position_notes": "imx708 manual focus in DIOPTRES. Probed 2026-07-29 against distant trees on the STANDARD v3 (not the v3w): sharpness peaked ~1.0-1.4, lp=1.0 chosen by eye. Very different from eclipticam-v3w's 3.15 because that is the WIDE lens. Focus breathing minimal across the sweep. Night daemon dithers around this to allow per-frame star-focus refinement (LENSPOS header).",
-    "focus_dither": {"base": 0.9, "top": 1.5, "step": 0.05},
-    "focus_dither_notes": "Narrowed 2026-07-30 from 0.5-1.5/0.1 to 0.9-1.5/0.05. The first-night trails showed the lower half (0.5-0.8) is all pre-focus blobs (fat tadpole heads) — wasted samples. 0.9-1.5 brackets the sharp zone (probed peak ~1.0, tree peak 1.0-1.4) and the 0.05 step doubles resolution where focus actually matters (13 positions vs 11). Re-derive true stellar-infinity + final range from the PSF-vs-LENSPOS curve once measured.",
+    "focus_dither": {"base": 0.9, "top": 2.0, "step": 0.05},
+    "focus_dither_notes": "Retuned 2026-07-30 from 0.5-1.5/0.1 to 0.9-2.0/0.05. The first-night trails showed the lower half (0.5-0.8) is all pre-focus blobs (fat tadpole heads) — wasted samples — so the base was raised to 0.9. Top extended to 2.0 (from 1.5) to be sure the FAR side of focus isn't clipped: true stellar infinity may sit above the daytime tree peak (1.0-1.4), so give headroom past it. 0.05 step = 23 positions across 0.9-2.0, dense sampling through the sharp zone. Re-derive true stellar-infinity + a tightened final range from the PSF-vs-LENSPOS curve once measured.",
     "capture_notes": "Streaming single-frame-per-FITS via astro.capture.streaming (same engine as eclipticam-v3w), NOT the old imx219 short-exposure x8-coadd loop. 59.9s @ gain 1 matches eclipticam-v3w night params on the same sensor. RECALIBRATE from real imx708 sky frames: pole_prior_xy, plate_scale, pedestal, and occlusion tile map are all STALE (imx219 / v2-lens / 3280x2464 era)."
   },
   "plate_scale_deg_px": 0.0190,
