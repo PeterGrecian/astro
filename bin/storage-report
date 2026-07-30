@@ -37,6 +37,26 @@ REGION = "eu-west-1"
 INVENTORY_TABLE = "astro-storage-inventory"
 CAPACITY_TABLE = "astro-host-capacity"
 
+# Sensor-swap boundaries: a camera whose sensor changed in place, keeping the
+# same frames directory, so nights split by date rather than by path. astrocam
+# went imx219/v2 -> imx708/v3s on 2026-07-29 (astro-v3s strand). Nights on/after
+# the swap date report under the versioned name so the storage page labels the
+# eras distinctly (astrocam->av2, astrocam-v3s->av3s). {base: (from_date, name)}.
+_SENSOR_SWAPS = {
+    "astrocam": ("2026-07-29", "astrocam-v3s"),
+}
+
+
+def _cam_for_night(cam, night):
+    """Map a base camera name to its sensor-versioned name for a given night.
+
+    night is a YYYY-MM-DD string, which sorts lexically, so a plain >= compare
+    against the swap date is correct. Cameras with no swap pass through."""
+    swap = _SENSOR_SWAPS.get(cam)
+    if swap and night and night >= swap[0]:
+        return swap[1]
+    return cam
+
 # Cameras scanned via locate.list_nights (flat/canonical single-dir-per-night
 # layouts) when --cameras isn't given. eclipticam-v1/v3w are NOT here — they
 # use the <mode>/<date>/ layout and are scanned by scan_mode_dated instead
@@ -362,10 +382,16 @@ def scan_host(cameras, host):
             # ~500 B) are not data — require real frame bytes. See MIN_REAL_BYTES.
             if size < MIN_REAL_BYTES:
                 continue
+            # astrocam swapped its sensor in place (imx219/v2 -> imx708/v3s) on
+            # 2026-07-29, writing both eras into the same astrocam-frames tree.
+            # There's no directory boundary, only a date one, so split the
+            # reported camera name by night: v3s frames get their own key
+            # (astrocam-v3s -> av3s on the page), v2 history stays astrocam (av2).
+            report_cam = _cam_for_night(cam, night)
             item = {
                 "night": night,
-                "loc": f"{cam}#{host}#{loc.path}",
-                "camera": cam,
+                "loc": f"{report_cam}#{host}#{loc.path}",
+                "camera": report_cam,
                 "host": host,
                 "path": str(loc.path),
                 "storage_class": "local",
