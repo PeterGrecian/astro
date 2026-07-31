@@ -451,10 +451,16 @@ def scan_extra_streams(host):
                     if size < MIN_REAL_BYTES:
                         continue
                     fmt = fmt_of(scan, native=native)
+                    # Apply the same sensor-swap split as scan_host (e.g.
+                    # astrocam -> astrocam-v3s for nights >= the swap date), so
+                    # the disk-root copies of swapped nights label consistently
+                    # with the capture-path rows (else a v3s night shows both an
+                    # av3s row from scan_host AND a stale av2 row from here).
+                    report_cam = _cam_for_night(stream, d.name)
                     yield {
                         "night": d.name,
-                        "loc": f"{stream}#{host}#{d}",
-                        "camera": stream,
+                        "loc": f"{report_cam}#{host}#{d}",
+                        "camera": report_cam,
                         "host": host,
                         "path": str(d),
                         "storage_class": "local",
