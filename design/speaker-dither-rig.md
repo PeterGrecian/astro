@@ -122,3 +122,80 @@ every ~10–50 ms), not the PWM frequency.
 v3w: breathing = radial (∝R) axis; speakers = 2D transverse. astrocam: speakers =
 the whole 2D dither. Both feed the same drizzle super-grid reconstruction.
 See `project-v3w-star-id-moon-anchor` (S-streak / breathing / drizzle threads).
+
+---
+
+## Bench PoC results — 2026-07-31 (deskpi + IMX219 V2)
+
+First end-to-end validation of the mechanism. **The chain works: commanded
+current → cone travel → measurable camera image shift.** Details in
+`~/Berrylands/pwmaudio/experiments/dither-deflection.md`; roadmap in the
+`astro-speaker-dither` strand STATE.
+
+**What's proven (critical early steps, now cleared):**
+- Driver: common-emitter → **darlington (2N3904 → B882/D882)** delivers full
+  coil current. Measured **5.6 V RMS ≈ 0.70 A / ~3.9 W** into the 8 Ω coil.
+- Actuator: a **Faital Pro 4FE35** (4" full-range) moves the cone **~3 mm**,
+  throwing the image **~230 px** across a 640-wide frame at high duty — the
+  original feeble speaker gave nothing. Force & range are now a *non-issue*
+  (~1000× more travel than the 0.1 px ≈ 0.77 µm dither target needs).
+- Capture + detector: V4L2 raw-Bayer on ARMv6 (rpicam barred), FFT phase-corr
+  cross-correlation resolves shifts to **~0.008 px** (control), drift ~0.02 px.
+
+**Two empirical gotchas found:**
+- **PWM carrier landed at 8 kHz, not the requested 20 kHz** — pigpio
+  `set_PWM_frequency` snaps to a discrete ladder. 8 kHz is dead in the audible
+  band → loud. Fix: use `pi.hardware_PWM(18, 40000, duty*1e6)` (true HW PWM,
+  arbitrary freq) → carrier inaudible + coil L and a shunt cap attenuate it far
+  harder. A **10 µF shunt cap across the coil** (coil = the L+R) made it
+  non-painful; +100 µF better (fc ≈ 2.3 kHz / 680 Hz).
+- **Response is stick-slip, not proportional.** Camera *resting in contact*
+  with the cone → hard **deadband then snap-to-detent** (e.g. 0 up to ~duty 30,
+  then jumps to a plateau). Slow **ramps do NOT cure it** — a pure friction
+  contact has no elastic element to creep through, so it stick-then-slips
+  regardless of drive shape. And at high duty the camera **flew off the cone.**
+
+## THE critical remaining step — the flexure stage (hard; ribbon is the crux)
+
+The blocker is now purely mechanical: **sub-micron *smooth* motion**. Ordinary
+bearings/slides can't do it — they have ~micron breakaway stiction (exactly the
+stick-slip measured above). The right answer is a **flexure**, not a bearing: a
+thin elastic blade / parallelogram that *bends* — no sliding surfaces → no
+friction → continuous sub-µm travel, plus an elastic restoring force that makes
+the response smooth, monotonic, and self-returning (also fixes "flew off").
+
+**The camera ribbon (CSI flex) is the particularly difficult part.** It fights
+the flexure on the very axis that matters:
+- Its bending stiffness is comparable to a soft sub-µm flexure → an
+  uncontrolled parallel spring that shifts rest position and effective stiffness.
+- Flex PCB has its own creep/hysteresis/self-friction → **reintroduces
+  stick-slip** through the cable — designing out the bearing friction only to
+  let it back in via the ribbon.
+- It pulls cross-axis as the camera translates → adds unwanted sensor tilt.
+
+**Mitigations (easiest → most involved):**
+1. Generous **service loop** oriented to bend in its floppy (out-of-plane)
+   plane, routed symmetrically so it's net-neutral at the rest point.
+2. Anchor the ribbon to the *moving stage* at the camera (no relative motion at
+   the connector); put the flex loop further back where stiffness matters less.
+3. **Match flexure stiffness UP to swamp the ribbon** — we have ~1000× excess
+   travel, so afford a *stiffer* flexure that dominates the ribbon's variation,
+   then **gear down** to sub-µm at the sensor. Converts the excess range into
+   "make the ribbon irrelevant." Likely the cleanest path.
+4. **Calibrate it out** if the ribbon disturbance is *repeatable* (needs the
+   flexure to have killed stick-slip first).
+5. Eliminate relative motion entirely: whole camera + short pigtail on the
+   moving stage; only static upstream wiring bends.
+
+**Early characterization:** the drift/return metric (relaxed start-vs-end shift,
+already computed each run) *is* a ribbon-hysteresis meter — drive a slow ramp,
+check return-to-zero repeatability with a service loop in place.
+
+## Difficulty-ranked remaining roadmap (Peter, 2026-07-31)
+1. **Flexure stage + ribbon strain-management — CRITICAL, hardest, do FIRST.**
+2. Bond camera→cone rigidly (easy; unblocks proportional re-test in the interim).
+3. **Real DAC** (MCP4725 12-bit → linear current driver) — easy quality upgrade;
+   removes the PWM carrier entirely and gives far finer low-end resolution than
+   8-bit PWM (the usable dither range is the bottom few % of drive). NB driven
+   *linearly* the D882 dissipates more (active region) → heatsink / proper
+   current-source stage. Park as Phase 2; does NOT fix stick-slip (mechanical).
