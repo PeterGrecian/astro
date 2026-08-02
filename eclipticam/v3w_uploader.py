@@ -19,14 +19,27 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Allow running directly or via systemd; put the repo on the path so
+# astro.config is importable, then take frames_root from camera.json —
+# the single source of truth for where frames live (see camera.json
+# frames_root_notes). V3W_FRAMES_ROOT still overrides for tests.
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from astro.config import CameraConfig
+
 BUFFER_DIR = Path(os.environ.get("V3W_BUFFER_DIR",
                                  "/var/lib/eclipticam-buffer/v3w"))
-FRAMES_ROOT = Path(os.environ.get("V3W_FRAMES_ROOT",
-                                  str(Path.home() / "eclipticam-frames")))
+FRAMES_ROOT = Path(os.environ["V3W_FRAMES_ROOT"]) \
+    if os.environ.get("V3W_FRAMES_ROOT") \
+    else CameraConfig.load("eclipticam").frames_root
 UPLOAD_INTERVAL_S = float(os.environ.get("V3W_UPLOAD_INTERVAL_S", "5"))
 
 _stop = False

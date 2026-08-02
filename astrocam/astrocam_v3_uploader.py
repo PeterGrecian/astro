@@ -23,10 +23,22 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Allow running directly or via systemd; put the repo on the path so
+# astro.config is importable, then take frames_root from camera.json —
+# the single source of truth for where frames live (see camera.json
+# frames_root_notes). ASTROCAM_FRAMES_ROOT still overrides for tests.
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from astro.config import CameraConfig
+
 BUFFER_DIR = Path(os.environ.get("ASTROCAM_BUFFER_DIR",
                                  "/var/lib/astrocam-buffer/v3"))
-FRAMES_ROOT = Path(os.environ.get("ASTROCAM_FRAMES_ROOT",
-                                  str(Path.home() / "astrocam-frames")))
+FRAMES_ROOT = Path(os.environ["ASTROCAM_FRAMES_ROOT"]) \
+    if os.environ.get("ASTROCAM_FRAMES_ROOT") \
+    else CameraConfig.load("astrocam").frames_root
 UPLOAD_INTERVAL_S = float(os.environ.get("ASTROCAM_UPLOAD_INTERVAL_S", "5"))
 
 _stop = False

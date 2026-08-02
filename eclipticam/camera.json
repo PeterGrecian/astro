@@ -4,7 +4,8 @@
   "sensor": null,
   "bayer": null,
   "resolution": null,
-  "frames_root": "~/eclipticam-frames",
+  "frames_root": "/mnt/muppet/bigstore/eclipticam-frames",
+  "frames_root_notes": "Canonical on-disk root (from pip's view), the single source of truth for where eclipticam frames live. All four streams were consolidated onto muppet's bigstore (external Seagate USB, /mnt/bigstore/astro-data, NFS-exported) ~2026-07-30 — muppet's own path is /mnt/bigstore/astro-data/eclipticam-frames, pip reaches it via the /mnt/muppet/bigstore automount of that export. NOT the old /mnt/eclipticam automount and NOT the ~/eclipticam-frames home-dir symlink (extra resolve + autofs delay, hid the physical location from config). Change THIS string to relocate; all code reads it via CameraConfig.frames_root. NB per-host: on muppet itself frames_root is /mnt/bigstore/astro-data/eclipticam-frames.",
   "night_layout": "percam",
   "night_layout_notes": "day/YYYY-MM-DD/<cam>/HH/NNNN.jpg (UTC date); night/YYYY-MM-DD/<cam>/HH/NNNN.fits.fz (noon-rollover night date). HHb/ siblings hold 2x2 sum-binned frames.",
   "subcams": {
