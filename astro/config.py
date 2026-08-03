@@ -12,6 +12,7 @@ Usage:
 """
 import json
 import os
+import socket
 from pathlib import Path
 
 # ASTRO_REPO_ROOT overrides where camera dirs are looked up (tests).
@@ -51,6 +52,23 @@ class CameraConfig:
 
     @property
     def frames_root(self) -> Path:
+        """Where this camera's frames live, resolved per-host.
+
+        The same physical store is reached by different paths on different
+        machines (e.g. muppet's bigstore export is automounted at
+        ~/astrocam-frames on the capture Pi but at /mnt/muppet/bigstore/...
+        on pip), so a single string can't be right everywhere. Resolution
+        order:
+          1. `frames_root_by_host[<hostname>]` if present for this host
+          2. `frames_root` (the host-agnostic default / fallback)
+        Hostname is the short name (socket.gethostname() up to the first
+        dot). Cameras without a `frames_root_by_host` map are unaffected.
+        """
+        by_host = self._data.get("frames_root_by_host")
+        if by_host:
+            host = socket.gethostname().split(".", 1)[0]
+            if host in by_host:
+                return Path(by_host[host]).expanduser()
         return Path(self._data["frames_root"]).expanduser()
 
     @property

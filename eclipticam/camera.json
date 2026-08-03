@@ -5,6 +5,8 @@
   "bayer": null,
   "resolution": null,
   "frames_root": "~/eclipticam-frames",
+  "frames_root_by_host": {"pip": "/mnt/muppet/bigstore/eclipticam-frames"},
+  "frames_root_notes": "Single source of truth (CameraConfig.frames_root), resolved PER-HOST. Default (~/eclipticam-frames) is the capture host's view (muppet's bigstore export NFS-automounted there); pip reaches the same export at /mnt/muppet/bigstore/eclipticam-frames (pip's ~ symlink removed 2026-08-02). Add a host key to teach a new machine.",
   "night_layout": "percam",
   "night_layout_notes": "day/YYYY-MM-DD/<cam>/HH/NNNN.jpg (UTC date); night/YYYY-MM-DD/<cam>/HH/NNNN.fits.fz (noon-rollover night date). HHb/ siblings hold 2x2 sum-binned frames.",
   "subcams": {
