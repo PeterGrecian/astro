@@ -181,6 +181,41 @@ The number is deliberately provocative and splits into two thresholds:
   step is T1, which *measures* what's realistic and re-anchors the headline
   number from evidence rather than ambition.
 
+### The catalogue is a free brightness CEILING on unidentified sources (Peter, 2026-08-03)
+
+The completeness curve above measures how much we *miss*. Its logical **inverse**
+is a free constraint on everything we *find*: **if we hold every catalogued star
+down to magnitude M over a region, then any detection there that is NOT one of
+them is provably fainter than M** — because if it were brighter than M it would
+already be catalogued. "Collect all the mag-0 stars and you know anything in
+between is darker" — generalised, the catalogue completeness limit M(region) is an
+**upper bound (ceiling) on the brightness of every unidentified source**, with no
+photometry required.
+
+Why it's useful:
+- **A known-value prior, not a measurement.** Every unmatched detection arrives
+  already bracketed: **fainter than the local catalogue limit M** (from this
+  ceiling — it wasn't catalogued) *and* **brighter than the local noise floor**
+  (from the mere fact it was detected). Both bounds are free — one from the
+  catalogue, one from detection. That two-sided bracket constrains the faint
+  source before we photometer it, and sanity-checks any flux we do measure (a
+  measured brightness above M means it *should* have matched → suspect the match,
+  the astrometry, or that it's a transient/mover, not a star).
+- **It's a per-region FIELD, matching the vector-field philosophy.** Catalogue
+  completeness is deeper in some sky regions than others (crowding, catalogue
+  footprint, our own field-anchoring density), so M(region) is a spatially
+  varying ceiling, not one number — evaluated through the same
+  bright-anchored field the IDs come through.
+- **It sharpens the "see vs identify" gap into records.** The unmatched-but-
+  persistent set (the local `SC-` catalogue below) isn't just "unidentified" — each
+  member carries a hard *fainter-than-M-here* label the moment it's detected, so
+  the faint tail is quantified from the start, not merely counted.
+
+Caveat: the bound is only as good as the catalogue's completeness claim over that
+region — it holds where the catalogue genuinely IS complete to M (bright regime,
+uncrowded); near bright stars or in gaps the effective M is shallower, which is
+itself information (the ceiling lifts exactly where the catalogue thins).
+
 ### The distortion field as an ID bridge — bright stars carry the faint ones
 
 **The enabling idea (Peter, 2026-07-25):** don't try to plate-solve each faint
