@@ -24,12 +24,27 @@ HARDWARE (Matter smart plug via HA python-matter-server WebSocket API):
 If the plug can't be reached, off/on/cycle print the failure and exit non-zero,
 so the recovery protocol degrades safely (logs "power-cycle unavailable" rather
 than silently doing nothing).
+
+`cycle` VERIFIES the rail actually dropped by watching the camera's USB device
+number (a real power cut forces re-enumeration with a NEW Dev). Smart plugs here
+have proved outrageously unreliable, and a plug that ACKs the command without
+switching mains is otherwise indistinguishable from an uncurable camera wedge.
+Exit codes for `cycle`:
+  0  cycled and verified (Dev changed) — or --no-verify
+  2  plug unreachable / command failed (the reset never ran)
+  3  PLUG LIED: ACKed but Dev unchanged — suspect the plug, not the camera
+  4  camera never came back on the bus after the cycle
 """
-import argparse, asyncio, json, subprocess, sys, time
+import argparse, asyncio, json, re, subprocess, sys, time
 
 # ---- hardware config (Matter smart plug) ------------------------------------
 MATTER_WS = "ws://homepi.local:5580/ws"   # HA python-matter-server WS API
-MATTER_NODE = 4                           # Currys Sandstrom plug (node 4)
+MATTER_NODE = 7                           # Realwe Innovation plug (node 7)
+# Plugs get replaced and renumber on re-commissioning, so prefer matching the
+# vendor name and fall back to MATTER_NODE. Set to None to match by id only.
+# NB match the VENDOR (0/40/1), not the product: the retired Sandstrom ghost
+# still on the fabric is also called "…Smart Plug".
+MATTER_VENDOR = "Realwe"                  # 0/40/1 substring, case-insensitive
 PLUG_ON_POWERS_CAMERA = True              # plug ON = mains up = camera powered
 ONOFF_CLUSTER = 6                         # Matter On/Off cluster id
 CYCLE_SECS = 10            # STATE: pull ~10s to drop the logic rail
@@ -62,23 +77,45 @@ async def _plug_command(cmd_name: str) -> bool:
                     if m.get("message_id") == str(mid):
                         return m
 
-                # find the On/Off endpoint for our node
+                # find our plug: by product name if set, else by node id
             nodes = (await call(1, "get_nodes")).get("result", [])
-            node = next((n for n in nodes
-                         if n.get("node_id") == MATTER_NODE), None)
+
+            def has_onoff(n):
+                return any(k.endswith(f"/{ONOFF_CLUSTER}/0")
+                           for k in n.get("attributes", {}))
+
+            node = None
+            if MATTER_VENDOR:
+                want = MATTER_VENDOR.strip().lower()
+                cands = [n for n in nodes
+                         if want in str(n.get("attributes", {}).get("0/40/1",
+                                                                    "")).lower()
+                         and has_onoff(n)]
+                # a reachable match wins over a stale ghost of an old plug
+                node = next((n for n in cands if n.get("available")),
+                            cands[0] if cands else None)
             if node is None:
-                print(f"eos-power: node {MATTER_NODE} not commissioned",
+                node = next((n for n in nodes
+                             if n.get("node_id") == MATTER_NODE), None)
+            if node is None:
+                print(f"eos-power: no plug found (vendor {MATTER_VENDOR!r}, "
+                      f"node {MATTER_NODE}) — not commissioned?",
                       file=sys.stderr)
+                return False
+            nid = node.get("node_id")
+            if not node.get("available"):
+                print(f"eos-power: plug node {nid} is commissioned but "
+                      f"unavailable (offline?)", file=sys.stderr)
                 return False
             ep = next((int(k.split("/")[0])
                        for k in node.get("attributes", {})
                        if k.endswith(f"/{ONOFF_CLUSTER}/0")), None)
             if ep is None:
-                print(f"eos-power: node {MATTER_NODE} has no On/Off cluster",
+                print(f"eos-power: node {nid} has no On/Off cluster",
                       file=sys.stderr)
                 return False
             r = await call(2, "device_command",
-                           {"node_id": MATTER_NODE, "endpoint_id": ep,
+                           {"node_id": nid, "endpoint_id": ep,
                             "cluster_id": ONOFF_CLUSTER,
                             "command_name": cmd_name, "payload": {}})
             if r.get("error_code"):
@@ -104,12 +141,41 @@ def _relay_set(powered: bool) -> bool:
 # ---- status (best effort, host-independent of the relay) --------------------
 def camera_enumerated() -> bool:
     """Is the EOS on muppet's USB bus? (04a9:32e1). Run this ON muppet."""
+    return camera_dev() is not None
+
+def camera_dev():
+    """The EOS's current (bus, device) numbers, or None if not on the bus.
+
+    This is the GROUND TRUTH for "did the rail actually drop": a power cycle
+    makes the camera re-enumerate with a NEW device number. A smart plug that
+    ACKs the On/Off command but doesn't actually switch mains leaves the Dev
+    number unchanged — indistinguishable from a real wedge without this check.
+    (Verified by hand 2026-07-26: Dev 013->014 across a genuine cycle.)"""
     try:
         out = subprocess.run(["lsusb"], capture_output=True, text=True,
                              timeout=10).stdout
-        return "04a9:32e1" in out
     except Exception:
-        return False
+        return None
+    for line in out.splitlines():
+        if "04a9:32e1" in line:
+            m = re.match(r"Bus (\d+) Device (\d+):", line)
+            if m:
+                return (m.group(1), m.group(2))
+            return ("?", "?")
+    return None
+
+def wait_reenumerate(before, timeout=40, poll=2):
+    """Wait for the camera to come back with a DIFFERENT device number.
+
+    Returns (ok, dev). ok=False means the rail never dropped (dev unchanged =
+    the plug lied) or the camera never came back within `timeout`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        dev = camera_dev()
+        if dev is not None and dev != before:
+            return True, dev
+        time.sleep(poll)
+    return False, camera_dev()
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -117,6 +183,8 @@ def main():
     ap.add_argument("action", choices=["off", "on", "cycle", "status"])
     ap.add_argument("--secs", type=int, default=CYCLE_SECS,
                     help="off-duration for cycle (default ~10s, STATE-validated)")
+    ap.add_argument("--no-verify", dest="verify", action="store_false",
+                    help="skip the Dev-number check that the rail really dropped")
     args = ap.parse_args()
 
     if args.action == "status":
@@ -129,6 +197,7 @@ def main():
     if args.action == "on":
         sys.exit(0 if _relay_set(True) else 2)
     if args.action == "cycle":
+        before = camera_dev()
         ok = _relay_set(False)
         if not ok:
             sys.exit(2)
@@ -137,7 +206,27 @@ def main():
         time.sleep(args.secs)
         ok = _relay_set(True) and ok
         print("eos-power: 12V restored", flush=True)
-        sys.exit(0 if ok else 2)
+        if not ok:
+            sys.exit(2)
+        if not args.verify:
+            sys.exit(0)
+        if before is None:
+            print("eos-power: camera was not on the bus before the cycle — "
+                  "cannot verify by Dev number", file=sys.stderr)
+            sys.exit(0)
+        moved, dev = wait_reenumerate(before)
+        if moved:
+            print(f"eos-power: verified — camera re-enumerated "
+                  f"Dev {before[1]} -> {dev[1]} (rail definitely dropped)")
+            sys.exit(0)
+        if dev == before:
+            print(f"eos-power: PLUG LIED — Dev {before[1]} unchanged; the plug "
+                  f"ACKed but mains never dropped. Suspect the plug, NOT the "
+                  f"camera.", file=sys.stderr)
+            sys.exit(3)
+        print("eos-power: camera did NOT come back on the bus after the cycle",
+              file=sys.stderr)
+        sys.exit(4)
 
 if __name__ == "__main__":
     main()

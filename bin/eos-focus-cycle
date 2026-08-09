@@ -188,6 +188,24 @@ def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
     if power_budget is not None:
         power_budget[0] -= 1
     pc = _eos_power("cycle")
+    if pc is not None and pc.returncode == 3:
+        # eos-power VERIFIED the plug lied: it ACKed the command but the camera's
+        # USB Dev number never changed, so mains never actually dropped. This is
+        # NOT a camera fault — do not burn more budget pretending it might be.
+        # (Smart plugs here have a track record: the Sandstrom was binned
+        # 2026-08-09 after exactly this behaviour.) Refund the budget: nothing
+        # was reset, and a working plug later in the night deserves its cycles.
+        if power_budget is not None:
+            power_budget[0] += 1
+        print("  [recover] PLUG LIED — Dev unchanged, mains never dropped; "
+              "camera not power-cycled", flush=True)
+        slack("EOS smart plug LIED — reset never actually happened",
+              detail=("eos-power cycle returned success but the camera's USB "
+                      "device number did not change, so the plug ACKed without "
+                      "switching mains. The camera was NEVER power-cycled — "
+                      "suspect the plug, not the camera. Needs a manual pull "
+                      "and probably another plug swap."))
+        return False
     if pc is None or pc.returncode != 0:
         # The reset command itself FAILED (plug unreachable / matter-server down
         # / binary missing). The smart-plug chain is not generally reliable, so
@@ -222,10 +240,11 @@ def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
         # it's not a power-clearable state. Slack Peter so a misfiring reset is
         # never silent, even though the run will keep trying / eventually abort.
         slack("EOS reset ran but did NOT clear the wedge",
-              detail=(f"eos-power cycle returned success but the camera is still "
-                      f"wedged after re-enumeration. Smart-plugs aren't reliable "
-                      f"— the plug may not have actually cut power. Manual pull "
-                      f"likely needed."))
+              detail=(f"eos-power cycle VERIFIED the rail dropped (camera "
+                      f"re-enumerated with a new USB Dev number) but the camera "
+                      f"is still wedged. The plug is working — so this is a "
+                      f"genuine power-resistant wedge, not a plug fault. Manual "
+                      f"intervention likely needed."))
     return ok
 
 def _find(stem, *exts):
