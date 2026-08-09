@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# canon-nightly — DELIVERY chain for one EOS 2000D night.
+#
+# This is the DELIVERY seam (astro-science strand), NOT capture. It takes
+# what astro-capture already put on disk (CR2s in ~/tmp/canon-focus-nightly/
+# <night>/ on muppet) and turns it into published /astro deliverables. It
+# never reaches into how capture works — capture "should just work" and this
+# runs after it.
+#
+# Chain (host split is load-bearing — see canon/camera.json processing_notes):
+#   1. eos-cr2-to-fits   (MUPPET — needs rawpy)  CR2 -> flat .fits.fz tree
+#   2. nightly-cam       (PIP    — needs matplotlib) stacks + max.jpg + summary
+#   3. publish-night-cam via nightly-cam --publish : upload web set to S3
+#   4. build-calendar-index --publish            : refresh <camera>/index.json
+#
+# Run on PIP (has matplotlib + NFS view of the frames). Step 1 is delegated
+# to muppet over ssh. If already on muppet with matplotlib it'd all be local,
+# but neither host has both deps, so the split stands.
+#
+# Usage:
+#   canon-nightly                      # last completed night
+#   canon-nightly --night 2026-08-08
+#   canon-nightly --night 2026-08-08 --only-d 7   # sweep night: pin to d7
+#   canon-nightly --night 2026-08-08 --no-publish # local artefacts only
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+CAMERA=canon
+MUPPET=muppet.local
+NIGHT=""; ONLY_D=""; PUBLISH=1; FORCE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --night)      NIGHT="$2"; shift 2;;
+    --only-d)     ONLY_D="--only-d $2"; shift 2;;
+    --no-publish) PUBLISH=0; shift;;
+    --force)      FORCE="--force"; shift;;
+    *) echo "unknown arg: $1" >&2; exit 2;;
+  esac
+done
+
+# Default night = last completed noon-rollover night (delegate the definition
+# to the repo's own helper so it matches every other camera).
+if [[ -z "$NIGHT" ]]; then
+  NIGHT="$(python3 -c 'import sys; sys.path.insert(0,"'"$REPO"'");
+from astro.nightdir import last_completed_night; print(last_completed_night())')"
+fi
+echo "== canon-nightly $NIGHT =="
+
+# 1. adapt CR2 -> FITS on muppet (rawpy lives there, CR2s live there).
+echo "-- [1/4] adapt CR2->FITS on $MUPPET"
+ssh -o ConnectTimeout=10 "peter@$MUPPET" \
+  "cd ~/astro && python3 bin/eos-cr2-to-fits --night $NIGHT $ONLY_D $FORCE"
+
+# 2+3. stack + publish on pip (this host).
+echo "-- [2/4] nightly-cam (stack)"
+PUB_FLAG=""; [[ "$PUBLISH" == 1 ]] && PUB_FLAG="--publish"
+python3 "$REPO/bin/nightly-cam" --camera "$CAMERA" --night "$NIGHT" $PUB_FLAG
+
+# 4. refresh the calendar manifest.
+if [[ "$PUBLISH" == 1 ]]; then
+  echo "-- [4/4] build-calendar-index"
+  python3 "$REPO/bin/build-calendar-index" --camera "$CAMERA" --publish
+else
+  echo "-- [4/4] skipped (--no-publish)"
+fi
+echo "== canon-nightly $NIGHT done =="

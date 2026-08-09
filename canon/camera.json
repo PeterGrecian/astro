@@ -1,0 +1,43 @@
+{
+  "name": "canon",
+  "host": "muppet",
+  "position_index": 1,
+  "position_index_notes": "Which physical camera/lens generation is installed. INCREMENT whenever the camera, lens or mounting changes — each index is a distinct calibration epoch (plate scale, pole, FOV, orientation, pedestal) that must NOT be mixed across the boundary. Stamped into every FITS as POSINDEX. Index 1 = Canon EOS 2000D + its fixed lens, fixed-mount short-trail configuration, focus PINNED at d7 (see capture).",
+  "position_registry": {
+    "1": {"label": "eos1", "sensor": "canon-eos-2000d", "camera": "Canon EOS 2000D DSLR", "bayer": "GBRG", "resolution": [6020, 4015], "dates": "2026-08-09..", "notes": "First deliverables epoch. 30s ISO-1600 subs, fixed mount (stars TRAIL ~5-8 px/sub), focus fixed at LENS-DIAL d7 (see capture.focus_notes). plate_scale/pole UNSOLVED — derot disabled until a clear-night trail-arc solve."}
+  },
+  "sensor": "canon-eos-2000d",
+  "bayer": "GBRG",
+  "bayer_notes": "Decoded from rawpy raw_pattern [[3,2],[0,1]] + color_desc 'RGBG' on a real CR2 (2026-08-09): the 2x2 CFA tile reads [[G,B],[R,G]] = GBRG. NOT RGGB — do not assume. Registered here directly (astro.process.bayer.SENSOR_RAW_FORMAT covers only the Pi sensors); pipeline reads cfg.bayer.",
+  "resolution": [6020, 4015],
+  "resolution_notes": "raw.raw_image_visible shape (4015 rows x 6020 cols), uint16 14-bit (white_level 16383). This is the visible sensor area rawpy exposes, larger than the nominal 6000x4000 due to masked/border columns.",
+  "capture": {
+    "sub_exposure_s": 30,
+    "iso": 1600,
+    "gain_from_iso_note": "The EOS has no libcamera GAIN; the pipeline's GAIN header is set = ISO/100 (1600 -> 16.0) as the documented convention, so brightness-per-(EXPTIME*GAIN) is comparable in spirit to the Pi cameras. It is NOT a calibrated e-/ADU gain; it is a consistent normalisation constant. Change it here and re-derive pedestal/scs if ISO changes.",
+    "focus_dial_d": 7,
+    "focus_notes": "Focus PINNED at lens-dial d7 (Peter, 2026-08-09 — 'we found the focus'). Capture switches from the d5-d15 focus SWEEP (calibration, nights ..2026-08-08) to FIXED d7 from this date, giving consistent sharp trailing subs = the stackable nightly input. NB the eos-star-psf cross-width hunt read d8/d9 as marginally sharpest on the green plane (07-28/07-31, partly-cloud-contaminated); d7 is the committed OPERATIONAL focus. The small offset is expected (dial repeatability + the PSF hunt's cloud contamination) and recorded, not contradicted — re-measure PSF on a clean fixed-d7 night to confirm.",
+    "capture_notes": "gphoto2 tethered capture on muppet via the eos-* tool lineage (eos-focus-tonight / eos-focus-cycle). Writes CR2 (+ boosted JPEG) to ~/tmp/canon-focus-nightly/<night>/. Those CR2s are adapted to .fits.fz by eos-cr2-to-fits into frames_root for the nights pipeline. Stars TRAIL within a 30s sub (~5-8 px) — a short-trail fixed-mount camera, between a tracked stack and a full drift-scanner."
+  },
+  "plate_scale_deg_px": null,
+  "plate_scale_notes": "UNSOLVED. No plate solve yet for the 2000D + lens. Derive from a clear-night trail-arc fit (same method as the Pi cameras) before trusting any angular measurement or enabling derot.",
+  "pole_prior_xy": null,
+  "pole_prior_notes": "UNSOLVED. Pole position in the 2000D frame is unknown (fixed mount, unmeasured aim). Derot is DISABLED until this is solved from real sky. nightly-cam must degrade gracefully (max.jpg + brightness + summary, no derot) when pole_prior_xy is null — verified during canon bring-up.",
+  "rotate_180": false,
+  "rotate_180_notes": "No downstream rotation. DSLR raw is delivered in the sensor's native orientation; any sky-up convention is deferred to the (unsolved) pole/derot stage. Set false so the raw mosaic is stacked as-read.",
+  "pedestal": 2048,
+  "pedestal_notes": "PROVISIONAL. Reference for the brightness chart's log2(mean/pedestal) 'stops' axis. Set to 2048 as a first cut — just below the measured per-channel black level (~2046-2052 on a real CR2, 14-bit) — so a dark clear frame reads a small positive number of stops with footroom, mirroring the astrocam pedestal logic on the EOS's very different scale. MUST be re-derived from the first real fixed-d7 night's dark-sky frame-mean before the brightness chart / cloud verdict are trusted (the copied-from-astrocam risk the pedestal double-duty memory warns about — this axis also anchors sky_clear_max_stops).",
+  "frames_root": "~/canon-frames",
+  "frames_root_by_host": {"pip": "/mnt/muppet/bigstore/canon-frames"},
+  "frames_root_notes": "Where the adapted .fits.fz frames live (eos-cr2-to-fits writes here; nightly-cam reads here). Resolved PER-HOST like the other cameras: default (~/canon-frames) is muppet's view (capture + adapter run on muppet); pip sees muppet's bigstore export at /mnt/muppet/bigstore/canon-frames. This is the ADAPTED FITS tree, NOT the raw CR2 dir (~/tmp/canon-focus-nightly/<night>/), which is the adapter's input.",
+  "night_layout": "flat",
+  "night_layout_notes": "YYYY-MM-DD/HH/HH-MM-SS.fits.fz (UTC hour dirs); night membership by DATE-OBS within the noon-rollover window. Chosen because the adapter can place each CR2 by its manifest t_utc directly, and night_output_dir(flat) drops derived artefacts in the night dir. Same layout as astrocam.",
+  "processing": {"host": "pip"},
+  "processing_notes": "Split by dependency: the CR2->FITS ADAPTER (eos-cr2-to-fits) runs on muppet (needs rawpy + is where capture writes the CR2s); nightly-cam / publish-night-cam (FITS->deliverables, needs matplotlib) run on PIP, reading the adapted frames over NFS (/mnt/muppet/bigstore/canon-frames). Mirrors the drift-scan cameras processing on puppy off muppet's export. muppet has rawpy but not matplotlib; pip has matplotlib but not rawpy — neither host can do both halves, so the adapter/nightly-cam split is load-bearing, not incidental.",
+  "s3": {"bucket": "astro-berrylands-eu-west-1", "prefix": "canon/nights"},
+  "sky_clear_max_stops": null,
+  "sky_clear_max_stops_notes": "UNSET until measured. Dark-trough (10-min anchor) stops above which the night is called cloudy. Cannot be copied from astrocam — the EOS pedestal axis and LP response differ. Derive from the first real fixed-d7 nights (clear vs cloudy anchors) exactly as astrocam's was, THEN set a value with margin. Until set, either treat all nights as stackable (no cloud gate) or gate on a coarse brightness cut — decide during bring-up.",
+  "reference_nights": [],
+  "reference_nights_notes": "Populate with a known dark/clear fixed-d7 baseline once one is captured.",
+  "privacy_file": null
+}

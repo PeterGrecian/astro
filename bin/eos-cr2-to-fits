@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""eos-cr2-to-fits — adapt Canon EOS 2000D CR2 subs into the astro nights
+pipeline's .fits.fz frame tree.
+
+The EOS lineage (eos-focus-tonight / eos-focus-cycle) writes raw CR2s (+
+boosted JPEGs) into ~/tmp/canon-focus-nightly/<night>/, with a manifest.csv
+carrying the authoritative per-frame time/exposure/ISO. That is NOT the format
+the nights pipeline (nightly-cam / frames.py) reads — it wants one .fits.fz per
+frame, Bayer mosaic in HDU 1 (CompImageHDU), DATE-OBS/EXPTIME/GAIN/BAYERPAT
+headers, laid out flat as <frames_root>/YYYY-MM-DD/HH/HH-MM-SS.fits.fz.
+
+This tool bridges the two: each CR2 -> one .fits.fz in canon's flat frame tree,
+so `nightly-cam --camera canon` then produces the same deliverables (max.jpg,
+brightness, summary, and derot once a pole is solved) as the Pi cameras. It
+makes canon a first-class camera by CONVERSION, not by a bespoke stacker.
+
+Design choices (see astro/canon/camera.json):
+- Bayer mosaic is written UNDEMOSAICED (raw.raw_image_visible) — the pipeline
+  stacks CFA planes; demosaicing here would alias the undersampled signal.
+- GAIN header = ISO/100 (the documented convention, camera.json
+  gain_from_iso_note) — the EOS has no libcamera gain; this is a consistent
+  normalisation constant, not a calibrated e-/ADU.
+- DATE-OBS / EXPTIME / ISO come from the night's manifest.csv (t_utc, secs,
+  iso) — authoritative and avoids an exiftool dependency. Falls back to the
+  CR2's own EXIF DateTimeOriginal if a frame is missing from the manifest.
+- BAYERPAT = cfg.bayer (GBRG for the 2000D).
+- POSINDEX stamped from camera.json so each frame self-identifies its epoch.
+- Idempotent: an existing non-empty target .fits.fz is skipped unless --force.
+
+Runs on muppet (has rawpy + the CR2s). numpy + rawpy + astropy.
+
+Usage:
+    eos-cr2-to-fits --night 2026-08-09          # convert a whole night
+    eos-cr2-to-fits --night 2026-08-09 --only-d 7   # only d7 frames (sweep nights)
+    eos-cr2-to-fits --night 2026-08-09 --force      # re-convert existing
+    eos-cr2-to-fits --src ~/tmp/canon-focus-nightly/2026-08-09 --night 2026-08-09
+    eos-cr2-to-fits --cr2 path/to/one.cr2 --night 2026-08-09   # single file
+"""
+import argparse
+import csv
+import glob
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import rawpy
+from astropy.io import fits
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+
+DEFAULT_SRC_ROOT = Path("~/tmp/canon-focus-nightly").expanduser()
+# CR2 stem pattern from the eos lineage, e.g. p01_i14_d07 — capture the d value.
+_D_RE = re.compile(r"_d(\d+)", re.IGNORECASE)
+
+
+def load_manifest(src_dir: Path) -> dict:
+    """Map frame-stem -> {t_utc, secs, iso} from the night's manifest.csv.
+
+    The manifest `frame` column is the stem without extension (e.g.
+    'p01_i14_d07'); the CR2 on disk may be named that OR d-first
+    (d07_p01_i14) depending on the run, so we key on the invariant
+    (pass,seq) too as a fallback.
+    """
+    man = src_dir / "manifest.csv"
+    by_frame = {}
+    if not man.exists():
+        return by_frame
+    with man.open() as fh:
+        for row in csv.DictReader(fh):
+            frame = (row.get("frame") or "").strip()
+            if not frame:
+                continue
+            by_frame[frame] = {
+                "t_utc": (row.get("t_utc") or "").strip(),
+                "secs": row.get("secs"),
+                "iso": row.get("iso"),
+            }
+    return by_frame
+
+
+def _canon_stem(path: Path) -> str:
+    """Normalise a CR2 filename to its manifest 'frame' stem (p..i..d..).
+
+    Files come both d-first (d07_p01_i14) and p-first (p01_i14_d07); the
+    manifest uses p-first. Reorder to p-first if needed."""
+    stem = path.stem
+    parts = stem.split("_")
+    order = {p[0]: p for p in parts if p and p[0] in ("p", "i", "d")}
+    if {"p", "i", "d"} <= set(order):
+        return f"{order['p']}_{order['i']}_{order['d']}"
+    return stem
+
+
+def _exif_date_obs(path: Path):
+    """Fallback DATE-OBS from the CR2's own EXIF via rawpy (timestamp)."""
+    try:
+        with rawpy.imread(str(path)) as raw:
+            ts = getattr(raw, "timestamp", None)
+        if ts:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except Exception:
+        pass
+    return None
+
+
+def convert_one(cr2: Path, meta: dict, cfg, out_root: Path, force: bool):
+    """Convert one CR2 to a .fits.fz in the flat tree. Returns (status, dest)."""
+    # --- time ---
+    t = None
+    t_utc = (meta or {}).get("t_utc")
+    if t_utc:
+        try:
+            t = datetime.fromisoformat(t_utc.replace("Z", "+00:00"))
+        except ValueError:
+            t = None
+    if t is None:
+        t = _exif_date_obs(cr2)
+    if t is None:
+        return ("no-time", None)
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    t = t.astimezone(timezone.utc)
+
+    day = t.strftime("%Y-%m-%d")
+    hh = t.strftime("%H")
+    dest = out_root / day / hh / (t.strftime("%H-%M-%S") + ".fits.fz")
+    if dest.exists() and dest.stat().st_size > 0 and not force:
+        return ("skip", dest)
+
+    # --- exposure / gain ---
+    try:
+        exptime = float((meta or {}).get("secs") or cfg.capture["sub_exposure_s"])
+    except (TypeError, ValueError):
+        exptime = float(cfg.capture["sub_exposure_s"])
+    try:
+        iso = float((meta or {}).get("iso") or cfg.capture["iso"])
+    except (TypeError, ValueError):
+        iso = float(cfg.capture["iso"])
+    gain = iso / 100.0  # documented convention; see camera.json gain_from_iso_note
+
+    # --- pixels: raw Bayer mosaic, undemosaiced ---
+    with rawpy.imread(str(cr2)) as raw:
+        bayer = np.ascontiguousarray(raw.raw_image_visible.astype(np.uint16))
+    mean = float(bayer.mean())
+    per_s = mean / (exptime * gain) if exptime * gain else 0.0
+
+    # --- write, matching astro.capture.streaming's FITS contract ---
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    hdu = fits.CompImageHDU(data=bayer, compression_type="RICE_1")
+    h = hdu.header
+    h["EXPTIME"] = exptime
+    h["GAIN"] = gain
+    h["BAYERPAT"] = cfg.bayer
+    h["DATE-OBS"] = t.isoformat()
+    h["CAMERA"] = cfg.name
+    pi = cfg.get("position_index")
+    if pi is not None:
+        h["POSINDEX"] = (pi, "camera/lens generation")
+    h["MEAN"] = mean
+    h["PER_S"] = per_s
+    h["ISO"] = (iso, "Canon ISO; GAIN = ISO/100")
+    h["SRCFILE"] = (cr2.name, "adapted from CR2 by eos-cr2-to-fits")
+    fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp, overwrite=True)
+    os.replace(tmp, dest)
+    return ("write", dest)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--night", help="YYYY-MM-DD; used for src dir + reporting")
+    ap.add_argument("--src", help="source CR2 dir (default "
+                                  "~/tmp/canon-focus-nightly/<night>)")
+    ap.add_argument("--cr2", help="convert a single CR2 file")
+    ap.add_argument("--only-d", type=int, default=None,
+                    help="only convert frames at this focus d (sweep nights)")
+    ap.add_argument("--camera", default="canon")
+    ap.add_argument("--force", action="store_true",
+                    help="re-convert even if the target .fits.fz exists")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    out_root = cfg.frames_root
+
+    if args.cr2:
+        cr2s = [Path(args.cr2).expanduser()]
+        src_dir = cr2s[0].parent
+    else:
+        if not args.night:
+            ap.error("need --night (or --cr2)")
+        src_dir = Path(args.src).expanduser() if args.src \
+            else DEFAULT_SRC_ROOT / args.night
+        if not src_dir.is_dir():
+            ap.error(f"no source dir {src_dir}")
+        cr2s = sorted([Path(p) for p in
+                       glob.glob(str(src_dir / "*.cr2")) +
+                       glob.glob(str(src_dir / "*.CR2"))])
+
+    manifest = load_manifest(src_dir)
+
+    if args.only_d is not None:
+        def _d_of(p):
+            m = _D_RE.search(p.name)
+            return int(m.group(1)) if m else None
+        cr2s = [p for p in cr2s if _d_of(p) == args.only_d]
+
+    if not cr2s:
+        print(f"no CR2s to convert in {src_dir}"
+              + (f" at d{args.only_d}" if args.only_d is not None else ""),
+              file=sys.stderr)
+        return 1
+
+    print(f"canon adapt: {len(cr2s)} CR2 from {src_dir} -> {out_root}"
+          + (" [dry-run]" if args.dry_run else ""))
+    n_write = n_skip = n_fail = 0
+    for cr2 in cr2s:
+        meta = manifest.get(_canon_stem(cr2)) or manifest.get(cr2.stem)
+        if args.dry_run:
+            t_utc = (meta or {}).get("t_utc", "?")
+            print(f"  {cr2.name:28s} t={t_utc}")
+            continue
+        try:
+            status, dest = convert_one(cr2, meta, cfg, out_root, args.force)
+        except Exception as e:
+            print(f"  FAIL {cr2.name}: {e}", file=sys.stderr)
+            n_fail += 1
+            continue
+        if status == "write":
+            n_write += 1
+        elif status == "skip":
+            n_skip += 1
+        else:
+            n_fail += 1
+            print(f"  {status}: {cr2.name}", file=sys.stderr)
+
+    if not args.dry_run:
+        print(f"done: {n_write} written, {n_skip} skipped, {n_fail} failed")
+    return 1 if n_fail and not n_write else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
