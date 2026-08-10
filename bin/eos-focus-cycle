@@ -41,6 +41,10 @@ def gp(*a, t=45):
 # Resolve eos-power robustly — a systemd system service has a minimal PATH that
 # does NOT include ~/bin, so a bare "eos-power" raises FileNotFoundError (which
 # crashed the whole run + thrashed via Restart=always, 2026-07-25). Look it up
+# Per-run stamp (UTC, second resolution) prefixed to every frame stem so a
+# restart can never overwrite an earlier run's frames — see the stem= line.
+RUN_TAG = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
 # next to this script and in ~/bin, and always return None instead of raising.
 import shutil
 _EOS_POWER = (shutil.which("eos-power")
@@ -322,10 +326,18 @@ def capture(stem, wait):
     for attempt in range(2):
         gp("--set-config", "viewfinder=0", t=15)
         time.sleep(1.0)                       # settle after LV/drive
+        # RELEASE PROMPTLY, THEN download. The body's drive mode is Continuous
+        # Shooting, so a sustained full press = continuous fire: measured
+        # 2026-08-10, a 2s hold produced ~20 frames and a 1s hold 3, of which
+        # only ONE was ever downloaded — the rest were pure shutter wear on a
+        # body rated ~100k actuations. 0.2s fires exactly one frame. The old
+        # form held the press for the WHOLE download window ({wait}s, i.e. 30s+
+        # at night), which is far worse again.
         gp("--set-config", "eosremoterelease=Press Full",
+           "--wait-event=0.2s",
+           "--set-config", "eosremoterelease=Release Full",
            f"--wait-event-and-download={wait}s", "--filename", stem + ".%C",
            "--force-overwrite", t=wait + 25)
-        gp("--set-config", "eosremoterelease=Release Full", t=15)
         if _find(stem, ".cr2"):
             return True
         # failed — re-prime live view and retry once
@@ -432,6 +444,16 @@ def main():
                          "re-established ONLY at start and after a power cycle "
                          "(which resets the lens). Use when the focus hunt is "
                          "done and you want frames, not a V-curve.")
+    ap.add_argument("--no-focus", action="store_true",
+                    help="MANUAL-FOCUS MODE: never touch focus. No rack, no "
+                         "Near steps, not at startup and not after a power "
+                         "cycle. For a lens switched to MF and focused by hand "
+                         "(2026-08-10: viewfinder focus at 'marker 0' measured "
+                         "edge/std 0.151 vs 0.055 for the best driven attempt). "
+                         "manualfocusdrive is a no-op on MF anyway, and driving "
+                         "it alongside live view throws -110 'I/O in progress'. "
+                         "Frames are still named d00 so downstream parsing is "
+                         "unchanged.")
     ap.add_argument("--passes", type=int, default=0,
                     help="0 = loop the schedule until killed / until dawn")
     ap.add_argument("--no-jpeg", action="store_true",
@@ -475,7 +497,11 @@ def main():
     # no-op-drive risk on every single frame. Parked at a known-good d, we rack
     # ONCE (and again after any power cycle, which resets the lens) and then
     # just shoot. 30 frames/"pass" keeps the existing loop/logging structure.
-    if args.fixed_focus is not None:
+    if args.no_focus:
+        # Focus never changes, so d carries no information — but keep 30
+        # frames/pass so the loop, logging and filenames are unchanged.
+        schedule = [0] * 30
+    elif args.fixed_focus is not None:
         schedule = [args.fixed_focus] * 30
     else:
         schedule = ([int(x) for x in args.schedule.split(",")]
@@ -554,7 +580,12 @@ def main():
             # reached identically (hysteresis-consistent). Fixed-focus mode racks
             # only when focus is not already established — at start, and after a
             # power cycle, which drops the 12V rail and resets the lens.
-            if args.fixed_focus is None or not focus_set[0]:
+            if args.no_focus:
+                if not focus_set[0]:
+                    focus_set[0] = True
+                    print("  [focus] MANUAL — lens on MF, ring untouched all "
+                          "night", flush=True)
+            elif args.fixed_focus is None or not focus_set[0]:
                 # Fixed-focus parks ONCE for the night, so rack with margin.
                 if args.fixed_focus is not None:
                     rack_far_hard()
@@ -566,7 +597,14 @@ def main():
                     print(f"  [focus] parked at d{d} "
                           f"(12x Far-3 rack + {d}x Near-2); "
                           f"no re-rack until a reset", flush=True)
-            stem = os.path.join(args.out, f"p{p:02d}_i{i:02d}_d{d:02d}")
+            # RUN_TAG makes stems unique across restarts. Pass numbering
+            # restarts at 1 after any abort, so a re-run silently OVERWROTE the
+            # previous run's frames: 2,518 manifest rows -> 1,500 files on
+            # 2026-07-28 (~1,000 destroyed), and again on 2026-08-10 when a
+            # rehearsal clobbered the only frames containing an aircraft.
+            # Same-second restarts are impossible in practice (startup >> 1s).
+            stem = os.path.join(args.out,
+                                f"{RUN_TAG}_p{p:02d}_i{i:02d}_d{d:02d}")
             got = capture(stem, wait)
             if not got:
                 # NO FILE = the wedge tell. Try graduated recovery, then
@@ -585,19 +623,27 @@ def main():
                     # before the retry frame. Without this, fixed-focus mode
                     # would shoot the rest of the night at whatever position
                     # the lens powered up in.
-                    focus_set[0] = False
-                    # Same reasoning as the startup park: after a power cycle
-                    # the lens is at an unknown position and, in fixed-focus
-                    # mode, this re-park has to hold for the REST of the night.
-                    if args.fixed_focus is not None:
-                        rack_far_hard()
+                    # MANUAL mode: a power cycle does NOT disturb a hand-set
+                    # focus ring — it is mechanical. Re-racking here would
+                    # destroy the one good focus we have, so do nothing.
+                    if args.no_focus:
+                        print("  [focus] MANUAL — power cycle does not move "
+                              "the ring; not re-racking", flush=True)
                     else:
-                        rack_far()
-                    for _ in range(d): drive("Near", 2)
-                    focus_set[0] = True
-                    if args.fixed_focus is not None:
-                        print(f"  [focus] re-parked at d{d} after reset",
-                              flush=True)
+                        focus_set[0] = False
+                        # Same reasoning as the startup park: after a power
+                        # cycle the lens is at an unknown position and, in
+                        # fixed-focus mode, this re-park has to hold for the
+                        # REST of the night.
+                        if args.fixed_focus is not None:
+                            rack_far_hard()
+                        else:
+                            rack_far()
+                        for _ in range(d): drive("Near", 2)
+                        focus_set[0] = True
+                        if args.fixed_focus is not None:
+                            print(f"  [focus] re-parked at d{d} after reset",
+                                  flush=True)
                     got = capture(stem, wait)
             jpg = ""
             if got and not args.no_jpeg:

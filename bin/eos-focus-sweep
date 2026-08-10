@@ -88,15 +88,44 @@ def drive(direction, size, count, workdir):
 
 
 def capture(path, exposure_s):
-    """Fire without AF via remote release; one retry on failure."""
+    """Fire without AF via remote release; one retry on failure.
+
+    Press Full / Release Full — NOT "Immediate". Immediate wedges this body
+    (PTP Timeout, config reads and writes rejected while it stays enumerated;
+    only a 90s+ 12V pull clears it). Reproduced 2026-08-10 on a clean USB-C
+    path: this tool's daylight smoke test wedged the camera at step 2. The
+    old sequence was also mismatched — it pressed with Immediate but released
+    with "Release Full". Press must be held briefly (the shutter does not fire
+    on a 1s press) and then released explicitly.
+    """
     wait = int(exposure_s) + 8
-    cmd = (f"--set-config eosremoterelease=Immediate "
-           f"--wait-event-and-download={wait}s "
+    # 0.2s press, not 2s: the drive mode is Continuous Shooting, so a long full
+    # press fires continuously — a 2s hold gave ~20 frames (2026-08-10), all but
+    # one discarded, burning shutter life for nothing. 0.2s = exactly one frame.
+    cmd = (f'--set-config eosremoterelease="Press Full" '
+           f"--wait-event=0.2s "
            f'--set-config eosremoterelease="Release Full" '
+           f"--wait-event-and-download={wait}s "
            f"--force-overwrite --filename {path}")
+    def landed():
+        """True if a frame arrived. A held Press Full can fire a short burst,
+        and gphoto2 then suffixes the extra files, so the exact --filename may
+        not exist even though the capture worked. Accept any sibling match and
+        promote the first to the requested name."""
+        p = Path(path)
+        if p.exists():
+            return True
+        extras = sorted(p.parent.glob(p.stem + "*" + p.suffix))
+        if extras:
+            extras[0].rename(p)
+            for e in extras[1:]:
+                e.unlink()
+            return True
+        return False
+
     for attempt in (1, 2):
         gp(cmd, timeout=wait + 60)
-        if Path(path).exists():
+        if landed():
             return True
         if not camera_on_bus():
             sys.exit("Camera dropped off the USB bus — check the cable, "
