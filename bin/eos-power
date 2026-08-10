@@ -47,7 +47,16 @@ MATTER_NODE = 7                           # Realwe Innovation plug (node 7)
 MATTER_VENDOR = "Realwe"                  # 0/40/1 substring, case-insensitive
 PLUG_ON_POWERS_CAMERA = True              # plug ON = mains up = camera powered
 ONOFF_CLUSTER = 6                         # Matter On/Off cluster id
-CYCLE_SECS = 10            # STATE: pull ~10s to drop the logic rail
+# 90s, NOT 10s. 10s is enough to make the camera re-enumerate with a new USB
+# Dev number, which is why it looked sufficient (verified 2026-07-26) — but
+# re-enumeration is NOT the same as clearing a Class-B firmware wedge. Measured
+# 2026-08-09 on a real 0x2019/-110 wedge: cycles at 10s, 25s and 30s each gave a
+# NEW Dev number and each left config writes still rejected; only a 90s pull
+# cleared it. The dummy-battery adapter's caps hold the logic rail up long after
+# the USB interface has dropped. So a changed Dev proves mains fell, not that
+# the camera reset — and the historical "post-cycle: STILL WEDGED" results were
+# probably just too-short pulls.
+CYCLE_SECS = 90
 
 def _configured():
     return MATTER_WS is not None and MATTER_NODE is not None

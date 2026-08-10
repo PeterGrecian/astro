@@ -49,9 +49,16 @@ if not (os.path.isfile(_EOS_POWER) and os.access(_EOS_POWER, os.X_OK)):
     _hb = os.path.expanduser("~/bin/eos-power")
     _EOS_POWER = _hb if os.access(_hb, os.X_OK) else None
 
-def _eos_power(*a, t=60):
+def _eos_power(*a, t=420):
     """Run eos-power <args>; return the CompletedProcess, or None if the binary
-    is missing / not runnable (never raises)."""
+    is missing / not runnable / TIMED OUT (never raises).
+
+    t defaults to 420s because a `cycle` now holds the rail down for
+    CYCLE_SECS=90 (and the escalation path asks for 180), plus re-enumeration
+    and the Dev-number verification. The old t=60 was shorter than the cycle
+    itself, so every power cycle was killed mid-pull and reported to the caller
+    as "not found" — the reset never completed and the night was lost
+    (observed live 2026-08-09 22:11)."""
     if _EOS_POWER is None:
         return None
     try:
@@ -107,7 +114,24 @@ def prime():
     time.sleep(0.4); _drive("Far", 3)
 
 def rack_far(n=6):
+    """Drive to the far (infinity) hard stop — the only absolute reference the
+    lens has. Steps beyond the stop are harmless no-ops (that IS what pinned
+    means), so over-driving costs only time and buys certainty.
+
+    n=6 is enough for the focus-hunt schedule, which re-racks before EVERY frame
+    (a rack that fails to pin spoils one frame). In FIXED-FOCUS mode the rack
+    happens once for the whole night, so a rack that doesn't reach the stop
+    parks every frame at the wrong place, silently, until dawn — see
+    rack_far_hard()."""
     for _ in range(n): drive("Far", 3)
+
+def rack_far_hard():
+    """Rack with margin, for the once-per-night park. 12x Far 3 is ~2x the
+    lens's full travel from anywhere it could plausibly have powered up, so
+    pinning is near-certain. The camera exposes NO absolute focus readout
+    (manualfocusdrive is a relative action that always reads 'None'), so this
+    over-drive is the only way to be confident where the lens actually is."""
+    rack_far(12)
 
 # ---- wedge detection + graduated recovery -----------------------------------
 # Past behaviour is BIMODAL, not a spectrum (astro-canon STATE, Reset ladder):
@@ -211,7 +235,8 @@ def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
         # / binary missing). The smart-plug chain is not generally reliable, so
         # Slack Peter — the reset didn't even run. Degrade gracefully, NEVER
         # crash (a crash + Restart=always thrashes all night; 2026-07-25).
-        why = "not found" if pc is None else pc.stderr.strip()[:160]
+        why = ("not found / timed out" if pc is None
+               else pc.stderr.strip()[:160])
         print(f"  [recover] power-cycle command FAILED ({why})", flush=True)
         slack("EOS power-cycle FAILED to run — camera still wedged",
               detail=(f"eos-power cycle did not execute ({why}). Smart-plug "
@@ -231,6 +256,30 @@ def recover(iso, aperture, secs, grace=60, poll=15, power_cycle=True,
        "--set-config", f"aperture={aperture}",
        "--set-config", f"shutterspeed={secs}", t=25)
     ok = not wedged()
+    if not ok:
+        # STILL WEDGED after the default pull. Before giving up, try ONE much
+        # longer rail-down. Measured 2026-08-09 on a real 0x2019/-110 wedge:
+        # 10s/25s/30s pulls each re-enumerated the camera and each left it
+        # wedged; 180s cleared it. The adapter's caps hold the logic rail up
+        # long after USB drops, so "didn't clear" often just means "too short".
+        # This costs one extra relay click and ~3 min, against losing the night.
+        print("  [recover] still wedged — retrying with a LONG 180s rail-down",
+              flush=True)
+        pc2 = _eos_power("cycle", "--secs", "180")
+        if pc2 is not None and pc2.returncode == 0:
+            for _ in range(20):
+                time.sleep(3)
+                st = _eos_power("status")
+                if st is not None and st.returncode == 0:
+                    break
+            time.sleep(3)
+            prime()
+            gp("--set-config", "imageformat=RAW", "--set-config", f"iso={iso}",
+               "--set-config", f"aperture={aperture}",
+               "--set-config", f"shutterspeed={secs}", t=25)
+            ok = not wedged()
+            print(f"  [recover] after long pull: "
+                  f"{'RECOVERED' if ok else 'STILL WEDGED'}", flush=True)
     print(f"  [recover] post-cycle: {'RECOVERED' if ok else 'STILL WEDGED'}",
           flush=True)
     if not ok:
@@ -377,10 +426,21 @@ def main():
                          "hard stop). Default = peak-hunt 30-image pass "
                          "(pairs ~3 min apart, d=5..15). Pass the old "
                          "d=0..9 comb explicitly if hunting below d5.")
+    ap.add_argument("--fixed-focus", type=int, default=None, metavar="D",
+                    help="DELIVERABLES MODE: park focus at d=D once, then shoot "
+                         "every frame there — no per-frame re-rack. Focus is "
+                         "re-established ONLY at start and after a power cycle "
+                         "(which resets the lens). Use when the focus hunt is "
+                         "done and you want frames, not a V-curve.")
     ap.add_argument("--passes", type=int, default=0,
                     help="0 = loop the schedule until killed / until dawn")
     ap.add_argument("--no-jpeg", action="store_true",
                     help="skip boosted-JPEG delivery (raws only)")
+    ap.add_argument("--jpeg-dir", default=None, metavar="DIR",
+                    help="deliver JPEGs under DIR/<night>/jpeg instead of "
+                         "beside the raws — point at the NFS-exported bigstore "
+                         "to view them live from pip with no rsync. Raws still "
+                         "go to --out. Falls back to local if DIR is unwritable.")
     ap.add_argument("--no-sun-gate", action="store_true",
                     help="start immediately; do NOT wait for astronomical dark")
     ap.add_argument("--night-alt", type=float, default=-12.0,
@@ -409,8 +469,17 @@ def main():
     if not args.no_jpeg:
         os.makedirs(jpg_dir, exist_ok=True)
 
-    schedule = ([int(x) for x in args.schedule.split(",")]
-                if args.schedule else DEFAULT_D_SCHEDULE)
+    # Fixed-focus (deliverables) mode: one setpoint, repeated. The per-frame
+    # re-rack is what makes the focus-hunt schedule hysteresis-consistent, but
+    # it costs ~45s/frame of drive overhead and re-exposes the lens to the
+    # no-op-drive risk on every single frame. Parked at a known-good d, we rack
+    # ONCE (and again after any power cycle, which resets the lens) and then
+    # just shoot. 30 frames/"pass" keeps the existing loop/logging structure.
+    if args.fixed_focus is not None:
+        schedule = [args.fixed_focus] * 30
+    else:
+        schedule = ([int(x) for x in args.schedule.split(",")]
+                    if args.schedule else DEFAULT_D_SCHEDULE)
 
     # --- gate on astronomical dark FIRST (astrocam-style sunset table) -------
     # so a persistent service sleeps through the day, then wakes at dusk.
@@ -430,6 +499,28 @@ def main():
         jpg_dir = os.path.join(args.out, "jpeg")
         if not args.no_jpeg:
             os.makedirs(jpg_dir, exist_ok=True)
+
+    # Deliver the JPEGs somewhere else (typically the NFS-exported bigstore) so
+    # they can be viewed LIVE from pip with no rsync step. Peter's judgement of
+    # the frames by eye is the primary quality signal on this camera, so the
+    # viewing path must be frictionless. Raws still go to --out (the local nvme,
+    # which never drops off the bus), so capture keeps its safe local write and
+    # only the small JPEGs cross the network.
+    if args.jpeg_dir and not args.no_jpeg:
+        # Mirror the night-dir layout of --out (…/<YYYY-MM-DD>/jpeg) so nights
+        # stay separated on the share exactly as they are locally.
+        jpg_dir = os.path.join(args.jpeg_dir, os.path.basename(args.out), "jpeg")
+        try:
+            os.makedirs(jpg_dir, exist_ok=True)
+        except OSError as ex:
+            # NEVER let a missing/unwritable share stop the capture — fall back
+            # to the local dir and carry on. Losing the live view is an
+            # inconvenience; losing the night is not.
+            print(f"  [jpeg] {args.jpeg_dir} unusable ({ex}); "
+                  f"delivering locally instead", flush=True)
+            jpg_dir = os.path.join(args.out, "jpeg")
+            os.makedirs(jpg_dir, exist_ok=True)
+        print(f"  [jpeg] delivering JPEGs -> {jpg_dir}", flush=True)
 
     man = open(os.path.join(args.out, "manifest.csv"), "a", newline="")
     w = csv.writer(man)
@@ -452,13 +543,29 @@ def main():
 
     p = 0
     consec_fail = 0
+    # Fixed-focus mode only: has the parked focus been established since the
+    # last lens reset? 1-element list so the recovery path can clear it.
+    focus_set = [False]
     while True:
         p += 1
         print(f"=== pass {p} ===", flush=True)
         for i, d in enumerate(schedule):
-            # re-rack + re-approach this d fresh (hysteresis-consistent)
-            rack_far()
-            for _ in range(d): drive("Near", 2)
+            # Focus-hunt mode re-racks + re-approaches EVERY frame, so each d is
+            # reached identically (hysteresis-consistent). Fixed-focus mode racks
+            # only when focus is not already established — at start, and after a
+            # power cycle, which drops the 12V rail and resets the lens.
+            if args.fixed_focus is None or not focus_set[0]:
+                # Fixed-focus parks ONCE for the night, so rack with margin.
+                if args.fixed_focus is not None:
+                    rack_far_hard()
+                else:
+                    rack_far()
+                for _ in range(d): drive("Near", 2)
+                if args.fixed_focus is not None:
+                    focus_set[0] = True
+                    print(f"  [focus] parked at d{d} "
+                          f"(12x Far-3 rack + {d}x Near-2); "
+                          f"no re-rack until a reset", flush=True)
             stem = os.path.join(args.out, f"p{p:02d}_i{i:02d}_d{d:02d}")
             got = capture(stem, wait)
             if not got:
@@ -473,8 +580,24 @@ def main():
                            power_cycle=not args.no_power_cycle,
                            power_budget=power_budget,
                            force=(consec_fail == 2)):
-                    rack_far()
+                    # Recovery may have power-cycled, which RESETS THE LENS —
+                    # so the parked focus is gone and must be re-established
+                    # before the retry frame. Without this, fixed-focus mode
+                    # would shoot the rest of the night at whatever position
+                    # the lens powered up in.
+                    focus_set[0] = False
+                    # Same reasoning as the startup park: after a power cycle
+                    # the lens is at an unknown position and, in fixed-focus
+                    # mode, this re-park has to hold for the REST of the night.
+                    if args.fixed_focus is not None:
+                        rack_far_hard()
+                    else:
+                        rack_far()
                     for _ in range(d): drive("Near", 2)
+                    focus_set[0] = True
+                    if args.fixed_focus is not None:
+                        print(f"  [focus] re-parked at d{d} after reset",
+                              flush=True)
                     got = capture(stem, wait)
             jpg = ""
             if got and not args.no_jpeg:
