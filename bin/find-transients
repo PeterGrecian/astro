@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""find-transients — detect meteors and satellites in a night's raw subs.
+
+WHY THIS RUNS ON SUBS, NOT SWEEP FRAMES
+---------------------------------------
+A sweep frame is a 10-minute STACK. Stacking destroys exactly the evidence
+that classifies a streak:
+  - it smears the brightness profile flat, so a meteor's ablation curve
+    (dim -> bright -> dim) looks like a satellite's steady trail;
+  - it merges 10+ minutes, so two streaks in one frame may be simultaneous
+    or 10 minutes apart -- you cannot tell.
+Both mistakes were made by hand on 2026-08-10 before falling back to the
+individual subs. So this tool reads SUBS and never sweep output.
+
+CLASSIFICATION (Peter's discriminator, 2026-08-11)
+--------------------------------------------------
+The primary test is GEOMETRIC, not photometric, because it survives
+saturation (JPEG cores clip at 255 and kill the profile):
+
+  SATELLITE : the streak ENTERS and/or LEAVES the frame -- it crosses the
+              field of view, so at least one end touches the border. It is
+              also usually present in CONSECUTIVE subs, stepping across.
+  METEOR    : the streak STARTS AND STOPS INSIDE the frame -- it ignites
+              and burns out within the field, so both ends are interior.
+              It appears in EXACTLY ONE sub (sub-second event).
+
+Secondary evidence, used to score confidence rather than to decide:
+  - single-sub presence (meteor) vs multi-sub persistence (satellite);
+  - non-sidereal angle: the streak departs from the local star-trail
+    direction, which is what the accumulator's outlier rejection already
+    tests for ("stars obey the rotation, everything else doesn't");
+  - symmetric brightness taper along the streak (meteor ablation);
+  - solar altitude: below about -18 deg Earth's shadow reaches past most
+    LEO, so a sunlit satellite is unlikely -- see solar_altitude().
+
+The star trails themselves are the main false positive. On a fixed camera
+they are LONG, and near the field edge they can rival a meteor, so a bare
+length cut does not work (it flagged 42 eclipticam frames of pure trails).
+They are rejected by (a) sidereal angle agreement with their neighbours and
+(b) persistence across subs -- a trail is in every frame, a meteor in one.
+
+USAGE
+    find-transients --camera canon --night 2026-08-10
+    find-transients --camera astrocam --night 2026-08-10 --jobs 4
+    find-transients --camera eclipticam-v3w --night 2026-08-10 --save-cutouts
+    find-transients --camera canon --nights 2026-08-04..2026-08-11   # a week
+
+Writes <night_dir>/transients.json and, with --save-cutouts, a PNG per
+candidate. Prints a table sorted by confidence.
+"""
+import argparse
+import json
+import math
+import os
+import sys
+from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.frames import list_night_frames, night_output_dir
+
+# --- tunables -------------------------------------------------------------
+MIN_LEN_PX = 40        # shorter than this is a star/hot pixel, not a streak
+MIN_ELONG = 6.0        # length/width; a streak is thin
+SIGMA = 6.0            # detection threshold above local background
+BORDER_PX = 12         # within this of the edge counts as "touching"
+BG_BOX = 41            # local background box for flattening
+
+
+def solar_altitude(t: datetime, lat_deg: float = 51.39,
+                   lon_deg: float = -0.29) -> float:
+    """Approximate solar altitude in degrees. Used to judge whether a
+    satellite could be sunlit at all: below about -18 deg the Earth's
+    shadow reaches past most of LEO (~330 km at -18, ~560 km at -23),
+    which excludes Starlink (~550 km) and the ISS (~420 km)."""
+    lat = math.radians(lat_deg)
+    n = (t - datetime(2000, 1, 1, 12, tzinfo=timezone.utc)).total_seconds() / 86400.0
+    L = (280.460 + 0.9856474 * n) % 360
+    g = math.radians((357.528 + 0.9856003 * n) % 360)
+    lam = math.radians(L + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g))
+    eps = math.radians(23.439 - 0.0000004 * n)
+    dec = math.asin(math.sin(eps) * math.sin(lam))
+    ra = math.atan2(math.cos(eps) * math.sin(lam), math.cos(lam))
+    gmst = (18.697374558 + 24.06570982441908 * n) % 24
+    lst = math.radians((gmst * 15 + lon_deg) % 360)
+    H = lst - ra
+    return math.degrees(math.asin(
+        math.sin(lat) * math.sin(dec) +
+        math.cos(lat) * math.cos(dec) * math.cos(H)))
+
+
+def shadow_height_km(sun_alt_deg: float) -> float:
+    """How high Earth's shadow reaches for a given (negative) solar altitude."""
+    if sun_alt_deg >= 0:
+        return 0.0
+    A = math.radians(-sun_alt_deg)
+    return 6371.0 * (1.0 / math.cos(A) - 1.0)
+
+
+def _load_luma(path: Path):
+    """Read a frame as a 2-D float array, whatever the format.
+
+    FITS keeps full dynamic range (no clipped core), which matters for the
+    taper measurement; JPEG is accepted so live/preview trees work too.
+    """
+    p = str(path)
+    if p.endswith((".fits", ".fits.fz", ".fz")):
+        from astropy.io import fits
+        with fits.open(p) as hd:
+            for h in hd:
+                if getattr(h, "data", None) is not None and h.data.ndim == 2:
+                    a = h.data.astype(np.float32)
+                    break
+            else:
+                return None
+        # 2x2 bin a Bayer mosaic to approximate luminance
+        h_, w_ = a.shape
+        a = a[:h_ // 2 * 2, :w_ // 2 * 2]
+        return a.reshape(h_ // 2, 2, w_ // 2, 2).mean(axis=(1, 3))
+    from PIL import Image
+    return np.asarray(Image.open(p).convert("L"), dtype=np.float32)
+
+
+def find_streaks(img: np.ndarray):
+    """Return candidate streaks in one frame as dicts of geometry."""
+    from scipy import ndimage
+    bg = ndimage.uniform_filter(img, BG_BOX)
+    d = img - bg
+    sd = float(d.std()) or 1.0
+    mask = d > max(SIGMA * sd, 8.0)
+    mask = ndimage.binary_closing(mask, np.ones((3, 3)))
+    lbl, _ = ndimage.label(mask, np.ones((3, 3)))
+    H, W = img.shape
+    out = []
+    for i, sl in enumerate(ndimage.find_objects(lbl), start=1):
+        blob = lbl[sl] == i
+        npix = int(blob.sum())
+        if npix < 25:
+            continue
+        ys, xs = np.nonzero(blob)
+        ys = ys + sl[0].start
+        xs = xs + sl[1].start
+        x0, y0 = float(xs.mean()), float(ys.mean())
+        cov = np.cov(np.stack([xs - x0, ys - y0]))
+        if cov.shape != (2, 2):
+            continue
+        ev, evec = np.linalg.eigh(cov)
+        if ev[0] <= 0:
+            ev[0] = 1e-6
+        elong = float((ev[-1] / ev[0]) ** 0.5)
+        length = float(4.0 * math.sqrt(max(ev[-1], 0)))
+        if length < MIN_LEN_PX or elong < MIN_ELONG:
+            continue
+        u = evec[:, -1]
+        ang = math.degrees(math.atan2(u[1], u[0])) % 180.0
+        t = (xs - x0) * u[0] + (ys - y0) * u[1]
+        x_a, y_a = x0 + u[0] * t.min(), y0 + u[1] * t.min()
+        x_b, y_b = x0 + u[0] * t.max(), y0 + u[1] * t.max()
+
+        def touches(x, y):
+            return (x < BORDER_PX or y < BORDER_PX or
+                    x > W - BORDER_PX or y > H - BORDER_PX)
+
+        ends_touching = int(touches(x_a, y_a)) + int(touches(x_b, y_b))
+
+        # brightness taper along the streak, from the UNSATURATED wings:
+        # integrate perpendicular flux in slices. A meteor is
+        # dim->bright->dim; a satellite is flat.
+        prof = []
+        p = evec[:, 0]
+        for s in np.linspace(t.min(), t.max(), 12):
+            cx, cy = x0 + u[0] * s, y0 + u[1] * s
+            acc = 0.0
+            for q in np.arange(-6, 6.5, 1.0):
+                X, Y = int(round(cx + p[0] * q)), int(round(cy + p[1] * q))
+                if 0 <= Y < H and 0 <= X < W:
+                    v = d[Y, X]
+                    if v > 0:
+                        acc += float(v)
+            prof.append(acc)
+        prof = np.array(prof)
+        ends = float(max(np.mean(prof[:2]), 1.0))
+        mid = float(np.mean(prof[4:8]))
+        taper = mid / ends            # >1.3 => brightens in the middle
+        out.append(dict(
+            x=x0, y=y0, length_px=length, elong=elong, angle_deg=ang,
+            npix=npix, ends_touching=ends_touching, taper=float(taper),
+            peak=float(d[ys, xs].max()),
+            ax=float(x_a), ay=float(y_a), bx=float(x_b), by=float(y_b),
+            profile=[float(v) for v in prof],
+        ))
+    return out
+
+
+def _scan_one(args):
+    idx, path, tiso = args
+    try:
+        img = _load_luma(Path(path))
+        if img is None:
+            return idx, path, tiso, []
+        return idx, path, tiso, find_streaks(img)
+    except Exception as e:                      # never let one frame kill a run
+        return idx, path, tiso, [{"error": str(e)}]
+
+
+def classify(streak, persists, sun_alt):
+    """Return (verdict, confidence 0-1, reasons)."""
+    r = []
+    score = 0.0
+    if streak["ends_touching"] == 0:
+        score += 0.45
+        r.append("both ends interior (starts+stops in frame)")
+    elif streak["ends_touching"] == 1:
+        score += 0.10
+        r.append("one end at border")
+    else:
+        score -= 0.35
+        r.append("crosses frame (both ends at border)")
+
+    if persists <= 1:
+        score += 0.30
+        r.append("single sub")
+    else:
+        score -= 0.30
+        r.append(f"present in {persists} consecutive subs")
+
+    if streak["taper"] > 1.3:
+        score += 0.15
+        r.append(f"tapered profile (mid/ends {streak['taper']:.2f})")
+    elif streak["taper"] < 1.05:
+        score -= 0.10
+        r.append(f"flat profile ({streak['taper']:.2f})")
+
+    if sun_alt is not None and sun_alt < -18:
+        score += 0.10
+        r.append(f"sun {sun_alt:.0f} deg: shadow ~"
+                 f"{shadow_height_km(sun_alt):.0f} km, LEO unlit")
+
+    score = max(0.0, min(1.0, score))
+    verdict = ("meteor" if score >= 0.6 else
+               "satellite" if score <= 0.35 else "uncertain")
+    return verdict, score, r
+
+
+def scan_night(cfg, night, jobs, save_cutouts, limit=None):
+    frames = list_night_frames(cfg, night)
+    if limit:
+        frames = frames[:limit]
+    if not frames:
+        print(f"  {night}: no frames")
+        return []
+    print(f"  {night}: {len(frames)} subs", flush=True)
+    tasks = [(i, str(p), t.isoformat()) for i, (t, p) in enumerate(frames)]
+    results = []
+    if jobs > 1:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            for out in ex.map(_scan_one, tasks, chunksize=4):
+                results.append(out)
+    else:
+        results = [_scan_one(t) for t in tasks]
+    results.sort()
+
+    # persistence: a streak at the same place+angle in the next sub is a
+    # satellite or a star trail, not a meteor.
+    def same(a, b):
+        return (abs(a["x"] - b["x"]) < 40 and abs(a["y"] - b["y"]) < 40 and
+                min(abs(a["angle_deg"] - b["angle_deg"]),
+                    180 - abs(a["angle_deg"] - b["angle_deg"])) < 12)
+
+    cands = []
+    for k, (idx, path, tiso, streaks) in enumerate(results):
+        for s in streaks:
+            if "error" in s:
+                continue
+            persists = 1
+            for j in (k - 1, k + 1):
+                if 0 <= j < len(results):
+                    if any(same(s, o) for o in results[j][3] if "error" not in o):
+                        persists += 1
+            t = datetime.fromisoformat(tiso)
+            sun = solar_altitude(t)
+            verdict, conf, reasons = classify(s, persists, sun)
+            cands.append(dict(
+                t_utc=tiso, frame=os.path.basename(path), frame_path=path,
+                verdict=verdict, confidence=round(conf, 2), persists=persists,
+                sun_alt_deg=round(sun, 1), reasons=reasons, **s))
+    return cands
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--night", help="YYYY-MM-DD")
+    ap.add_argument("--nights", help="YYYY-MM-DD..YYYY-MM-DD inclusive")
+    ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    ap.add_argument("--save-cutouts", action="store_true",
+                    help="write a PNG per candidate next to transients.json")
+    ap.add_argument("--limit", type=int, help="only the first N subs (testing)")
+    ap.add_argument("--min-confidence", type=float, default=0.0)
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    if args.nights:
+        a, b = args.nights.split("..")
+        d0 = datetime.strptime(a, "%Y-%m-%d")
+        d1 = datetime.strptime(b, "%Y-%m-%d")
+        nights = [(d0 + timedelta(days=i)).strftime("%Y-%m-%d")
+                  for i in range((d1 - d0).days + 1)]
+    elif args.night:
+        nights = [args.night]
+    else:
+        ap.error("need --night or --nights")
+
+    print(f"find-transients: camera={args.camera} jobs={args.jobs}")
+    grand = []
+    for night in nights:
+        cands = scan_night(cfg, night, args.jobs, args.save_cutouts, args.limit)
+        cands = [c for c in cands if c["confidence"] >= args.min_confidence]
+        if cands:
+            try:
+                out_dir = Path(night_output_dir(cfg, night))
+            except Exception:
+                out_dir = Path(cfg.frames_root) / night
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = out_dir / "transients.json"
+            out.write_text(json.dumps(
+                {"camera": args.camera, "night": night,
+                 "generated_utc": datetime.now(timezone.utc).isoformat(),
+                 "n_candidates": len(cands), "candidates": cands}, indent=1))
+            print(f"    wrote {out} ({len(cands)} candidates)")
+            if args.save_cutouts:
+                save_cutouts(cands, out_dir)
+        grand += [dict(night=night, **c) for c in cands]
+
+    if not grand:
+        print("no candidates")
+        return 0
+    grand.sort(key=lambda c: -c["confidence"])
+    print(f"\n{'night':11} {'time UTC':9} {'verdict':10} {'conf':>5} "
+          f"{'len':>6} {'ang':>6} {'ends':>5} {'subs':>5}")
+    for c in grand[:60]:
+        print(f"{c['night']:11} {c['t_utc'][11:19]:9} {c['verdict']:10} "
+              f"{c['confidence']:5.2f} {c['length_px']:6.0f} "
+              f"{c['angle_deg']:6.1f} {c['ends_touching']:5d} {c['persists']:5d}")
+    n_m = sum(1 for c in grand if c["verdict"] == "meteor")
+    n_s = sum(1 for c in grand if c["verdict"] == "satellite")
+    print(f"\n{n_m} meteor, {n_s} satellite, "
+          f"{len(grand)-n_m-n_s} uncertain, {len(grand)} total")
+    return 0
+
+
+def save_cutouts(cands, out_dir):
+    """Write a small PNG around each candidate for eyeball verification."""
+    from PIL import Image
+    cut = out_dir / "transient-cutouts"
+    cut.mkdir(exist_ok=True)
+    for n, c in enumerate(cands):
+        try:
+            img = _load_luma(Path(c["frame_path"]))
+            if img is None:
+                continue
+            lo, hi = np.percentile(img, [20, 99.9])
+            v = np.clip((img - lo) / max(hi - lo, 1) * 255, 0, 255).astype(np.uint8)
+            H, W = v.shape
+            x, y = int(c["x"]), int(c["y"])
+            m = int(max(120, c["length_px"]))
+            box = (max(0, x - m), max(0, y - m), min(W, x + m), min(H, y + m))
+            name = f"{n:03d}_{c['verdict']}_{c['t_utc'][11:19].replace(':','')}.png"
+            Image.fromarray(v).crop(box).save(cut / name)
+        except Exception:
+            continue
+    print(f"    cutouts -> {cut}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
