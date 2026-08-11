@@ -345,8 +345,21 @@ def main() -> int:
     cmd = ["ffmpeg", "-y", "-loglevel", "error",
            "-threads", str(_threads),
            "-framerate", str(args.fps),
-           "-i", str(frames_dir / "frame_%05d.jpg"),
+           # GLOB, not frame_%05d: a sequential pattern stops dead at the first
+           # numbering gap, and gaps are NORMAL — a window with no frames in it
+           # (a real capture gap in the night) is skipped, leaving a hole. The
+           # canon 2026-08-10 night had one at 207-215 (01:27-01:37 UTC), which
+           # silently truncated the encode at 207/329 frames. diff-sweep already
+           # globs for this reason.
+           "-pattern_type", "glob",
+           "-i", str(frames_dir / "frame_*.jpg"),
            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+           # libx264 requires EVEN dimensions. Most sensors are even, but the
+           # EOS 2000D is 6020x4015 — an odd row count — so its half-size web
+           # render is 3010x2007 and the encoder refuses ("height not divisible
+           # by 2"), yielding a 0-byte mp4. Round down to even; a no-op for
+           # already-even sizes.
+           "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
            "-crf", "20", "-preset", _preset]
     if _x264:
         cmd += ["-x264-params", _x264]

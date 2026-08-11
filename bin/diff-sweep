@@ -375,6 +375,10 @@ def main() -> int:
                              "-pattern_type", "glob",
                              "-i", str(frames_dir / "frame_*.jpg"),
                              "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                             # libx264 needs EVEN dimensions; the EOS 2000D's
+                             # 6020x4015 sensor renders 3010x2007 and the
+                             # encoder refuses. Round down; no-op when even.
+                             "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
                              "-crf", "20", "-preset", _preset,
                              str(out_mp4)], check=False).returncode
         if rc != 0 or not out_mp4.exists():
