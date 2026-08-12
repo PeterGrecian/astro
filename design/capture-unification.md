@@ -1,7 +1,90 @@
 # Capture unification — design notes
 
-**Status**: design, not implemented beyond the eclipticam v3w streaming
-daemon that landed on 2026-06-15.
+**Status** (re-checked 2026-08-12, owned by the `astro-capture` strand):
+partly implemented. The old status line ("design, not implemented beyond
+the eclipticam v3w streaming daemon", 2026-06-15) understated it — two
+live cameras now share the streaming engine:
+
+| Piece | State |
+|---|---|
+| `astro/capture/streaming.py` | ✔ exists |
+| eclipticam v3w on the shared module | ✔ `eclipticam/v3w_night_daemon.py` |
+| **astrocam on the shared module** (migration step 1) | ✔ **done** — `astrocam/astrocam_v3_night_daemon.py` is a thin wrapper; imx219 `astrocam/capture.py` retired 2026-07-29 |
+| starcam (step 3) | ✘ **moot — camera decommissioned 2026-08-02** |
+| skycam (step 4) | ✘ still in `Berrylands/gardencam` |
+| eclipticam v1 | ✘ hand-rolled, does not import the shared module |
+| `uploader.py` / `modes.py` / `host.py` / `__main__.py` | ✘ not written; `astro/capture/` holds only `__init__.py` + `streaming.py` |
+
+**Direction correction — share the conventions, not the code path**
+(Peter, 2026-08-11). "Target shape" and "Migration order" below are
+written bottom-up-by-absorption: one generic engine that each camera is
+*migrated into* until per-camera dirs hold only `camera.json`. That is
+not the model. The per-camera work is legitimately and permanently
+camera-specific and **stays put**; the unified pipeline is assembled
+**from** those parts by *wrapping* them. Unification is a layer over the
+device work, not a solvent that dissolves it.
+
+Consequences: the EOS 2000D (gphoto2/USB) is not an awkward exception
+but the normal case seen clearly — it has its own mechanism, as every
+camera does. `streaming.py` is demoted from "the engine" to *one shared
+implementation*, the thing the two picamera2 cameras happen to have in
+common. The remaining migrations (v1, skycam) still stand, but because
+those are Pi cameras that would genuinely share that mechanism — not
+because everything must end up in the module. The real substance of the
+unified layer is the **conventions**, below.
+
+## The conventions — what actually binds every camera
+
+These hold across gphoto2/USB and picamera2/CSI alike, and none of them
+requires a shared code path. This is the unified layer's real content.
+
+**1. A frame name is never reused.** A capture run that restarts must
+not overwrite frames from an earlier run of the same night. Restart-safe
+naming is the rule; how a camera achieves it is its own business.
+
+**2. One capture = one frame.** A single logical capture must fire the
+shutter exactly once. (The canon violated this on 08-10: Continuous
+Shooting drive mode meant holding the full press fired ~20 frames of
+which one was downloaded — pure shutter wear on a body rated ~100k
+actuations.)
+
+### Audit: frame naming across all five cameras (2026-08-12)
+
+Prompted by the canon's 08-10 restart-collision bug (pass numbering
+restarted at 1 after an abort, so a re-run silently overwrote the
+previous run — this destroyed ~1,000 frames on 07-28 and, on 08-10, the
+only frames containing an aircraft). The question was whether the Pi
+daemons carry the same latent bug. **They do not** — but they satisfy
+rule 1 by three different mechanisms, none of them a shared one:
+
+| Camera | Naming | Restart-safe? | Mechanism |
+|---|---|---|---|
+| astrocam (imx708) | `<epoch_ms>.fits.fz` | ✔ | monotonic wall clock |
+| eclipticam v3w | `<epoch_ms>.fits.fz` | ✔ | same (shared `streaming.py`) |
+| skycam | `<epoch_ms>.jpg` | ✔ | same convention, **independently arrived at** in `Berrylands/gardencam` |
+| eclipticam v1 | `NNNN.fits.fz` per hour dir | ✔ | scans the dir for `max(seq)+1` on every write — continues rather than restarts |
+| **EOS 2000D** | `<RUN_TAG>_pNN_iNN_dNN` | ✔ | per-run UTC `RUN_TAG` stamped into the stem |
+
+So the estate is currently **sound on rule 1**, and the run-tag audit's
+finding is not a bug list but a convention observation: `epoch_ms` is the
+de-facto house naming convention — three cameras converged on it
+independently, and it is carried unchanged through the upload seam
+(`astrocam_v3_uploader.py` files by `epoch_ms` into
+`<night>/HH/<epoch_ms>.fits.fz`, no renumbering). The `RUN_TAG` scheme
+in `bin/eos-focus-cycle` is the DSLR's answer to the same rule, needed
+because gphoto2 pass/index numbering restarts where a clock does not.
+
+Verified empirically on astrocam 2026-08-11: 426 frames, 426 distinct
+names, minimum inter-frame gap 59.79 s against a 1 ms name resolution.
+
+**The one theoretical hole**, recorded rather than fixed: `epoch_ms` is
+read from `time.time()` at capture, so two frames landing inside the
+same millisecond would collide, and the writer does not check
+(`writeto(..., overwrite=True)` then rename). At the cameras' real
+cadences (~60 s) the margin is ~5 orders of magnitude, so this is not
+worth code today. It becomes real only if a camera ever runs a fast
+burst, or if the wall clock steps backwards (NTP correction mid-night).
+**If a burst mode is ever added, this must be revisited first.**
 
 **Why this exists**: today we have three Pi-side capture codebases
 (eclipticam, astrocam, skycam — the last two living in
@@ -62,6 +145,12 @@ Two operational notes:
   start-of-night / stop-at-dawn while everything else stays unified.
 
 ## Target shape
+
+> **Read with the direction correction at the top.** This section is
+> written in the absorption model — "per-camera dirs hold **only**
+> camera.json". That is not the target. The modules below are a *wrapper*
+> layer over per-camera implementations that stay where they are, and
+> they crystallise through use rather than being written up front.
 
 ```
 astro/astro/capture/
@@ -152,6 +241,14 @@ starcam (Pi 1B) and astrocam (Pi 4) are single-camera hosts — empty
 rules, but still a host.json for symmetry.
 
 ## Migration order — least painful first
+
+> **Superseded in part — see the status table at the top.** Steps 1 and 2
+> are **done**; step 3 (starcam) is **moot**, the camera was
+> decommissioned 2026-08-02. The live remainder is skycam (step 4), the
+> gardencam move (step 5), and **eclipticam v1**, which this list never
+> mentioned but is now the most interesting migration: it is the
+> multi-camera-per-host case (v3w's mode gates whether v1 captures at
+> all), which is what `host.py` is *for*.
 
 1. **astrocam → astro.capture.streaming.** Astrocam already speaks
    FITS, is night-only (cover transparent so 24h capture is fine for

@@ -44,7 +44,11 @@ def fire(exposure_s):
     (FILEADDED events; RAW+JPEG emits one per file, so count unique
     image numbers)."""
     wait = int(exposure_s) + 8
-    r = sh(f"gphoto2 --set-config eosremoterelease=Immediate "
+    # "Press Full", not "Immediate": Immediate triggers AF, which never
+    # confirms on a dark sky and wedges the body (Class-B USB -110, clears
+    # only on a 12V pull). The old line was also mismatched — it pressed
+    # with Immediate but released with "Release Full". Swept 2026-08-12.
+    r = sh(f'gphoto2 --set-config eosremoterelease="Press Full" '
            f'--set-config eosremoterelease="Release Full" '
            f"--wait-event={wait}s",
            timeout=wait + 60)

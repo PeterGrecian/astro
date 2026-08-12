@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Wait for a cloud gap, then run the focus sweep automatically.
 
+*** DORMANT / CALIBRATION-ONLY (astro-capture, 2026-08-12). NOT the nightly
+*** path — it arms eos-focus-sweep, part of the driven-focus regime astro-canon
+*** retired 2026-08-10. Focus is set by eye at "marker 0", lens on MF; nights
+*** run `eos-focus-cycle --no-focus`. Kept for re-characterisation runs.
+
 Every --interval minutes: capture a test frame and look for real point
 sources (compact bright blobs — distinguished from the flat-noise
 moment signature that clouds produce). When enough stars appear, run
@@ -26,7 +31,11 @@ def sh(cmd, timeout=900):
 
 def capture(path, exposure_s):
     wait = int(exposure_s) + 8
-    sh(f"gphoto2 --set-config eosremoterelease=Immediate "
+    # "Press Full", not "Immediate": Immediate triggers AF, which never
+    # confirms on a dark sky and wedges the body (Class-B USB -110, clears
+    # only on a 12V pull). The old line was also mismatched — it pressed
+    # with Immediate but released with "Release Full". Swept 2026-08-12.
+    sh(f'gphoto2 --set-config eosremoterelease="Press Full" '
        f"--wait-event-and-download={wait}s "
        f'--set-config eosremoterelease="Release Full" '
        f"--force-overwrite --filename {path}", timeout=wait + 60)

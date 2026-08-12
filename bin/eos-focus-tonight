@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # eos-focus-tonight — arm tonight's focus-cycle run, detached + logged.
 #
+# *** DORMANT / CALIBRATION-ONLY (astro-capture, 2026-08-12). NOT the nightly
+# *** path. It arms eos-focus-cycle's `d`-SCHEDULE (the driven-focus grid),
+# *** which astro-canon retired 2026-08-10 having established that `d` tracked
+# *** nothing. Focus is now set by eye through the viewfinder at "marker 0",
+# *** lens on MF. The live nightly path is `eos-focus-cycle --no-focus`, armed
+# *** by services/eos-focus.service — NOT this wrapper. Kept for
+# *** re-characterising a future body or a re-seated lens.
+#
 # Waits for astronomical dark by itself (sun < -12 deg, nautical), loops
 # Peter's swapped d-schedule (30s RAW subs + boosted JPEGs named d-first for
 # splay-by-d), stops at dawn. Survives logout via systemd-run — nohup/setsid

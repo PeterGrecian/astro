@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Star-focus sweep for the Canon EOS 2000D over gphoto2/USB.
 
+*** DORMANT / CALIBRATION-ONLY (astro-capture, 2026-08-12). NOT the nightly
+*** path: nights run `eos-focus-cycle --no-focus` (armed by
+*** services/eos-focus.service). The driven-focus regime this tool belongs to
+*** was retired 2026-08-10 — focus is set by eye through the viewfinder at
+*** "marker 0", lens on MF. Kept for re-characterising a future body or a
+*** re-seated lens.
+
 Drives the lens to the far stop (past infinity), then steps back Near,
 capturing a frame per step and measuring star FWHM. Reports the sharpest
 step and can re-drive to it. Designed for muppet with the camera tethered.
@@ -11,7 +18,9 @@ Requirements learned the hard way (2026-07-08):
     same values must be interleaved with None.
   - Lens switch on AF; mode dial on M (dial is physical, not settable).
   - Plain --capture-image refuses to fire when AF can't lock (stars!),
-    so captures use eosremoterelease Immediate.
+    so captures use eosremoterelease Press Full / Release Full. (NOT
+    "Immediate" — that also waits on AF and wedges the body on a dark
+    sky; the code was fixed 2026-08-10, this line corrected 2026-08-12.)
 
 Daylight smoke test:
   eos-focus-sweep --shutter 1/500 --iso 100 --steps 3 --outdir ~/tmp/sweep-test

@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
 """eos-focus-cycle — blind focus-experiment capture for the EOS 2000D on stars.
 
+*** THE `d`-SCHEDULE IS DORMANT, BUT THIS TOOL IS THE LIVE NIGHTLY CAPTURE
+*** PATH (astro-capture, 2026-08-12). Read carefully — the two halves of this
+*** file have different statuses:
+***   - LIVE: `eos-focus-cycle --no-focus` is what captures every night, armed
+***     by services/eos-focus.service. Do not disarm or delete.
+***   - DORMANT: the focus-driving `d`-schedule below (the medium/fine grid).
+***     astro-canon retired it 2026-08-10 having established that `d` tracked
+***     nothing — focus is now set BY EYE through the viewfinder at the
+***     "marker 0" datum with the lens on MF, ~3x sharper than any driven
+***     method. Every frame is now _d00.
+*** The grid machinery is kept deliberately, not dead code: it is how a future
+*** body or a re-seated lens gets re-characterised. RUN_TAG also lives here —
+*** the estate's only per-run stem tag (see design/capture-unification.md).
+
 Philosophy (astro-canon strand, 2026-07-23, after FIRST LIGHT): finding stars
 at all is hard; don't try to measure focus live. Instead CAPTURE BLIND across a
 deterministic focus grid, tagging every frame with its exact focus coordinate,
