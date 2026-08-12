@@ -25,16 +25,28 @@ HARDWARE — two backends, selected by PLUG_BACKEND:
   PLUG_ON_POWERS_CAMERA : True if plug ON = mains present = camera powered
                           (normal wiring; the plug feeds the adapter directly)
 
-WHY THE Dev-NUMBER CHECK SURVIVED THE SWAP. The S60ZBTPG meters wattage, and the
-obvious idea is to verify a power cut by watching draw fall to ~0. Measured on
-this plug 2026-08-12, BEFORE wiring, that does not work: the metering is
-delta-driven and unpolled, so with no load it is blind. `homeassistant.
-update_entity` returns HTTP 200 but does NOT refresh the sample (last_updated AND
-last_reported both stayed frozen across two forced polls), and the voltage sensor
-sat at 238.02 V straight through a genuine off/on of its own relay — the meter did
-not witness its own plug switching. So wattage is a SECOND witness here, never the
-verifier: `cycle` still proves the rail dropped by USB re-enumeration, which
-proves the CAMERA lost power rather than merely that a socket went dead.
+WHY THE Dev-NUMBER CHECK SURVIVED THE SWAP — AND WHY WATTS ARE NOT USED AT ALL.
+The S60ZBTPG meters wattage, and the obvious idea is to verify a power cut by
+watching draw fall to ~0. It does not work here, for TWO independent reasons:
+
+  1. THE EOS IS BELOW THE MEASUREMENT FLOOR (decisive; home-automation
+     2026-08-12). The camera draws ~200 mW = ~0.0008 A at 240 V, against a
+     0.01 A current step and 1 W power quantisation — about 1/12th of ONE step.
+     The meter reads 0.0 W with the camera RUNNING NORMALLY, so 0 W means
+     nothing: keying off it would false-pass a cycle that never happened or
+     false-fail a healthy camera — the Sandstrom "plug lied" failure class
+     reintroduced from the other end. Encouraging bench figures came from a
+     20-40 W glue gun, not a camera load.
+  2. The reporting is delta-driven and cannot be polled on demand (measured
+     here before wiring): `homeassistant.update_entity` returns HTTP 200 but
+     does NOT refresh the sample — last_updated AND last_reported both stayed
+     frozen across two forced polls — and the voltage sensor sat at 238.02 V
+     straight through a genuine off/on of its own relay.
+
+So `cycle` reads NO watts. USB re-enumeration is the sole verification: it
+proves the CAMERA lost power, not merely that a socket went dead. Revisit only
+if a ~10 W resistive ballast is fitted in parallel on the switched side.
+The plug remains fully trusted as a SWITCH — that half is verified good.
 
 If the plug can't be reached, off/on/cycle print the failure and exit non-zero,
 so the recovery protocol degrades safely (logs "power-cycle unavailable" rather
@@ -319,7 +331,12 @@ def main():
         print(f"camera {'enumerated' if up else 'NOT on bus'}")
         if PLUG_BACKEND == "zha":
             sw, w = zha_state(ZHA_SWITCH), zha_power_w()
-            print(f"plug {sw or '?'}" + (f", {w:g} W" if w is not None else ""))
+            # The watts are informational ONLY and are ~always 0.0: the EOS is
+            # below this meter's floor (see module docstring). 0 W here does NOT
+            # mean the camera is off — read the switch state, not the wattage.
+            print(f"plug {sw or '?'}"
+                  + (f", {w:g} W (below meter floor — not a power indication)"
+                     if w is not None else ""))
         sys.exit(0 if up else 1)
 
     if args.action == "off":
@@ -328,26 +345,23 @@ def main():
         sys.exit(0 if _relay_set(True) else 2)
     if args.action == "cycle":
         before = camera_dev()
-        w_before = zha_power_w() if PLUG_BACKEND == "zha" else None
         ok = _relay_set(False)
         if not ok:
             sys.exit(2)
         print(f"eos-power: 12V off, waiting {args.secs}s for rail to drop…",
               flush=True)
         time.sleep(args.secs)
-        # Second witness (advisory, never the verdict — the Dev check below is
-        # authoritative). Only meaningful when the camera was actually drawing
-        # beforehand: falling from a real load to ~0 does generate a report,
-        # whereas an already-idle plug stays silent and tells us nothing.
-        if w_before is not None and w_before > 0.5:
-            w_off = zha_power_w()
-            if w_off is not None and w_off <= 0.5:
-                print(f"eos-power: meter agrees — draw {w_before:g} W -> "
-                      f"{w_off:g} W while off")
-            elif w_off is not None:
-                print(f"eos-power: WARNING meter still shows {w_off:g} W with "
-                      f"the plug off (stale reading, or mains not actually cut)",
-                      file=sys.stderr)
+        # NO WATTAGE WITNESS. The EOS draws ~200 mW — BELOW this plug's
+        # measurement floor (home-automation, 2026-08-12): ~0.0008 A against a
+        # 0.01 A current step, and 1 W power quantisation, i.e. the camera is
+        # ~1/12th of one current step. The meter reads 0.0 W with the camera
+        # RUNNING NORMALLY, so watts cannot distinguish rail-up from rail-down
+        # and would reintroduce the Sandstrom "plug lied" class from the other
+        # end (false-pass a cycle that never ran, or false-fail a healthy
+        # camera). Earlier bench figures came from a 20-40 W glue gun, not a
+        # camera. The USB Dev-number check below remains the ONLY verification.
+        # Revisit only if a ~10 W resistive ballast is fitted in parallel on the
+        # switched side to lift the load over the passive-reporting floor.
         ok = _relay_set(True) and ok
         print("eos-power: 12V restored", flush=True)
         if not ok:
