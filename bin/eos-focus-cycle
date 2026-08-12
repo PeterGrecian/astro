@@ -575,7 +575,32 @@ def main():
        "--set-config", f"aperture={args.aperture}",
        "--set-config", f"shutterspeed={args.secs}", t=25)
 
-    wait = args.secs + 12
+    # DUTY CYCLE. `--wait-event-and-download=Ns` waits EXACTLY N seconds — it
+    # does NOT return early when the file arrives. gphoto2(1): "A
+    # --wait-event=5s will take exactly 5 second." So this margin is not a
+    # timeout, it is dead time paid on EVERY frame, and it directly sets how
+    # much of the night the shutter is shut.
+    #
+    # MEASURED on muppet 2026-08-12 with real 30s subs (astro-capture):
+    #   window 33s -> 1/2 downloaded (marginal)
+    #   window 34s -> 2/2            => readout + download is ~4s
+    #   window 36s -> 2/2
+    # The old +12 margin therefore burned ~8s per frame doing nothing: 30s
+    # exposure on a 45.0s period = 67% duty, so a third of the night the
+    # sensor was blind. At +6 the period drops to ~39s => ~77% duty.
+    #
+    # Why +6 and not +4: a missing file is the WEDGE TELL — capture() returning
+    # False escalates through recover() to a 12V power cycle. A margin trimmed
+    # to the measured minimum would turn ordinary jitter (a slow card flush, a
+    # busy USB bus) into a false wedge and cost the night. +6 is ~1.5x the
+    # measured need and still nearly halves the dead time. Do not cut further
+    # without re-measuring on THIS body: the figure is exposure-dependent.
+    #
+    # Bare event forms do NOT work here as a "return as soon as ready" fix:
+    # `=FILEADDED` / `=CAPTURECOMPLETE` returned instantly with no file, and a
+    # bare count `=3` likewise. Tested 2026-08-12; the timed window is the
+    # working mechanism on this body.
+    wait = args.secs + 6
     print(f"eos-focus-cycle -> {args.out}", flush=True)
     print(f"  d-schedule ({len(schedule)}/pass): {schedule}", flush=True)
     print(f"  {args.secs}s RAW ISO{args.iso} f{args.aperture}   "
