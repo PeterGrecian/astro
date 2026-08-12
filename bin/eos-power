@@ -70,10 +70,9 @@ PLUG_BACKEND = "zha"        # "zha" (live, SONOFF S60ZBTPG) | "matter" (retired)
 # -- ZHA backend (SONOFF S60ZBTPG "Canon EOS Power", HA REST API) --
 # Entity ids, NOT a node number: ZHA re-pairing keeps the entity id, so a swap
 # does not renumber the way Matter nodes did.
-# NB there is a SECOND S60ZBTPG on this HA (sensor.sonoff_s60zbtpg_* = the TUMBLE
-# DRYER, 107 kWh lifetime). Same model, different appliance — always drive the
-# canon_eos_power_* entities, never the bare model-named ones. This is the same
-# trap as the node-4 Sandstrom ghost that was also called "…Smart Plug".
+# NB drive the canon_eos_power_* entities, never the model-named
+# sonoff_s60zbtpg_* ones — that is a different appliance of the same model.
+# Same trap as the node-4 Sandstrom ghost also called "…Smart Plug".
 HA_URL = "http://homepi.local:8123"
 HA_TOKEN_SECRET = "/home-automation/ha-claude"   # via super/bin/secrets
 ZHA_SWITCH = "switch.canon_eos_power"
