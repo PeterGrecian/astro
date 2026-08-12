@@ -82,6 +82,56 @@ photometric**: it survives the saturated cores that defeat profile analysis, and
 it needs no calibration. It is the primary discriminator; everything else scores
 confidence.
 
+### A third class: CONTRAILS (Peter, 2026-08-12 — *"the meteor looks like a contrail"*)
+
+The satellite/meteor dichotomy above is **incomplete**. A candidate in the EOS
+2026-08-11 sweep (frame 312/339) looked meteor-like in a single frame and was a
+**contrail**. Evidence from the neighbouring sweep frames:
+
+| frame | streak |
+|---|---|
+| 305, 311 | **absent** — clean sky |
+| 312, 320 | **present**, sharp-edged |
+| 330 | present but visibly **broadened and diffused** |
+
+It crosses the whole frame (both ends off-screen), has soft diffuse edges rather
+than a thin hard filament, and shares the lit-cloud quality of the skyglow-lit
+cloud around it. These are the night's last frames (sky mean 84 → 123 across
+them), so it is lit from below by **dawn twilight**.
+
+A meteor lasts under a second and appears in exactly one sub. This **persists
+over many minutes and spreads**.
+
+**Why it matters even though the current classifier "gets away with it":** a
+contrail scores `ends_touching=2` and `persists >> 1`, so it lands in the
+**satellite** bucket — correctly *rejected* as non-meteor, but wrongly labelled.
+Aircraft and their trails are already named in `accumulator-outlier-rejection.md`
+as things that must not co-add, so the estate cares about them independently.
+
+**Proposed discriminator — WIDTH GROWTH OVER TIME**, which cleanly separates the
+two persistent classes:
+
+| | Satellite | Contrail |
+|---|---|---|
+| width | thin, **constant** | starts thin, **broadens and softens** |
+| motion | moves position frame to frame | drifts slowly with wind, near-static |
+| within a sub | streaks (traverses during the exposure) | static feature |
+
+Measure perpendicular FWHM per sub and fit `d(width)/dt`; a positive trend is a
+contrail.
+
+**Secondary consequence — it is a cloud-verdict concern, not only a classifier
+one.** A contrail is a *lit linear cloud*: it lifts the frame mean and could pull
+an otherwise-clear night toward "cloudy". Related to the pedestal / `scs`
+double-duty trap.
+
+**Note on method:** this one was disproved by the **neighbouring sweep frames**,
+without needing the subs — because persistence over *minutes* is exactly what a
+stack shows well. The earlier rule ("sweep frames cannot classify") is about
+sub-second structure: a stack destroys the ablation profile and sub-second
+timing, but it is the right tool for *is this thing still here ten minutes
+later?*
+
 ### Illumination as a hard constraint (Peter, 2026-08-11)
 
 > *"its in the middle of the night — the satellite won't be illuminated."*
