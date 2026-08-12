@@ -1,0 +1,17 @@
+[Unit]
+Description=astro: deliver last night's EOS 2000D (canon) capture to /astro
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=peter
+# The full chain (adapt 460+ CR2 -> stack -> sweeps -> S3) takes ~25-40 min on
+# muppet. Allow generous headroom; the timer is daily so a long run cannot
+# collide with the next one.
+TimeoutStartSec=4h
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/home/peter/astro/services/canon-nightly-run.sh
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,16 @@
+[Unit]
+Description=astro: deliver the EOS 2000D night after dawn, daily
+
+[Timer]
+# Post-dawn. Capture runs to ~03:40 UTC at this time of year and the night is
+# defined noon-to-noon, so 06:00 local is safely after the night has ENDED and
+# well before the noon rollover that would make it "the night before last".
+OnCalendar=*-*-* 06:00:00 Europe/London
+# Catch up if muppet was asleep/off at 06:00 — the whole point is that a night
+# is never silently lost, which is exactly what happened to 2026-08-11.
+Persistent=true
+# Avoid hammering the disk at the same instant as other dawn jobs.
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
