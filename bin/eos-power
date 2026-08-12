@@ -15,11 +15,26 @@ hardware. Commissioned 2026-07-26; see home-automation STATE.)
   eos-power cycle    # off, wait --secs, on  (the STATE-validated ~10s pull)
   eos-power status   # best-effort: is the camera enumerated on muppet?
 
-HARDWARE (Matter smart plug via HA python-matter-server WebSocket API):
-  MATTER_WS   : ws:// URL of the matter-server (homepi:5580)
-  MATTER_NODE : commissioned node id of the plug feeding the DR-E10 adapter
+HARDWARE — two backends, selected by PLUG_BACKEND:
+  "zha"    (LIVE since 2026-08-12) SONOFF S60ZBTPG "Canon EOS Power", paired to
+           ZHA on homepi, driven via the HA REST API. Replaced the Realwe after
+           the Matter plugs proved unreliable. Entities are ZHA_SWITCH etc.
+  "matter" (retired fallback) Realwe plug via the python-matter-server WS API,
+           matched by MATTER_VENDOR. Kept so a swap back needs no code archaeology.
+
   PLUG_ON_POWERS_CAMERA : True if plug ON = mains present = camera powered
                           (normal wiring; the plug feeds the adapter directly)
+
+WHY THE Dev-NUMBER CHECK SURVIVED THE SWAP. The S60ZBTPG meters wattage, and the
+obvious idea is to verify a power cut by watching draw fall to ~0. Measured on
+this plug 2026-08-12, BEFORE wiring, that does not work: the metering is
+delta-driven and unpolled, so with no load it is blind. `homeassistant.
+update_entity` returns HTTP 200 but does NOT refresh the sample (last_updated AND
+last_reported both stayed frozen across two forced polls), and the voltage sensor
+sat at 238.02 V straight through a genuine off/on of its own relay — the meter did
+not witness its own plug switching. So wattage is a SECOND witness here, never the
+verifier: `cycle` still proves the rail dropped by USB re-enumeration, which
+proves the CAMERA lost power rather than merely that a socket went dead.
 
 If the plug can't be reached, off/on/cycle print the failure and exit non-zero,
 so the recovery protocol degrades safely (logs "power-cycle unavailable" rather
@@ -37,7 +52,23 @@ Exit codes for `cycle`:
 """
 import argparse, asyncio, json, re, subprocess, sys, time
 
-# ---- hardware config (Matter smart plug) ------------------------------------
+# ---- hardware config --------------------------------------------------------
+PLUG_BACKEND = "zha"        # "zha" (live, SONOFF S60ZBTPG) | "matter" (retired)
+
+# -- ZHA backend (SONOFF S60ZBTPG "Canon EOS Power", HA REST API) --
+# Entity ids, NOT a node number: ZHA re-pairing keeps the entity id, so a swap
+# does not renumber the way Matter nodes did.
+# NB there is a SECOND S60ZBTPG on this HA (sensor.sonoff_s60zbtpg_* = the TUMBLE
+# DRYER, 107 kWh lifetime). Same model, different appliance — always drive the
+# canon_eos_power_* entities, never the bare model-named ones. This is the same
+# trap as the node-4 Sandstrom ghost that was also called "…Smart Plug".
+HA_URL = "http://homepi.local:8123"
+HA_TOKEN_SECRET = "/home-automation/ha-claude"   # via super/bin/secrets
+ZHA_SWITCH = "switch.canon_eos_power"
+ZHA_POWER = "sensor.canon_eos_power_power"       # W — second witness only
+ZHA_VOLTAGE = "sensor.canon_eos_power_voltage"   # V
+
+# -- Matter backend (retired Realwe plug) --
 MATTER_WS = "ws://homepi.local:5580/ws"   # HA python-matter-server WS API
 MATTER_NODE = 7                           # Realwe Innovation plug (node 7)
 # Plugs get replaced and renumber on re-commissioning, so prefer matching the
@@ -59,7 +90,92 @@ ONOFF_CLUSTER = 6                         # Matter On/Off cluster id
 CYCLE_SECS = 90
 
 def _configured():
+    if PLUG_BACKEND == "zha":
+        return bool(HA_URL and ZHA_SWITCH)
     return MATTER_WS is not None and MATTER_NODE is not None
+
+# ---- ZHA backend (HA REST) --------------------------------------------------
+_HA_TOKEN = None
+
+def _ha_token():
+    """Long-lived HA token from the house secrets manager (never hardcoded)."""
+    global _HA_TOKEN
+    if _HA_TOKEN is not None:
+        return _HA_TOKEN
+    # Resolve by ABSOLUTE PATH, never bare `secrets`: this runs from systemd and
+    # from muppet's non-login shells, where super/bin is NOT on PATH (verified
+    # 2026-08-12 — muppet has the tool but cannot find it by name).
+    import os, shutil
+    cands = [os.path.expanduser("~/super/bin/secrets"),
+             os.path.expanduser("~/aifabric/bin/secrets"),
+             shutil.which("secrets")]
+    for exe in cands:
+        if not exe or not os.path.exists(exe):
+            continue
+        try:
+            tok = subprocess.run([exe, "get", HA_TOKEN_SECRET],
+                                 capture_output=True, text=True, timeout=45,
+                                 check=True).stdout.strip()
+        except Exception:
+            continue                      # try the next candidate, never raise
+        if tok:
+            _HA_TOKEN = tok
+            return _HA_TOKEN
+    print(f"eos-power: cannot read HA token {HA_TOKEN_SECRET} (tried "
+          f"{', '.join(c for c in cands if c)})", file=sys.stderr)
+    _HA_TOKEN = ""
+    return _HA_TOKEN
+
+def _ha_request(path, payload=None, timeout=20):
+    """GET (payload None) or POST a JSON request to the HA REST API."""
+    import urllib.request, urllib.error
+    tok = _ha_token()
+    if not tok:
+        return None
+    req = urllib.request.Request(
+        f"{HA_URL}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={"Authorization": f"Bearer {tok}",
+                 "Content-Type": "application/json"},
+        method="POST" if payload is not None else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode()
+        return json.loads(body) if body.strip() else {}
+    except Exception as ex:
+        print(f"eos-power: HA request {path} failed: {ex}", file=sys.stderr)
+        return None
+
+def zha_state(entity):
+    """Current state string of an entity, or None if unreachable."""
+    d = _ha_request(f"/api/states/{entity}")
+    return d.get("state") if isinstance(d, dict) else None
+
+def zha_power_w():
+    """Instantaneous draw in W, or None. SECOND WITNESS ONLY — see module docstring:
+    this sensor is delta-driven and does not refresh on demand, so a 0.0 here may
+    mean 'no load' or merely 'nothing has reported since the last change'."""
+    s = zha_state(ZHA_POWER)
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+def _zha_set(powered: bool) -> bool:
+    """Switch the ZHA plug and CONFIRM the switch entity actually moved.
+    A 200 from HA only means the command was accepted, so re-read the state —
+    the same trust-but-verify stance the Dev-number check takes for the rail."""
+    want = "on" if (powered == PLUG_ON_POWERS_CAMERA) else "off"
+    if _ha_request(f"/api/services/switch/turn_{want}",
+                   {"entity_id": ZHA_SWITCH}) is None:
+        return False
+    for _ in range(6):                      # the S60ZBTPG reports back in ~1-3s
+        time.sleep(1)
+        if zha_state(ZHA_SWITCH) == want:
+            return True
+    print(f"eos-power: {ZHA_SWITCH} did not report '{want}' after the command",
+          file=sys.stderr)
+    return False
 
 async def _plug_command(cmd_name: str) -> bool:
     """Send an On/Off cluster command to the plug over the matter-server WS.
@@ -140,10 +256,12 @@ def _relay_set(powered: bool) -> bool:
     """Switch the plug so the camera is powered (True) or not (False).
     Returns True on success."""
     if not _configured():
-        print(f"eos-power: plug not configured (MATTER_WS/MATTER_NODE unset) — "
+        print(f"eos-power: plug not configured ({PLUG_BACKEND} backend) — "
               f"would set camera power {'ON' if powered else 'OFF'}",
               file=sys.stderr)
         return False
+    if PLUG_BACKEND == "zha":
+        return _zha_set(powered)
     cmd = "On" if (powered == PLUG_ON_POWERS_CAMERA) else "Off"
     return asyncio.run(_plug_command(cmd))
 
@@ -199,6 +317,9 @@ def main():
     if args.action == "status":
         up = camera_enumerated()
         print(f"camera {'enumerated' if up else 'NOT on bus'}")
+        if PLUG_BACKEND == "zha":
+            sw, w = zha_state(ZHA_SWITCH), zha_power_w()
+            print(f"plug {sw or '?'}" + (f", {w:g} W" if w is not None else ""))
         sys.exit(0 if up else 1)
 
     if args.action == "off":
@@ -207,12 +328,26 @@ def main():
         sys.exit(0 if _relay_set(True) else 2)
     if args.action == "cycle":
         before = camera_dev()
+        w_before = zha_power_w() if PLUG_BACKEND == "zha" else None
         ok = _relay_set(False)
         if not ok:
             sys.exit(2)
         print(f"eos-power: 12V off, waiting {args.secs}s for rail to drop…",
               flush=True)
         time.sleep(args.secs)
+        # Second witness (advisory, never the verdict — the Dev check below is
+        # authoritative). Only meaningful when the camera was actually drawing
+        # beforehand: falling from a real load to ~0 does generate a report,
+        # whereas an already-idle plug stays silent and tells us nothing.
+        if w_before is not None and w_before > 0.5:
+            w_off = zha_power_w()
+            if w_off is not None and w_off <= 0.5:
+                print(f"eos-power: meter agrees — draw {w_before:g} W -> "
+                      f"{w_off:g} W while off")
+            elif w_off is not None:
+                print(f"eos-power: WARNING meter still shows {w_off:g} W with "
+                      f"the plug off (stale reading, or mains not actually cut)",
+                      file=sys.stderr)
         ok = _relay_set(True) and ok
         print("eos-power: 12V restored", flush=True)
         if not ok:
