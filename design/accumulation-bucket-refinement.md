@@ -588,6 +588,130 @@ fits.
   which is the **half-res capture mode** value; full-res is 0.02214. Sizing off
   the wrong one is a factor-of-2 error in each axis — 4× in the buffer.
 
+### What the map IS: a projection onto the sphere, and its extent is a circle
+
+Peter, 2026-08-13, correcting the framing below: *"we don't store in polar
+coordinates, but a projection onto the celestial sphere — a map. Because the
+earth rotates so does the image so the maximum extent of the map is a circle"*
+— and, on sizing: *"if it was night 24 hours"*.
+
+**Two corrections to the section that follows.**
+
+1. **Storage is a projection onto the sphere, not a polar-coordinate array.**
+   (r, θ) is a *shift mechanism* — the fact that sidereal rotation is cheap in
+   pole-centred coordinates. It is not the storage model. The map is a
+   projection of the celestial sphere; the ring analysis below applies to how
+   that projection is *sampled and shifted*, not to what the map is.
+
+2. **The map's maximum extent is set by the 24-hour sweep.** The camera is
+   fixed; the Earth rotates; so over a full 360° the field sweeps a **pole-
+   centred annulus** bounded by the min and max angular distance from the NCP
+   that the field reaches. Size for the hypothetical 24-hour night — that is
+   the season-independent bound, and it is a *circle* (or annulus), never a
+   rectangle.
+
+**Computed per camera** (half-diagonal of the field about its centre's
+angular distance from the NCP, then clipped by the horizon — nothing beyond
+128.6° from the NCP ever rises at 51.39°N):
+
+| Camera | Field centre from NCP | Swept region | Area |
+|---|---|---|---|
+| **astrocam** (near the pole) | ~0° | **DISC**, r = 0 … 37.8° | **4,328 sq°** |
+| **eclipticam** (wide, ecliptic) | ~88.6° | **ANNULUS**, r = 30.1 … 128.6° | **30,715 sq°** |
+| canon | **unsolved** (`pole_prior_xy` null) | cannot be computed yet | — |
+
+So the two cameras' maps are **different shapes**, which is the real reason
+they need separate handling:
+
+- **astrocam's map is a disc containing the pole.** Every part of it is covered
+  at every rotation phase, so depth accrues uniformly and the sidereal shift is
+  a rotation about the disc's own centre.
+- **eclipticam's map is a pole-centred annulus**, 98.5° wide in radius and
+  clipped at the bottom by the horizon. It is "fairly rectangular" only
+  *locally* — unrolled in (radius, angle) it is a band, which is why the
+  H × subpix² × W × duration decomposition works for it. Globally it is an
+  annulus that wraps in angle.
+- **The annulus wraps.** That is the same result the duration-factor analysis
+  reached from the other direction: at 3.53× frame width the buffer spans the
+  full RA circle and closes on itself. A 24-hour night makes this exact rather
+  than approximate.
+
+**eclipticam's map is ~7× the sky area of astrocam's** (30,715 vs 4,328 sq°),
+which dominates any per-camera memory comparison and is why its buffer sizing
+was the harder question.
+
+**Epochs enlarge the extent — size for the UNION.** Peter: *"the epochs have
+different orientations so the max extent will be larger."* Correct, and it is
+not a small correction. An epoch boundary is by definition a camera, lens or
+mounting change, so each epoch has **both a different field size and a
+different aim**. astrocam's own two epochs:
+
+| Epoch | Sensor | FOV | Half-diagonal |
+|---|---|---|---|
+| 1 (`av2`) | imx219, 3280×2464 @ 0.0190 °/px | 62.3° × 46.8° | **39.0°** |
+| 2 (`av3s`) | imx708, 4608×2592 @ 0.0207 °/px | 95.4° × 53.7° | **54.7°** |
+
+The swept radius grows **40%** from the sensor/lens change *alone*, before any
+re-aim:
+
+| Extent | Area |
+|---|---|
+| epoch 1 disc, r ≤ 39.0° | 4,597 sq° |
+| epoch 2 disc, r ≤ 54.7° | 8,707 sq° |
+| **union** | **8,707 sq° — 89% larger than epoch 1** |
+| union if epoch 2 is also re-aimed 10° | 11,812 sq° — **157% larger** |
+
+So:
+
+- **The map's extent is `min(inner radii) … max(outer radii)` over all epochs**,
+  not any single epoch's sweep. Sizing from the current epoch alone
+  under-allocates, and sizing from the *first* epoch badly under-allocates.
+- **This does not license co-adding across epochs in sensor space** — that
+  prohibition stands. The union governs the *sphere-side* extent, which is
+  where epochs are combined; each epoch still accumulates through its own field
+  and projection.
+- **A new epoch can enlarge the map.** The structure must be growable in radius
+  (or allocated with headroom), because a future camera swap with a wider lens
+  extends the outer radius. Recording each epoch's contributing annulus in the
+  map's metadata makes this checkable rather than surprising.
+- **canon cannot be included yet** — `pole_prior_xy` is null, so neither its
+  annulus nor its contribution to the union is computable.
+
+**Instruments probably NEST rather than merely overlap.** Peter: *"eos is
+probably a subset of astrocam v3s and so on."* The angular sizes support this —
+EOS 2000D field from its APS-C sensor (22.3 × 14.9 mm) at plausible focal
+lengths, against astrocam v3s's half-diagonal of 54.7°:
+
+| Lens | EOS FOV | EOS half-diagonal | Inside astrocam v3s? |
+|---|---|---|---|
+| 18 mm | 63.6° × 45.0° | 38.9° | **yes** |
+| 24 mm | 49.8° × 34.5° | 30.3° | yes |
+| 35 mm | 35.3° × 24.0° | 21.4° | yes, comfortably |
+| 50 mm | 25.1° × 16.9° | 15.2° | yes, a small fraction |
+
+So even at its widest the EOS sweeps a **sub-annulus** of astrocam's. If that
+holds, the estate's maps form a **containment hierarchy** — a wide shallow
+instrument enclosing narrower deeper ones — which is a strong structural
+property worth exploiting:
+
+- **The enclosing map supplies the reference for the enclosed one.** astrocam's
+  deep wide map is exactly the reference frame against which canon's unsolved
+  `plate_scale`/`pole_prior_xy` can be fitted — the bootstrap's step 5 across
+  *instruments* rather than within one.
+- **A common sky grid can be shared.** Nested instruments can accumulate onto
+  the same projection at different resolutions, making cross-instrument
+  combination a resampling between levels rather than an arbitrary reprojection.
+- **Multi-camera coincidence is bounded by the intersection**, which for nested
+  fields is the *whole* of the inner field — the best case for the transient
+  triangulation goal.
+
+**Unverified, and it matters:** containment needs the fields to be *co-pointed*,
+not merely smaller. The table shows angular size only. canon's aim is unsolved,
+and the one empirical check available today — the 21:20:58 astrocam meteor
+against its two simultaneous canon frames — found **no counterpart**, which is
+weak evidence *against* full containment at that moment. Treat nesting as a
+promising hypothesis to test once canon is solved, not as an established fact.
+
 ### The polar cap is circular — sparseness, and how to grid it
 
 Peter, 2026-08-13: *"eclipticam is a good example because it's fairly
