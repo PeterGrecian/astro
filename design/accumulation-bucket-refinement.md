@@ -183,12 +183,34 @@ SMART-blind copy (`redundancy-not-capacity`).
 
 Confirmed by astro-storage 2026-08-13 and verified against disk:
 
+Durable copy of the layout survey:
+`strands/astro-storage/for-astro-science-tree-shapes.md`.
+
 | Camera | Layout |
 |---|---|
-| astrocam | `astrocam-frames/YYYY/MM/DD/` |
+| astrocam | **`astrocam-frames/YYYY-MM-DD/` (FLAT)** — this is where the 606 GB is |
 | eclipticam | `eclipticam-frames/night/YYYY-MM-DD/v3w/` |
 | starcam | `starcam-frames/night/YYYY-MM-DD/`, hour dirs **either** raw `HH`+`HHb` **or** squashed `HH-sum8`+`HHb-sum2` |
-| eos / canon | `eos-frames/YYYY-MM-DD/`, `canon-frames/YYYY-MM-DD/` (plus `eos-frames-live/` = live preview JPEGs, low value, probably skip) |
+| eos / canon | `eos-frames/YYYY-MM-DD/`, `canon-frames/YYYY-MM-DD/HH/HH-MM-SS.fits.fz` (plus `eos-frames-live/` = live preview JPEGs, low value, probably skip) |
+
+**Three walk hazards — all verified against disk 2026-08-13:**
+
+1. **astrocam has TWO coexisting layouts.** The flat `YYYY-MM-DD/` tree holds
+   the real data (2026-08-12: 4.6 GB, **434 FITS**). A nested
+   `astrocam-frames/YYYY/MM/DD/astrocam/` tree also exists but is **metadata
+   only** — 748 KB total, **zero FITS**, just `brightness.csv` + `state.json`.
+   A naive date-dir glob matches **both** and will double-count or silently
+   pick the empty one. (This doc briefly recorded the nested form as *the*
+   astrocam layout — it is not.)
+2. **`astrocam-frames/latest-astrocam` is a symlink OFF bigstore** into
+   `/home/peter/astrocam-frames/<date>`. **Do not follow symlinks in the walk**
+   or the pass leaves the archive, re-reads counted data, and may wander onto
+   another disk.
+3. **Date dirs mix hour dirs with product dirs and loose files.** canon
+   2026-08-12 has `00 01 02 03 20 21 22 23` beside `badpixel.fits`,
+   `brightness.csv/png`, `max.fits.fz`, `sweep-*/`… → **filter children to
+   two-digit names**. eclipticam likewise has `moon/`, `sweep-colour/`,
+   `sweep-diff/` beside `v3w/` → **take `v3w` explicitly, never glob `*/`**.
 
 **Use `astro/bin/astro-where <camera> <night>`** — it resolves (camera, night)
 across every root and layout, so a fifth hand-rolled resolver inherits nothing
