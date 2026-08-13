@@ -537,6 +537,57 @@ Store the cap in **polar (r, θ)** rather than a square array: a cap is a disk,
 so a bounding square wastes 1 − π/4 ≈ **21%**, and (r, θ) additionally makes the
 sidereal shift a pure index-shift along θ.
 
+### The eclipticam (transit-band) buffer — sizing the other shape
+
+Peter, 2026-08-13: *"the sample buffer for eclipticam needs to be the height of
+the frame × subpixels² × width × duration factor — probably 4 in mid winter."*
+
+That is the right decomposition for the **transit-band** buffer, and it differs
+from the polar buffer because the sky *translates* through this field rather
+than rotating within it. Working it with real numbers (v3w, 4608×2592, full-res
+plate scale **102°/4608 = 0.02214 °/px**, vertical field **57.4°**):
+
+**The duration factor, checked against the site's actual winter:**
+
+| Coverage | RA swept | × frame width |
+|---|---|---|
+| One midwinter night, astronomical dark (12.0 h) | 102° + 180° = 282° | **2.76** |
+| One night to nautical twilight (10.6 h) | 261° | 2.56 |
+| **Full 360° RA circle (all seasons)** | 360° | **3.53** |
+| **Peter's factor 4** | 408° | **4.0 — the circle + 13% margin** |
+
+So **4 is sound as a maximum**, and the reason is better than "a long winter
+night": at 3.53 the buffer spans the **entire RA circle**, so it *wraps* rather
+than growing — one night's 2.76 is a subset of a structure that is complete at
+~3.53. **Size for the circle, not for a night.** (Midsummer is the degenerate
+case: at 51.39°N there is **no astronomical darkness at all** in June, so the
+winter night is genuinely the sizing case for a single session.)
+
+**Buffer sizes**, `H × subpix² × W × duration`, int32:
+
+| Subpixels | Duration | Cells | int32 |
+|---|---|---|---|
+| 1 | 1 | 1.19e7 | 0.05 GB |
+| 1 | 4 | 4.78e7 | 0.19 GB |
+| 2 | 4 | 1.91e8 | **0.76 GB** |
+| 3 | 4 | 4.30e8 | 1.72 GB |
+
+With the deep-I + shallow-chroma scheme (31%), the 2× subpixel full-circle
+buffer is **~0.24 GB** — comfortably RAM-resident on muppet. Even 3× subpixel
+fits.
+
+**Two cautions on the arithmetic:**
+
+- **`subpix²` is right only if sub-pixel resolution is wanted in BOTH axes.**
+  STATE's sub-pixel analysis says the two axes are not symmetric: along-drift
+  super-resolution is nearly free (a continuous pixel-phase sweep, centroids
+  ~0.1 px) while cross-drift is deblend-limited (~FWHM/√SNR). So `subpix_x²`
+  may be justified where `subpix_y²` is not — an asymmetric grid (fine in RA,
+  coarse in Dec) buys most of the resolution for half the memory.
+- **Watch the plate scale.** `camera.json` records `plate_scale_deg_px: 0.0443`,
+  which is the **half-res capture mode** value; full-res is 0.02214. Sizing off
+  the wrong one is a factor-of-2 error in each axis — 4× in the buffer.
+
 ### 24-bit: measured, and NOT worth it
 
 Peter, 2026-08-13: *"we might use 24 bit integers."* Tested rather than assumed.
