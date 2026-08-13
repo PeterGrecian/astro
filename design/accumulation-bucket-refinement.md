@@ -663,6 +663,84 @@ co-adds usefully at `[::8]`, and the resulting depth is what makes the next
 round of anchors solvable. **Do not wait for a perfect field to start
 accumulating** — that is the recursion, not a compromise.
 
+## Stars vs planes, meteors and trees — statistically, not explicitly
+
+Peter, 2026-08-13: *"we need to distinguish stars from planes, meteors, trees
+etc. I'm hoping this might be achievable statistically rather than explicitly."*
+
+**It is, and it is already the estate's stated principle** —
+`accumulator-outlier-rejection.md`, from the RANSAC work: ***"no need to
+classify; stars obey the rotation, everything else doesn't."*** That is the
+whole discriminator. It needs **no model of what a plane or a tree is**, only a
+model of what a star does, which is the one thing here that is known exactly:
+sidereal rotation about the pole at 15°/hour.
+
+Two layers exist and are complementary:
+
+1. **Per-cell temporal clipping** — after de-rotation each sphere cell holds a
+   time series; a contaminant is a gross outlier in it. Running (median, MAD),
+   clip beyond κ·MAD (κ≈3–5).
+2. **RANSAC at the model-fit layer** — throws out whole bad *tracks* from the
+   geometry fit rather than bad samples from a cell. Proven on real data
+   (2026-07-03: TOL 0.10 px/s → 6 inliers incl. Altair, 5 outliers).
+
+### But the three contaminants are NOT statistically alike
+
+This is the part worth being explicit about, because one of them defeats layer 1:
+
+| Contaminant | Sensor coords | Sphere coords | Killed by |
+|---|---|---|---|
+| **Meteor** | moves, 1 frame | 1 cell, 1 sample | per-cell clip (trivially — a single huge sample) |
+| **Plane / satellite** | moves, few frames | a line of cells, few samples each | per-cell clip |
+| **Tree / gutter** | **FIXED, every frame** | **smears to an ARC** | **NOT the per-cell clip — see below** |
+| **Hot pixel** | fixed | smears to an arc | mask, then as tree |
+
+**Trees invert the logic.** A meteor is rare and bright — obviously an outlier.
+A tree is *persistent and stable in sensor coordinates*: it occupies the same
+pixels all night, every night. At that sensor position the time series is
+**boringly consistent**, so a naive temporal clip sees a stable value and
+concludes it is real. **The clipper defends the tree.**
+
+What separates it is the **frame in which it is stationary**:
+
+- a **star** is fixed on the **sphere** and moves across the **sensor**;
+- a **tree** is fixed on the **sensor** and therefore *moves* on the **sphere* —
+  de-rotation smears it into an **arc** at constant radius from the pole.
+
+So the statistic that catches trees is not "is this sample an outlier in its
+cell" but **"is this cell's brightness correlated with sidereal phase?"** A tree
+contributes to a given sphere cell only when the sky has rotated it there — its
+samples cluster at a particular *time of night* and drift by ~4 minutes/day
+across the year. A real star contributes at **all** sidereal phases. That is a
+clean, purely statistical test requiring no tree model:
+
+- **per-cell sidereal-phase distribution.** Star: uniform over the phases the
+  cell was observable. Tree: concentrated, and systematically drifting with the
+  sidereal day.
+- **per-sensor-pixel persistence.** A pixel that is bright in *every* frame
+  regardless of where the sky points is foreground by definition — this is the
+  occlusion map, derivable from the data rather than drawn by hand.
+
+Both fall out of statistics already being collected: the count planes record
+*which* frames contributed to each cell, so the phase distribution is free.
+
+### Consequences
+
+- **The occlusion mask is derivable, not hand-drawn.** It is the set of sensor
+  pixels whose brightness is uncorrelated with sidereal phase. This matters
+  because occlusion masking is a **blocker** for the bootstrap (the 2026-07-02
+  solve stalled on foreground/glow cells) — and it means the blocker can be
+  cleared *by* a coarse accumulation rather than before one.
+- **Order matters: mask in sensor space BEFORE co-adding**, because once
+  de-rotated the tree is spread over an arc of cells and is far harder to
+  attribute.
+- **This is the same object as the meteor work**, from the other side: the
+  transient detector wants what the accumulator rejects. Reject from the sum,
+  emit to the transients table — one pass, two outputs.
+- **It degrades gracefully.** Even without an explicit mask, a cell whose
+  samples are phase-clustered can simply be *down-weighted*, which is a
+  continuous statistical response rather than a binary classification.
+
 ## Open questions
 
 - Bucket thresholds are unset — derive from the data, not by guess. (The
