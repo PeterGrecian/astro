@@ -50,18 +50,60 @@ DECIMATE = 8
 
 
 def hour_dirs(night_dir):
-    """Two-digit children only. Everything else at the night level is derived."""
+    """Hour dirs for a night, across ALL the estate's tree shapes.
+
+    Measured 2026-08-13 by running this over every camera — two sources
+    returned ZERO frames until this handled them, which is precisely why the
+    scratch sample must be exhaustive of SOURCES even when thin in time:
+
+      astrocam/canon  <night>/HH/                 two-digit children
+      eclipticam      <night>/v3w/HH/             hour dirs one level DEEPER,
+                                                  under the camera subdir
+                                                  (siblings moon/ sweep-*/ are
+                                                  products - never glob */)
+      starcam         <night>/HH/ + HHb/          binned twin, and squashed
+                                                  forms HH-sum8 / HHb-sum2 which
+                                                  BOTH persist (squash dormant)
+      eos             <night>/*.cr2               NO hour dirs at all - raw CR2
+                                                  sits directly in the date dir
+
+    Everything at the night level that is not an hour dir is DERIVED
+    (sum/min/max/badpixel) and must never be ingested - sum.fits.fz is an
+    already-accumulated night stack.
+    """
     try:
         names = sorted(os.listdir(night_dir))
     except OSError:
         return []
+
+    def _hourish(n):
+        # HH, HHb, HH-sum8, HHb-sum2 - all start with two digits
+        return len(n) >= 2 and n[:2].isdigit()
+
     out = []
     for n in names:
-        if len(n) == 2 and n.isdigit():
-            p = os.path.join(night_dir, n)
-            if os.path.isdir(p) and not os.path.islink(p):
-                out.append(p)
-    return out
+        p = os.path.join(night_dir, n)
+        if os.path.islink(p) or not os.path.isdir(p):
+            continue
+        if _hourish(n):
+            out.append(p)
+
+    if out:
+        return out
+
+    # No hour dirs here: try a camera subdir one level down (eclipticam).
+    # Take the camera dir EXPLICITLY - moon/, sweep-colour/, sweep-diff/ are
+    # products, so a bare */ glob would ingest rendered output as if it were
+    # capture.
+    for cam in ("v3w", "v1", "astrocam"):
+        p = os.path.join(night_dir, cam)
+        if os.path.isdir(p) and not os.path.islink(p):
+            sub = [os.path.join(p, n) for n in sorted(os.listdir(p))
+                   if _hourish(n) and os.path.isdir(os.path.join(p, n))
+                   and not os.path.islink(os.path.join(p, n))]
+            if sub:
+                return sub
+    return []
 
 
 def frames_in(night_dir):
@@ -72,11 +114,56 @@ def frames_in(night_dir):
                 p = os.path.join(h, n)
                 if not os.path.islink(p):
                     fs.append(p)
+    if fs:
+        return fs
+
+    # eos: raw CR2 sit DIRECTLY in the date dir, no hour dirs. Only reached
+    # when no hour dirs were found, so night-level FITS products can never be
+    # picked up by this branch.
+    try:
+        names = sorted(os.listdir(night_dir))
+    except OSError:
+        return []
+    for n in names:
+        if n.lower().endswith(".cr2"):
+            p = os.path.join(night_dir, n)
+            if not os.path.islink(p):
+                fs.append(p)
     return fs
+
+
+def measure_cr2(path):
+    """Same coarse signals for a raw CR2 (eos). Needs rawpy, present on muppet.
+
+    Decimated the same way, but note CR2 is 14-bit (canon) so sat/dead
+    thresholds differ from the Pi cameras' 10-bit - another reason bucket
+    thresholds must be derived PER EPOCH rather than globally.
+    """
+    import rawpy
+    with rawpy.imread(path) as raw:
+        small = raw.raw_image_visible[::DECIMATE, ::DECIMATE].astype(np.float32)
+    med = float(np.median(small))
+    p99 = float(np.percentile(small, 99))
+    mad = float(np.median(np.abs(small - med)))
+    return {
+        "median": round(med, 2),
+        "p99": round(p99, 2),
+        "mad": round(mad, 3),
+        "contrast": round((p99 - med) / max(mad, 1e-3), 2),
+        "sat_frac": round(float((small >= 16000).mean()), 6),
+        "dead_frac": round(float((small <= 1).mean()), 6),
+        "exptime": None, "gain": None, "date_obs": "",
+        "camera_hdr": "canon-cr2", "posindex": None,
+        "naxis1": small.shape[1] * DECIMATE,
+        "naxis2": small.shape[0] * DECIMATE,
+        "bayer": "GBRG",
+    }
 
 
 def measure(path):
     """Coarse per-frame quality signals from a decimated read."""
+    if path.lower().endswith(".cr2"):
+        return measure_cr2(path)
     with fits.open(path, memmap=False) as hd:
         hdu = hd[1] if len(hd) > 1 else hd[0]
         hdr = hdu.header
