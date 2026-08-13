@@ -393,6 +393,97 @@ Two things confirmed, one hazard found:
   the brightness charts already use) before any cut is applied. Percentile-
   within-epoch is the safer default: it cannot be fooled by a pedestal change.
 
+## FFTs, and where the bottleneck actually is
+
+Peter, 2026-08-13: *"I think ultimately we will be doing FFTs … to transform
+subpixels to the accumulation. Those will take some CPU so I think the network
+might become less significant."*
+
+**Answering the direct question: no, FFTs have not been discussed before for the
+map.** The only prior mention anywhere is FFT phase-correlation in
+`speaker-dither-rig.md`, an unrelated subsystem. The sub-pixel path on record is
+**drizzle** (`what-accumulation-buys.md`, STATE accumulation theory), chosen
+because naive interpolation aliases on undersampled data.
+
+So this is a genuinely new direction, and it is a real alternative: Fourier
+shifting applies a sub-pixel translation as a **phase ramp**, which is exact for
+band-limited data and has no interpolation kernel to smear the PSF. That is
+attractive precisely where drizzle is fiddly. The open question is whether the
+data is band-limited enough — the archive is *undersampled* (that is why drizzle
+was chosen), and Fourier shifting an aliased signal moves the aliases too.
+
+**MEASURED, muppet, 2026-08-13 — the CPU premise does not hold:**
+
+| Stage | Per frame (4608×2592) |
+|---|---|
+| read + decompress, local disk | **0.09–0.15 s** |
+| `numpy.fft.rfft2` | 0.18 s |
+| **`scipy.fft.rfft2(workers=-1)`** (8 cores) | **0.01 s** |
+| `irfft2` | ~0.02 s |
+
+A multithreaded forward+inverse round trip is **~0.03 s against 0.09–0.15 s of
+I/O** — so even with FFTs in the loop, **I/O still dominates by roughly 3–10×**,
+and the network/storage path stays the thing to optimise. (Use `scipy.fft` with
+`workers=-1`, not `numpy.fft`: 18× on the same machine and the same array.)
+
+This does not argue against FFTs — it argues that adding them **does not change
+where the pressure is**, so the SSD-staging idea below is worth doing on its own
+merits rather than as CPU-hiding.
+
+### Staging to a fast local SSD
+
+Peter: *"we might be transferring to a fast local SSD whilst a batch is being
+processed. we will defo not be processing on pip."*
+
+Agreed on pip, emphatically — measured 11× penalty over the wifi mount. On
+staging: the shape is right (overlap transfer of batch N+1 with compute on batch
+N, so reads are hidden behind work), but note the measurement above means there
+is **not much compute to hide behind** yet. Staging pays when either:
+  - the accumulation per frame grows well past ~0.1 s (deeper per-frame work,
+    drizzle onto a fine grid, multiple projections per frame), **or**
+  - the source is slower than muppet's local disk (bigstore is USB, and
+    astro-storage warns a sustained saturating read is exactly what surfaces a
+    marginal cable — a staged copy is also *gentler* on that interface).
+Both are plausible; neither is established. **Measure before building it** —
+this doc's own history is a series of plausible premises that measurement
+inverted.
+
+## The coarse accumulation buffer
+
+Peter: *"we probably need to design the coarse accumulation buffer."* Yes — and
+the scratch pass is what sizes it honestly. Open design points:
+
+- **Dtype — and canon is the case that bites.** Per
+  `nit-accumulator-is-not-a-cache` the accumulator is a **non-volatile int32**
+  structure tiled to RAM/L3, not a cache and not RAM-resident. Computed at
+  88,415 frames:
+
+  | Source | Max possible sum | int32 headroom |
+  |---|---|---|
+  | 10-bit Pi sensors (imx219/imx708) | 9.0e7 | **23.7×** — comfortable |
+  | **14-bit canon** | **1.45e9** | **1.5×** — thin |
+
+  So int32 is fine for the Pi cameras but **canon has almost no margin**: a
+  longer baseline, a brighter sky, or any pre-scaling overflows it. Either
+  accumulate canon in **int64**, or subtract the pedestal before summing (canon's
+  pedestal is 2048 of a 16383 full scale — removing it recovers most of the
+  range). Decide per instrument; do not assume one dtype fits the estate.
+  **float32 is unusable regardless**: its 24-bit mantissa (1.68e7) loses integer
+  exactness after only **~16,400 frames** at full scale, well inside a single
+  instrument's archive. **int32/int64, never float32.**
+- **Coarse first.** At `[::8,::8]` a frame is 324×576. A coarse map at that
+  scale is ~0.75 MB per plane — trivially RAM-resident, so the whole
+  bucket/projection/epoch pipeline can be exercised end-to-end before any
+  tiling machinery exists. That is the point of coarse: **make the plumbing
+  cheap enough to be wrong repeatedly.**
+- **Per CFA plane, never demosaiced** (STATE: "the Earth demosaics") — so four
+  half-res planes, or shift by the 2×2 CFA period.
+- **Counts alongside sums.** Every cell needs its own contributing-frame count
+  (coverage is not uniform: gaps, cloud rejection, bucket admission all vary per
+  cell), else depth cannot be normalised and `map depth` is unmeasurable.
+- **Sizing follows the projection**, which is per-instrument — so there is a
+  coarse buffer per instrument, not one shared array.
+
 ## Open questions
 
 - Bucket thresholds are unset — derive from the data, not by guess. (The
