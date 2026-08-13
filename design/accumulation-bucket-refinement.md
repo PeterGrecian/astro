@@ -1,0 +1,145 @@
+# All-time accumulation by quality buckets, recursively refined
+
+**Accumulate the ENTIRE archive, but not as one undifferentiated sum. Sort
+frames into quality buckets, accumulate best-first, and use each accumulation
+to re-judge the frames — the sum becomes the reference that grades its own
+inputs, so the buckets improve on every pass.**
+
+Peter, 2026-08-13: *"I want to start accumulation over the entire data set.
+bucket sorting the quality of the data and recursively refining it."* Noted as
+needing coordination with **astro-storage** (it owns the bytes; this strand owns
+the method).
+
+## What this adds to what is already designed
+
+Two layers exist and are not this:
+
+- `what-accumulation-buys.md` + STATE's **capacity law / TDI** settle *how* to
+  accumulate: remap-then-shift, drizzle onto a finer grid, CFA planes never
+  demosaiced. Output is small — ~400–700 MB **total forever** per instrument,
+  per-night marginal cost ≈ 0.
+- `accumulator-outlier-rejection.md` settles *per-sample* robustness: once
+  de-rotation has turned each sphere cell into a time series, a cloud/plane/
+  meteor sample is a temporal outlier **within that cell** and is rejected or
+  down-weighted there.
+
+Neither answers **frame-level admission**: of ~62 astrocam nights (606 GB) plus
+canon (97 GB), which frames should enter the sum at all, in what order, and
+with what weight? Per-cell rejection is a scalpel — it cannot save a frame that
+is globally fogged, defocused, or trailed by wind. Feeding those in and letting
+the scalpel work is both wasteful (they are read, remapped, then mostly
+discarded) and harmful (they inflate the per-cell variance that rejection
+thresholds are derived from).
+
+## Why bucketing, specifically
+
+The archive's quality is **wildly non-uniform** and the variation is
+*measurable before accumulation*:
+
+- cloud (the existing `verdict` + `sky_clear_max_stops` machinery already
+  scores this per night and per 10-min anchor);
+- focus (astrocam epoch 2 dithers `LENSPOS` 1.3–1.6 deliberately — some frames
+  are known-sharper by construction; canon is by-eye MF at "marker 0");
+- moon (a bright moon raises the floor across the whole frame);
+- capture continuity (2026-08-12 had six >90 s gaps — see the inch-worm
+  finding; a pass boundary or a wedge recovery brackets frames taken while the
+  camera was settling);
+- **epoch** (the hard one — see below).
+
+A single all-time sum weights a fogged, moonlit, defocused frame the same as a
+pristine one. The capacity law says the deep sum is information-rich enough
+that the *marginal* faint star is exactly what we are chasing; that faint limit
+is set by the WORST frames admitted, not the best.
+
+## The buckets
+
+Grade each frame into a tier, cheapest signals first (all derivable from data
+already computed per night, no new passes):
+
+| Tier | Meaning | Signals |
+|---|---|---|
+| **A** | pristine | clear verdict, dark trough, in-focus, no moon, mid-pass (not adjacent to a gap) |
+| **B** | good | clear but moonlit, or slightly off best focus |
+| **C** | usable | thin cloud, dawn/dusk twilight edge, focus dither extremes |
+| **D** | suspect | cloud verdict, adjacent to a capture gap or wedge recovery |
+| **X** | excluded | saturated, tracking/wind smear, frames during a power-cycle recovery |
+
+Tiers are **per frame**, not per night — a night degrades mid-way and the
+existing 10-min anchor already resolves that finely.
+
+## The recursion — why this is not just sorting
+
+Accumulate **A first**, then fold in B, then C. Each accumulation is a
+**deeper, cleaner reference than any single frame**, and that reference can
+re-grade the archive:
+
+1. **Sum A.** Even a partial A-sum has far better SNR than one frame.
+2. **Re-grade every frame against the A-sum.** Now real per-frame quality is
+   measurable rather than inferred: register the frame to the sum and measure
+   residual, PSF width against the sum's stars, transparency (photometric zero
+   point against the sum's own stars), astrometric scatter. These are *direct*
+   quality measures; the tier-0 signals (cloud verdict, LENSPOS) were only
+   proxies.
+3. **Re-bucket.** Frames promote and demote. A frame the proxies called C may
+   register beautifully; a nominally clear frame may show a transparency dip
+   the verdict missed.
+4. **Re-accumulate** with the improved buckets and per-frame weights
+   (weight ∝ transparency / variance, the standard inverse-variance form).
+5. **Repeat until the bucket assignment is stable.** Expect very few passes —
+   this converges fast because the sum is dominated by the good frames from
+   pass 1.
+
+This is self-bootstrapping: the sum grades the frames, better frames make a
+better sum. It also **produces the calibration the estate lacks** as a
+by-product — canon's `plate_scale_deg_px` and `pole_prior_xy` are both `null`,
+and registering frames against a deep sum is exactly how to solve them.
+
+## Epochs are bucket boundaries, not obstacles
+
+Peter: *"we can work out the epochs from the images."* Confirmed — the epoch is
+unambiguous per frame from sensor + resolution + Bayer, and the astrocam
+boundary is sharp (2026-07-28 imx219/3280×2464/BGGR → 2026-07-29
+imx708/4608×2592/RGGB). `POSINDEX` exists only from epoch 2 onward, so **derive
+the epoch from the image, do not trust the header to be present** (76% of the
+astrocam archive is epoch-1 and unstamped).
+
+An epoch change means different plate scale, pole, FOV, orientation, pedestal.
+So:
+
+- accumulate **per epoch into its own accumulator** — never co-add across a
+  boundary in sensor coordinates;
+- combine epochs **only on the sky grid**, after each epoch's own remap, where
+  they are commensurable;
+- this is a feature: epoch 1 is 47 nights (76%) of astrocam and must not be
+  thrown away just because the camera changed. Two epochs registered onto one
+  sky grid is a *deeper* result than either alone.
+
+## Coordination with astro-storage
+
+This strand owns the method; **astro-storage owns the bytes and must be
+consulted before any all-time pass**. The constraints that matter:
+
+- **Reading 703 GB repeatedly is the cost**, not storing the output (the
+  accumulator is MB-scale by the capacity law). A recursive scheme that
+  re-reads the archive per pass multiplies that.
+  → Mitigation: compute per-frame quality metrics **once**, in a single pass,
+  into a small sidecar table (one row per frame). Recursion then re-grades and
+  re-weights from the *table*, and only re-reads pixels when actually summing.
+- **Compute follows the data** (house rule): this runs on muppet where the
+  frames are, never over the wifi mount from pip.
+- muppet is ONE SMART-blind copy (`redundancy-not-capacity`) — an all-time read
+  pass is a good moment to notice unreadable frames; log them, do not silently
+  skip them.
+- the accumulator output is small and precious: it is a derived product that
+  took the whole archive to make. It belongs in the backed-up set, not in
+  scratch.
+
+## Open questions
+
+- Bucket thresholds are unset — derive from the data, not by guess. (The
+  meteor-detector session on 2026-08-13 is the cautionary tale: a threshold
+  guessed from three frames scored 1/38 against real ground truth.)
+- Does re-grading against the sum need the sum to be *complete*, or is a
+  partial A-sum enough to bootstrap? Probably partial — test it.
+- Interaction with outlier rejection: bucket weighting and per-cell rejection
+  must not double-count the same contaminant.
