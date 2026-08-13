@@ -537,6 +537,55 @@ Store the cap in **polar (r, θ)** rather than a square array: a cap is a disk,
 so a bounding square wastes 1 − π/4 ≈ **21%**, and (r, θ) additionally makes the
 sidereal shift a pure index-shift along θ.
 
+### 24-bit: measured, and NOT worth it
+
+Peter, 2026-08-13: *"we might use 24 bit integers."* Tested rather than assumed.
+**numpy has no `int24`** — it must be packed as 3×`uint8` and unpacked on every
+access, which defeats SIMD. Measured on a 2000×2000 accumulate:
+
+| Accumulator | Per frame | 88,415 frames |
+|---|---|---|
+| `uint32` | 3.6 ms | **5.3 min** |
+| packed 24-bit | 59.4 ms (**16.6× slower**) | **87.5 min** |
+
+So 24-bit costs **~82 extra minutes of CPU to save 3 MB** on the coarse buffer
+(25% of 12 MB). Even at native resolution it saves ~200 MB for hours of CPU.
+**Use `uint32`/`int32`.** The dtype question that *does* matter is canon's
+14-bit headroom (see above), not the width of the Pi-camera accumulator.
+
+### Different depths for I and chrominance — YES, this one pays
+
+Peter, same message: *"maybe different depths I = R + G + B and the
+chrominance."* This is the better idea, and it is physically justified rather
+than a storage trick:
+
+- **Luminance carries the faint-detection signal.** Summing all four CFA
+  positions into one I plane gains ~2× SNR over any single colour plane and is
+  what sets the faint limit — the map's headline result.
+- **Chrominance is low-spatial-frequency and low-priority.** Colour varies
+  slowly across a star field, is not what detects a faint source, and the drift
+  already sweeps each sky point across R/G/B pixels (STATE: *"the Earth
+  demosaics"*), so chroma fills in without needing full resolution or full
+  depth.
+
+| Scheme | Coarse | Native |
+|---|---|---|
+| **A**: 4 CFA sums + 4 counts, all full depth | 12.3 MB | 789 MB |
+| **B**: deep I + 2 chroma at half linear res + 1 count | **3.8 MB (31%)** | **247 MB (saves 542 MB)** |
+
+Scheme B is the one to build, and the saving grows with resolution — at 2×
+drizzle it is the difference between ~3.2 GB and ~1 GB per instrument.
+
+**Caveats to settle when implementing:**
+- Keep chroma as **difference planes** (e.g. R−I, B−I) rather than raw R and B,
+  so the deep I plane carries the precision and chroma stays small-valued —
+  which also means chroma may genuinely fit in `int16`, a real saving where
+  24-bit was not.
+- **The count plane must follow I**, since I is what depth is measured against.
+  Chroma at half resolution needs its own count only if its rejection differs.
+- Do **not** demosaic to form I. Sum the CFA positions that land in the same
+  sky cell; that is a sum of measurements, not an interpolation.
+
 ## Open questions
 
 - Bucket thresholds are unset — derive from the data, not by guess. (The
