@@ -588,6 +588,71 @@ fits.
   which is the **half-res capture mode** value; full-res is 0.02214. Sizing off
   the wrong one is a factor-of-2 error in each axis — 4× in the buffer.
 
+### The polar cap is circular — sparseness, and how to grid it
+
+Peter, 2026-08-13: *"eclipticam is a good example because it's fairly
+rectangular. the pole is going to be more circular so we might need to do
+something about the sparseness."* Correct, and the sparseness is **not uniform**
+— it varies *within* the buffer, which is what makes it awkward.
+
+**The problem.** In a naive (r, θ) grid every ring gets the same number of θ
+cells, but a ring's circumference goes as sin r. So sky-area-per-cell shrinks
+toward the pole:
+
+| r (deg) | ring circumference | sky area per θ-cell (rel. to rim) |
+|---|---|---|
+| 1 | 6.3° | **0.022** |
+| 10 | 62.5° | 0.222 |
+| 30 | 180.0° | 0.640 |
+| 51.4 (rim) | 281.3° | 1.000 |
+
+At r = 1° each cell covers **45× less sky** than at the rim. The pole is
+massively oversampled — cells there accumulate almost nothing each — while the
+rim is undersampled. Depth per cell becomes a function of radius, which
+corrupts exactly the comparison the map exists to make.
+
+**Three griddings, counted (astrocam, 0.0207 °/px, cap radius 51.39°). The
+cap's true information content is 7,757 sq° / (0.0207)² = 1.81e7 resolution
+elements — that is the floor:**
+
+| Scheme | Cells | vs floor |
+|---|---|---|
+| Naive (r, θ), θ-count set by the rim | 3.37e7 | +86% waste |
+| Cartesian square over the disk | 2.47e7 | +36% waste |
+| **Equal-area rings** (θ-count ∝ sin r) | **1.81e7** | **+0% — optimal** |
+
+**But equal-area rings break the property polar coordinates were chosen for.**
+With a different θ-count per ring, one global integer shift no longer serves the
+whole buffer: a 15°/h rotation is 125.8 cells at r=10°, 362.3 at r=30°, 566.2 at
+the rim — **fractional in nearly every ring**, so each would need resampling on
+every shift. That trades the cheap-shift advantage for the memory saving.
+
+**The fix — quantise ring θ-counts to 24 × 2ⁿ** (the HEALPix idea in its
+simplest useful form). Rings still scale ~sin r, but because every count is a
+multiple of 24 and 24 divides 360, a 15° rotation is **exactly n/24 cells — an
+integer in every ring**:
+
+| Scheme | Cells | vs floor | Shift |
+|---|---|---|---|
+| **24 × 2ⁿ quantised rings** | **1.87e7** | **+4%** | **integer in every ring** |
+
+56% of the naive scheme's memory, within 4% of the theoretical optimum, and the
+sidereal shift stays a pure index shift. That is the one to build.
+
+**Consequences:**
+
+- **Store rings as a ragged structure** (offset table + flat array), not a 2-D
+  array — a rectangular array is what forces the waste.
+- **The count planes matter even more here.** With rings of differing θ-counts,
+  per-cell depth is not inferable from geometry; it must be recorded.
+- **This is why polar and transit buffers are separate code paths**, not just
+  separate allocations: eclipticam's rectangular band has a uniform grid and a
+  translation shift; the cap has ragged rings and a rotation shift.
+- **Near the pole, rings collapse to n = 24 and below.** The innermost degree is
+  a handful of cells; at some radius it is simpler to switch to a small
+  Cartesian patch. Worth measuring where that crossover sits rather than
+  carrying ragged rings all the way to r = 0.
+
 ### 24-bit: measured, and NOT worth it
 
 Peter, 2026-08-13: *"we might use 24 bit integers."* Tested rather than assumed.
