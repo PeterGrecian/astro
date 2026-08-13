@@ -484,6 +484,59 @@ the scratch pass is what sizes it honestly. Open design points:
 - **Sizing follows the projection**, which is per-instrument — so there is a
   coarse buffer per instrument, not one shared array.
 
+### Polar buffer vs south buffer — separate, and the south one is EMPTY
+
+Peter, 2026-08-13: *"we are thinking about the max size the polar buffer needs
+to be and the south buffer. I think they are separate."* They are separate, and
+for a stronger reason than organisation. **Site latitude is 51.3948°N
+(Surbiton, `location.json`)**, which partitions the sphere into three regions
+with genuinely different accumulation regimes:
+
+| Region | Dec | Sky | Regime |
+|---|---|---|---|
+| **Circumpolar cap** | > +38.61° | 7,757 sq° (**18.8%**) | **Never sets** — 24 h/day available, every clear night, no seasonal gap |
+| **Transit band** | −38.61° … +38.61° | **62.4%** | Rises and sets; availability varies 24 h → 0 h with dec, and seasonally |
+| **South cap** | < −38.61° | **18.8%** | **Never rises — permanently invisible from this site** |
+
+Hours above horizon by declination (`cos H = −tan φ tan δ`):
+
+| Dec | +90 | +50 | +38.6 | +30 | 0 | −20 | −38.6 |
+|---|---|---|---|---|---|---|---|
+| h/day | 24 | 24 | 24 | 18.2 | 12 | 8.4 | **0** |
+
+**Consequences:**
+
+1. **There should be no south buffer.** 18.8% of the sphere never clears the
+   horizon from 51.39°N. Allocating for it stores guaranteed zeros. (If the
+   estate ever travels, that is a *new site*, not a bigger buffer.)
+2. **The real split is circumpolar vs transit, not north vs south.** They differ
+   in the natural coordinate (polar (r,θ) about the NCP vs RA/Dec bands), in
+   how the sidereal shift acts (a **rotation at constant radius** vs a
+   **translation along RA**), and in how depth accrues (uniform vs seasonal).
+   That is three good reasons for separate buffers with separate code paths.
+3. **Depth is wildly non-uniform across the map** — 24 h/day at the pole, 8.4 h
+   at dec −20°. The per-cell **count planes are not optional**: without them
+   `map depth` is unmeasurable and the two regions cannot be compared.
+
+**Coarse polar buffer sizing** (astrocam, plate scale 0.0207 °/px, full
+circumpolar cap radius 51.39°, int32, 4 CFA sum planes + 4 count planes):
+
+| Resolution | Edge | One plane | 4 sums + 4 counts |
+|---|---|---|---|
+| **coarse `[::8]`** | 620 px | 1.5 MB | **12.3 MB** |
+| `[::4]` | 1,241 px | 6.2 MB | 49.3 MB |
+| native | 4,965 px | 98.6 MB | 789 MB |
+| 2× drizzle | 9,931 px | 394 MB | 3.2 GB |
+
+So the **coarse polar buffer is ~12 MB — trivially RAM-resident**, and even the
+native buffer at 789 MB fits in muppet's memory. Only the drizzled buffer needs
+the tiling that `nit-accumulator-is-not-a-cache` describes. This is why coarse
+comes first: the entire polar pipeline can be exercised end-to-end in RAM.
+
+Store the cap in **polar (r, θ)** rather than a square array: a cap is a disk,
+so a bounding square wastes 1 − π/4 ≈ **21%**, and (r, θ) additionally makes the
+sidereal shift a pure index-shift along θ.
+
 ## Open questions
 
 - Bucket thresholds are unset — derive from the data, not by guess. (The
