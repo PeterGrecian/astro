@@ -742,6 +742,44 @@ here**, because the annulus never approaches the pole:
 Max/min ratio across the whole annulus is only **1.99×** — handled by the
 per-cell count planes, no ragged rings needed.
 
+**CORRECTION — the "straight shift" claim above is too strong.** Peter,
+2026-08-13: *"I think eclipticam is not uniform or horizontal enough for a
+straight shift."* Right, and it separates into two claims that land differently:
+
+- **The sky's MOTION is genuinely uniform in (r, θ).** A star at fixed dec has
+  fixed r and its RA advances exactly 15°/h, so *r constant, θ += 15°/h* holds
+  for every star regardless of where the camera points. That part stands.
+- **But the frame is nowhere near "horizontal" in this grid.** eclipticam's
+  field spans **r = 30.1° at its corners to 88.6° at its centre — ~58° of
+  radius within a single frame.** A row of sensor pixels crosses many rows of
+  the map. The image→(r, θ) transform is strongly curved across a 102° field
+  (projection + lens distortion), so a frame is a curved quadrilateral laid
+  across the annulus, not a horizontal strip.
+
+**And the shift is not an integer anyway.** At the full-res cell size
+(0.02214°), a **59.9 s exposure advances θ by 0.2496° = 11.28 cells**. Not a
+whole number — so sub-cell placement is required *per frame* whatever the
+storage scheme. `np.roll` was wrong.
+
+**What this changes, and what it does not:**
+
+- ✗ **Not** "one integer index shift, `np.roll` on axis 1." That was wrong.
+- ✓ Still true that the annulus is **dense** in (r, θ) — no corner waste, which
+  was the original reason to prefer polar here, and it survives intact.
+- ✓ Still true that cell-area variation is a mild **1.99×** (vs unbounded for a
+  pole-containing disc).
+- ✓ The uniform-θ grid **over-samples the annulus ends and under-samples
+  r = 90°** by that same 1.99×, since a fixed angular θ step spans
+  `ps·sin r` of actual sky.
+
+**The real operation is therefore: project each frame through the stored vector
+field onto (r, θ) with sub-cell (drizzle or Fourier-phase) placement.** The
+rotation is absorbed into that projection as a θ offset rather than applied as a
+separate shift step. This is what `hierarchical-vector-field.md` already
+implies — *"identification and accumulation are two uses of one object"* — and
+it means **no scheme gets a free shift**; the choice between polar and sparse
+rows rests on density and cell uniformity, not on shift cost.
+
 **astrocam → sparse rows.** Its swept region is a disc, which inscribes a square
 and wastes the corners. Storing each row as `x_start` + `x_extent` allocates only
 the chord inside the circle:
@@ -752,20 +790,22 @@ the chord inside the circle:
 | **sparse rows** | **1.05e7 — 78.5%, saves 21.5%** |
 | index overhead (3652 rows × 2 × int32) | 0.029 MB — negligible |
 
-**The trade to be explicit about.** These two schemes differ in what the shift
-costs:
+**The trade to be explicit about** — restated after the correction below, since
+the original version leaned on a "free shift" that does not exist:
 
-- eclipticam's polar grid: rotation is a **pure index shift**, cells degenerate
-  nowhere (no r → 0).
-- astrocam's sparse rows in a projected plane: cells are **uniform**, but
-  rotation **mixes x and y** — it is a true 2-D resample, not an index shift.
+- eclipticam's polar grid: **dense** (no corner waste), cell area varies a mild
+  1.99×, cells degenerate nowhere (no r → 0).
+- astrocam's sparse rows in a projected plane: **uniform cells**, 21.5% saved
+  over the bounding square, at the cost of an explicit index.
 
-That is an acceptable price *for a disc*, because the alternative (polar about
-the pole) buys the cheap shift only by accepting cells that degenerate to
-nothing at the centre. But it should be measured rather than assumed: if the
-per-frame resample proves expensive, the fallback is to accumulate astrocam in
-polar with the 24 × 2ⁿ ring quantisation described below, and project to the
-sparse-row form only for output.
+**Neither gets a free shift.** Sub-cell placement is required per frame in both
+(see the correction below: a 59.9 s exposure advances θ by 11.28 cells, not an
+integer), so the rotation is absorbed into the per-frame projection through the
+stored vector field rather than applied as a separate step. The choice between
+the two schemes therefore rests on **density and cell uniformity**, not on shift
+cost. If astrocam's projection proves expensive, the fallback remains polar with
+the 24 × 2ⁿ ring quantisation described below, projecting to sparse rows only
+for output.
 
 **Both schemes want the same two things:** per-cell count planes (depth is not
 inferable from geometry in either), and a self-describing header recording the
