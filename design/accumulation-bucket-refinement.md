@@ -211,6 +211,31 @@ Durable copy of the layout survey:
    `brightness.csv/png`, `max.fits.fz`, `sweep-*/`… → **filter children to
    two-digit names**. eclipticam likewise has `moon/`, `sweep-colour/`,
    `sweep-diff/` beside `v3w/` → **take `v3w` explicitly, never glob `*/`**.
+4. **NEVER ingest night-level FITS — they are DERIVED, and one of them is an
+   accumulation.** This is the two-digit filter with teeth. Measured on
+   astrocam 2026-08-13:
+
+   | Depth | What | Count |
+   |---|---|---|
+   | 3 (inside `HH/`) | **real captures** | **88,415** |
+   | 2 (night level) | `sum.fits.fz` ×57, `min` ×57, `max` ×57, `badpixel.fits` ×57, `derot.fits.fz` ×3 | 231 |
+
+   **`sum.fits.fz` is an already-accumulated night stack.** Ingest it as a
+   frame and the pass accumulates an accumulation — a whole night's photons in
+   one object, silently biasing every bucket it lands in. `max`/`min` are
+   extrema, not exposures; `badpixel` is a mask.
+
+   A plain `find -name '*.fits.fz'` returns **88,589** = 88,415 captures **+
+   174 derived** — this doc's own first count made exactly that mistake, and it
+   is invisible without the depth breakdown (the arithmetic still "looks
+   plausible"). **Rule: take FITS only from depth 3, under two-digit-named
+   children. Everything at the night level is derived — skip it.**
+
+**Known-empty night:** `astrocam-frames/2026-06-08` is an empty directory stub
+(zero entries of any kind). astrocam is **61 populated + 1 empty = 62 dirs**.
+astro-storage is recording it in the inventory as known-empty so
+`inventory-drift` will not later flag it as drift. The metrics pass should log
+it as a zero-frame night and carry on.
 
 **Use `astro/bin/astro-where <camera> <night>`** — it resolves (camera, night)
 across every root and layout, so a fifth hand-rolled resolver inherits nothing
