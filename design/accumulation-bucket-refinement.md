@@ -179,10 +179,54 @@ Asked; answered. These are not suggestions:
 **Caveat carried over:** "on bigstore" is **not** "backed up" — bigstore is one
 SMART-blind copy (`redundancy-not-capacity`).
 
-*(Note: the tail of astro-storage's reply — the tree-shapes enumeration, said to
-be THREE distinct shapes rather than the two assumed here, and a further item —
-was lost to a truncated drain and has been re-requested. Do not assume the tree
-shapes are known until it arrives.)*
+### Tree shapes — FOUR, and do not hand-roll a resolver
+
+Confirmed by astro-storage 2026-08-13 and verified against disk:
+
+| Camera | Layout |
+|---|---|
+| astrocam | `astrocam-frames/YYYY/MM/DD/` |
+| eclipticam | `eclipticam-frames/night/YYYY-MM-DD/v3w/` |
+| starcam | `starcam-frames/night/YYYY-MM-DD/`, hour dirs **either** raw `HH`+`HHb` **or** squashed `HH-sum8`+`HHb-sum2` |
+| eos / canon | `eos-frames/YYYY-MM-DD/`, `canon-frames/YYYY-MM-DD/` (plus `eos-frames-live/` = live preview JPEGs, low value, probably skip) |
+
+**Use `astro/bin/astro-where <camera> <night>`** — it resolves (camera, night)
+across every root and layout, so a fifth hand-rolled resolver inherits nothing
+and rots. Verified working for all four shapes. **Pass the FULL camera name**:
+`eclipticam-v3w`, not `eclipticam` (the bare name resolves nothing — an easy
+false "the tool is broken" conclusion).
+
+**Run `astro/bin/inventory-drift` BEFORE any multi-hour pass.** It stats every
+inventory row against disk and exits 1 on drift, so a dead path costs 30 seconds
+instead of surfacing three hours in. Verified 2026-08-13: 35 rows, 32 ok, 0
+missing, 0 size-drift, 3 skipped (two Deep Archive, one known-missing).
+
+**The inventory was rotten until today** (`astro f6736fc`, 22 → 35 rows): it
+asserted a squashed 2026-05-21 at a `/mnt/bigdisk` path that does not exist,
+omitted **nine** bigstore copies entirely, and pointed 2026-05-23 at puppy after
+it had moved. Anything reading `whereisallthedata.csv` to enumerate nights must
+re-read the new one.
+
+**Squash is DORMANT** (Peter's call, 2026-08-13: *"we don't do squashes much now
+— because we have more storage"*). The pressure that justified it (bigdisk 97%,
+bigdisk2 93%) went away when streams moved to bigstore (27% used). So **raw
+`HH`/`HHb` and squashed `HH-sum8`/`HHb-sum2` both persist indefinitely** — the
+metrics pass must treat both as a permanent condition, not a transitional one,
+and the frame count being budgeted against will not shrink.
+
+### "Backed up" — nothing here is, yet
+
+astro-storage closed the caveat explicitly: putting the accumulator on bigstore
+makes it **conventional, not safe**. bigstore is ONE copy and SMART-blind, so
+the first symptom of decay is data loss. **Right now nothing in this estate is
+genuinely backed up except what has reached Deep Archive.**
+
+Practical consequence: emit the `MANIFEST.sha256` as agreed, and treat the
+accumulator as a **cold-archive candidate**. When there is a stable version
+worth keeping, tell astro-storage and they will run it through
+`cold-archive-night` to Deep Archive. At 400–700 MB that is pennies, and it is
+the one artefact whose regeneration cost (a full 703 GB re-read) massively
+exceeds its storage cost. **Do not consider it safe until that has happened.**
 
 ## Open questions
 
