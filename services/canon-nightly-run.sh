@@ -16,8 +16,11 @@ REPO="$HOME/astro"
 PY=python3
 [ -x "$REPO/.venv/bin/python" ] && PY="$REPO/.venv/bin/python"
 
-# Night defaults to the last completed noon-rollover night, which post-dawn is
-# the one that just ended. Override with NIGHT=YYYY-MM-DD for a backfill.
+# Night defaults to night_of(now) -- the night we are currently INSIDE. A night
+# runs noon..noon UTC, so at 06:00 local (05:00 UTC) the observing session that
+# just finished has NOT formally ended; last_completed_night() would name the
+# night before, which is exactly the bug that silently redelivered 08-11 on
+# 2026-08-13. Override with NIGHT=YYYY-MM-DD for a backfill.
 NIGHT="${NIGHT:-}"
 ARGS=()
 [ -n "$NIGHT" ] && ARGS+=(--night "$NIGHT")
