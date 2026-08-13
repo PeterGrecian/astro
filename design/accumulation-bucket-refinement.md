@@ -134,6 +134,56 @@ consulted before any all-time pass**. The constraints that matter:
   took the whole archive to make. It belongs in the backed-up set, not in
   scratch.
 
+## astro-storage's answers (2026-08-13) — binding constraints
+
+Asked; answered. These are not suggestions:
+
+- **A sustained multi-hour full-archive read on muppet is approved**, no window
+  needed — nothing else contends but `canon-nightly` at ~06:05 BST. Two
+  conditions:
+  - **`nice -19` / `ionice -c3`.** muppet NFS-exports the tree to the whole
+    192.168.0.0/24; an unthrottled pass is felt by every host reading over NFS.
+  - **The pass MUST be resumable, checkpointed per night.** bigstore is
+    USB-attached, and muppet's failure mode is *physical interfaces, not
+    silicon* — a multi-hour saturating read is exactly the load that surfaces a
+    marginal cable. A mid-pass USB reset must cost one night, not the run.
+- **Log bad reads as an archive-wide scrub — requested, not merely permitted.**
+  This is the part astro-storage values most. Rationale earned the same day:
+  **2026-05-27 (40 GB starcam) is GONE** — on no online disk anywhere, recorded
+  as present since 2026-06-13, and nothing noticed for over two months. bigstore
+  is also **SMART-blind** (the Seagate Expansion bridge blocks ATA pass-through),
+  so there is no pending-sector warning; the first symptom is data loss. This
+  pass would be the first archive-wide integrity check the estate has ever had.
+  Log **path, night, camera, error, bytes-read-before-failure**, emit as a file
+  that diffs between runs. **Do not repair or quarantine — log and carry on.**
+- **Output location: `/mnt/bigstore/astro-data/<instrument>/accumulator/`** —
+  inside the tree being accumulated from, so it inherits the path conventions,
+  the storage-report scan, and the backup story. Give it a `MANIFEST.sha256`
+  like the night dirs, **re-emitted whenever the accumulator is rewritten**, so
+  `cold-archive-night` can take it. It is the "irreplaceable, tiny" class:
+  400–700 MB that costs the whole archive to regenerate.
+  The **sidecar quality table goes in the same tree but is DERIVED** — mark it
+  regenerable so nobody pays to replicate it. (If it turns out to cost many
+  hours to rebuild, say so and it gets reclassified.)
+- **Do not touch:**
+  - starcam **2026-05-21** and **2026-05-23** (40 GB each) — bigstore-only,
+    single copies, unsquashed raw. Reading is safe; never move, rewrite or clean.
+  - **2026-07-04 eclipticam-v3w exists ONLY in Deep Archive** — do not read it.
+    A restore costs money and takes hours. **Skip it and note the gap.**
+  - `/mnt/bigdisk` (97% full) and `/mnt/bigdisk2` (93%) — reads fine, **no
+    writes**.
+  - `/mnt/astrobackup` — a manually-mounted USB stick with no fstab entry; it
+    may vanish mid-pass. Ignore it.
+  - `/mnt/bigstore/astro-data/_non-astro/`.
+
+**Caveat carried over:** "on bigstore" is **not** "backed up" — bigstore is one
+SMART-blind copy (`redundancy-not-capacity`).
+
+*(Note: the tail of astro-storage's reply — the tree-shapes enumeration, said to
+be THREE distinct shapes rather than the two assumed here, and a further item —
+was lost to a truncated drain and has been re-requested. Do not assume the tree
+shapes are known until it arrives.)*
+
 ## Open questions
 
 - Bucket thresholds are unset — derive from the data, not by guess. (The
