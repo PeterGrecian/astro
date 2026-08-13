@@ -50,11 +50,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Default night = last completed noon-rollover night (delegate the definition
-# to the repo's own helper so it matches every other camera).
+# Default night = the night we are currently INSIDE, i.e. night_of(now) — NOT
+# last_completed_night(). A night runs noon..noon UTC, so the night whose
+# observing just finished at ~04:00 does not formally END until 12:00 UTC the
+# same day. This job is scheduled at 06:00 local (05:00 UTC), which is inside
+# that window: last_completed_night() there still names the night BEFORE, and
+# canon-nightly silently redelivered the previous night every single run
+# (caught 2026-08-13, when the 08-12 night produced no deliverables and the
+# 06:05 run republished 08-11 with exit 0).
+#
+# night_of() is right for any dawn-scheduled run between the end of capture and
+# noon UTC. But the timer is Persistent=true, so a catch-up run after a muppet
+# outage can fire AFTER noon, where night_of() names a night still in progress.
+# So: take night_of(), and if that night has no source dir yet, fall back to the
+# last completed one. That covers both sides of noon without guessing.
 if [[ -z "$NIGHT" ]]; then
   NIGHT="$(python3 -c 'import sys; sys.path.insert(0,"'"$REPO"'");
-from astro.nightdir import last_completed_night; print(last_completed_night())')"
+from astro.nightdir import night_of, last_completed_night
+import os
+root = "'"$SRC_ROOT"'"
+cur, prev = night_of(), last_completed_night()
+print(cur if os.path.isdir(os.path.join(root, cur)) else prev)')"
 fi
 echo "== canon-nightly $NIGHT  (host $(hostname -s), $(date -u +%FT%TZ)) =="
 
