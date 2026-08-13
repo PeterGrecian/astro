@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""inventory-drift — verify every row of whereisallthedata.csv still exists.
+
+The inventory *asserts* that a camera-night lives at a given host:path. Nothing
+checked those assertions, so they rotted silently: by 2026-08-12 the CSV claimed
+a squashed 2026-05-21 on a bigdisk path that did not exist, omitted nine bigstore
+copies created by the bigstore migration, and still pointed 2026-05-27 at a puppy
+directory that had been gone for months (that night is now unaccounted for on
+every online disk). None of it was noticed until someone asked an unrelated
+question.
+
+This is the missing feedback loop: walk the CSV, stat each path on its host, and
+report where the record and the disk disagree.
+
+    inventory-drift                 # check every row
+    inventory-drift --camera eos    # only rows for one camera
+    inventory-drift --host muppet   # only rows on one host
+    inventory-drift --sizes         # also compare recorded vs actual bytes
+    inventory-drift --quiet         # only print problems (for cron/timer use)
+
+Verdicts, one per row:
+    ok        path exists (and, with --sizes, is within tolerance)
+    MISSING   path does not exist on that host — the record is a lie
+    SIZE      exists but bytes differ from the record by more than --tolerance
+    skip      not checkable from here (cold storage, unreachable host, marked
+              missing) — reported, never silently ignored
+
+Exit status: 0 when nothing is missing or mis-sized, 1 otherwise — so a timer or
+CI step fails loudly on drift.
+
+Cold rows (storage_class deep-archive / glacier) are NOT verified: confirming an
+S3 object is a network call and restoring one costs money. They are listed as
+skips so the gap in coverage stays visible.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+CSV_PATH = Path.home() / "astro" / "whereisallthedata.csv"
+
+BYTE_COLS = (
+    "raw_bayer_bytes",
+    "binned_bytes",
+    "raw_sum8_bytes",
+    "binned_sum2_bytes",
+    "tarball_bytes",
+)
+
+# storage classes we cannot cheaply verify from a workstation
+COLD_CLASSES = {"deep-archive", "glacier", "cold"}
+# rows already known-bad; listed, not re-checked
+DEAD_CLASSES = {"missing"}
+
+SSH_OPTS = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"]
+
+
+def local_host() -> str:
+    import socket
+
+    return socket.gethostname().split(".")[0]
+
+
+def expand(path: str) -> str:
+    return path.strip()
+
+
+def probe_cmd(path: str) -> str:
+    """Shell snippet: print 'MISSING' or 'OK <bytes>' for a directory or file.
+
+    A leading `~/` must reach the remote shell UNQUOTED or it is treated as a
+    literal directory name and every home-relative row reports MISSING — which
+    is exactly what the first version of this tool did, inventing seven puppy
+    failures for directories that were plainly there. Quote only the remainder.
+    """
+    if path.startswith("~/"):
+        p = "~/" + shlex.quote(path[2:])
+    elif path == "~":
+        p = "~"
+    else:
+        p = shlex.quote(path)
+    # du -sb on a dir, stat on a file; either way one integer of bytes.
+    return (
+        f'if [ -e {p} ]; then '
+        f'b=$(du -sb {p} 2>/dev/null | cut -f1); '
+        f'echo "OK ${{b:-0}}"; '
+        f'else echo MISSING; fi'
+    )
+
+
+def run_local(path: str) -> tuple[str, int]:
+    out = subprocess.run(
+        ["bash", "-c", probe_cmd(path)],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return parse_probe(out)
+
+
+def run_remote(host: str, path: str) -> tuple[str, int]:
+    r = subprocess.run(
+        ["ssh", *SSH_OPTS, f"peter@{host}", probe_cmd(path)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0 and not r.stdout.strip():
+        return ("UNREACHABLE", 0)
+    return parse_probe(r.stdout.strip())
+
+
+def parse_probe(out: str) -> tuple[str, int]:
+    if out.startswith("OK"):
+        parts = out.split()
+        try:
+            return ("OK", int(parts[1]))
+        except (IndexError, ValueError):
+            return ("OK", 0)
+    if out == "MISSING":
+        return ("MISSING", 0)
+    return ("UNREACHABLE", 0)
+
+
+def recorded_bytes(row: dict) -> int:
+    total = 0
+    for c in BYTE_COLS:
+        try:
+            total += int(row.get(c) or 0)
+        except ValueError:
+            pass
+    return total
+
+
+def human(n: float) -> str:
+    for unit in ("B", "K", "M", "G", "T"):
+        if abs(n) < 1024:
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}P"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Verify whereisallthedata.csv rows against what is on disk."
+    )
+    ap.add_argument("--csv", type=Path, default=CSV_PATH)
+    ap.add_argument("--camera", help="only rows for this camera")
+    ap.add_argument("--host", help="only rows on this host")
+    ap.add_argument("--sizes", action="store_true", help="compare recorded vs actual bytes")
+    ap.add_argument(
+        "--tolerance",
+        type=float,
+        default=5.0,
+        help="percent size difference tolerated with --sizes (default 5; "
+        "vfat cluster slack alone runs ~0.05%%)",
+    )
+    ap.add_argument("--quiet", action="store_true", help="print only problems")
+    args = ap.parse_args()
+
+    if not args.csv.is_file():
+        print(f"no CSV at {args.csv}", file=sys.stderr)
+        return 1
+
+    with args.csv.open(newline="") as f:
+        rows = [r for r in csv.DictReader(f) if (r.get("night") or "").strip()]
+
+    if args.camera:
+        rows = [r for r in rows if (r.get("camera") or "").strip() == args.camera]
+    if args.host:
+        rows = [r for r in rows if (r.get("host") or "").strip() == args.host]
+
+    me = local_host()
+    missing, sized, skipped, ok = [], [], [], []
+
+    for r in rows:
+        night = r["night"].strip()
+        camera = (r.get("camera") or "starcam").strip()
+        host = (r.get("host") or "?").strip()
+        path = expand(r.get("path") or "")
+        sclass = (r.get("storage_class") or "local").strip()
+        label = f"{night} {camera:14} {host:8} {path}"
+
+        if sclass in DEAD_CLASSES:
+            skipped.append((label, "already marked missing"))
+            continue
+        if sclass in COLD_CLASSES or host == "aws":
+            skipped.append((label, f"cold ({sclass}) — not verified"))
+            continue
+
+        if host in (me, "localhost"):
+            verdict, nbytes = run_local(path)
+        else:
+            verdict, nbytes = run_remote(host, path)
+
+        if verdict == "UNREACHABLE":
+            skipped.append((label, f"host {host} unreachable"))
+            continue
+        if verdict == "MISSING":
+            missing.append((label, recorded_bytes(r)))
+            continue
+
+        if args.sizes:
+            rec = recorded_bytes(r)
+            if rec and nbytes:
+                diff = abs(nbytes - rec) / rec * 100
+                if diff > args.tolerance:
+                    sized.append((label, rec, nbytes, diff))
+                    continue
+        ok.append((label, nbytes))
+
+    if not args.quiet:
+        for label, nbytes in ok:
+            print(f"ok       {label}  ({human(nbytes)})")
+        for label, why in skipped:
+            print(f"skip     {label}  — {why}")
+
+    for label, rec in missing:
+        print(f"MISSING  {label}  (record claims {human(rec)})")
+    for label, rec, act, diff in sized:
+        print(f"SIZE     {label}  recorded {human(rec)} vs actual {human(act)} ({diff:.0f}% off)")
+
+    total = len(ok) + len(missing) + len(sized) + len(skipped)
+    print(
+        f"\n{total} rows: {len(ok)} ok, {len(missing)} missing, "
+        f"{len(sized)} size-drift, {len(skipped)} skipped"
+    )
+    if missing:
+        print("\nA MISSING row means the inventory asserts data that is not there.")
+        print("Find it, or mark the row storage_class=missing with what you searched.")
+
+    return 1 if (missing or sized) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,22 +1,36 @@
 night,camera,host,path,raw_bayer_bytes,binned_bytes,raw_sum8_bytes,binned_sum2_bytes,tarball_bytes,storage_class,notes
 2026-05-20,starcam,aws,s3://astro-berrylands-eu-west-1/cold/starcam/night/2026-05-20/starcam-night-2026-05-20.tar,0,0,0,0,5870551040,deep-archive,tar of squashed night (sum8+sum2); sha256 in sidecar + object metadata
 2026-05-20,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-20,0,0,3034776960,2832361920,0,local,squashed; sources deleted
+2026-05-20,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-20,0,0,3034776960,2832361920,0,local,squashed sum8+sum2; verified 2026-08-12
 2026-05-20,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-20,0,0,3034776960,2832361920,0,usb-stick,squashed sum8+sum2; MANIFEST.sha256 verified
-2026-05-21,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-21,0,0,5566740480,5175250560,0,local,squashed sum8+sum2; sources deleted; 1 truncated 01b frame quarantined
+2026-05-21,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-21,33114506845,9490578560,0,0,0,local,NOT squashed (raw+binned hour dirs); 40G 16899 files; corrected 2026-08-12 — was wrongly recorded as squashed 10G on bigdisk
 2026-05-22,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-22,0,0,6063681600,0,0,local,no binned (never built); raw-sum8 only
-2026-05-22,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-22,0,0,6063681600,0,0,usb-stick,squashed sum8+sum2; MANIFEST.sha256 verified
-2026-05-23,starcam,puppy,~/starcam-frames/night/2026-05-23,33973688785,8800719148,0,0,0,local,not yet squashed; darkest night
+2026-05-22,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-22,0,0,6063681600,0,0,local,sum8 only (no sum2 twin); verified 2026-08-12
+2026-05-22,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-22,0,0,6063681600,0,0,usb-stick,sum8 only (no sum2 twin); MANIFEST.sha256 present
+2026-05-23,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-23,33973688785,8800719148,0,0,0,local,not yet squashed; darkest night; moved puppy->bigstore; corrected 2026-08-12
 2026-05-24,starcam,muppet,/mnt/bigdisk/starcam-frames/night/2026-05-24,0,0,5391210240,4989686400,0,local,squashed sum8+sum2; sources deleted
+2026-05-24,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-24,0,0,5391210240,4989686400,0,local,squashed sum8+sum2; verified 2026-08-12 — second copy, night is NOT single-copy
+2026-05-24,starcam,puppy,~/starcam-frames/night/2026-05-24,0,0,0,0,0,local,unsquashed sources still on puppy (39G 15160 files); found 2026-08-12
+2026-05-25,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-25,0,0,2340740160,2203122240,0,local,squashed sum8+sum2 (15G on disk incl. retained sources); verified 2026-08-12
 2026-05-25,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-25,0,0,2340740160,2203122240,0,usb-stick,squashed sum8+sum2; MANIFEST.sha256 verified
 2026-05-25,starcam,puppy,~/starcam-frames/night/2026-05-25,0,0,2340740160,2203122240,0,local,squashed; sources retained on puppy
 2026-05-26,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-26,0,0,3415982400,3143828160,0,local,squashed; sources deleted
+2026-05-26,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-26,0,0,3415982400,3143828160,0,local,squashed sum8+sum2; verified 2026-08-12
 2026-05-26,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-26,0,0,3415982400,3143828160,0,usb-stick,squashed sum8+sum2; MANIFEST.sha256 verified
-2026-05-27,starcam,puppy,~/starcam-frames/night/2026-05-27,31537339055,8926499162,0,0,0,local,not yet squashed
+2026-05-27,starcam,MISSING,~/starcam-frames/night/2026-05-27 (was puppy),31537339055,8926499162,0,0,0,missing,"NOT FOUND 2026-08-12 — searched puppy, muppet bigdisk/bigdisk2/bigstore/astrobackup, S3 cold, glacier-app, both trashcans. Was 40G raw (31.5G bayer + 8.9G binned) per inventory since 2026-06-13. Fate unknown; row retained as the only record it existed."
+2026-05-28,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-28,18184016878,5001297274,0,0,0,local,not yet squashed; verified 2026-08-12
 2026-05-28,starcam,puppy,~/starcam-frames/night/2026-05-28,18184016878,5001297274,0,0,0,local,not yet squashed
 2026-05-30,starcam,muppet,/mnt/bigdisk/starcam-backup/2026-05-30,0,0,4668364800,4123123200,0,local,squashed; sources deleted
+2026-05-30,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-05-30,0,0,4668364800,4123123200,0,local,squashed sum8+sum2; verified 2026-08-12
 2026-05-30,starcam,muppet,/mnt/astrobackup/starcam/night/2026-05-30,0,0,4668364800,4123123200,0,usb-stick,squashed sum8+sum2; MANIFEST.sha256 verified
+2026-06-01,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-06-01,21677190131,6541040490,0,0,0,local,not yet squashed; median=0 anomaly; verified 2026-08-12
 2026-06-01,starcam,puppy,~/starcam-frames/night/2026-06-01,21677190131,6541040490,0,0,0,local,not yet squashed; median=0 anomaly
+2026-06-02,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-06-02,2814531131,828209314,0,0,0,local,not yet squashed; median=0 anomaly; verified 2026-08-12
 2026-06-02,starcam,puppy,~/starcam-frames/night/2026-06-02,2814531131,828209314,0,0,0,local,not yet squashed; median=0 anomaly
+2026-06-03,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-06-03,8855274168,2556620370,0,0,0,local,not yet squashed; dark; verified 2026-08-12
 2026-06-03,starcam,puppy,~/starcam-frames/night/2026-06-03,8855274168,2556620370,0,0,0,local,not yet squashed; dark
+2026-06-04,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-06-04,5633508115,1651923956,0,0,0,local,not yet squashed; dark; verified 2026-08-12
 2026-06-04,starcam,puppy,~/starcam-frames/night/2026-06-04,5633508115,1651923956,0,0,0,local,not yet squashed; dark
 2026-07-04,eclipticam-v3w,aws,s3://astro-berrylands-eu-west-1/cold/eclipticam-v3w/night/2026-07-04/eclipticam-v3w-night-2026-07-04.tar,0,0,0,0,4737699840,deep-archive,"full-res mosaic night tar (fits.fz, 272 frames); sha256 in sidecar (2fe2036c1c88…)"
+2026-08-10,eos,muppet,/mnt/bigstore/astro-data/eos-frames/2026-08-10,15578157056,0,0,0,0,local,CR2 raws + manifest.csv (461 files); very clear night; first eos row in inventory
+2026-08-10,eos,muppet,/mnt/astrobackup/eos/night/2026-08-10,15578157056,0,0,0,0,usb-stick,CR2 raws + manifest.csv (461 files); copied 2026-08-12; rsync size+mtime verified vs bigstore
