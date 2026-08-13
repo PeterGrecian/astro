@@ -339,6 +339,60 @@ worth keeping, tell astro-storage and they will run it through
 the one artefact whose regeneration cost (a full 703 GB re-read) massively
 exceeds its storage cost. **Do not consider it safe until that has happened.**
 
+## Scratch runs — start low-resolution (Peter, 2026-08-13)
+
+*"We should start doing scratch runs. low resolution accumulations. coarse
+buckets for sorting good pixels from bad."*
+
+The theory is settled; the **plumbing** is not, and every error this project has
+hit has been in the plumbing — a night-level `sum.fits.fz` counted as a frame, a
+nested metadata tree mistaken for the data, a threshold guessed from three
+frames that scored 1/38 against ground truth. A decimated pass exercises the
+walk, the epoch split, the derived-product exclusion and the bucket logic at
+1/64 of the pixels, so a mistake costs minutes.
+
+**Measured read costs (muppet, local disk, 2026-08-13):**
+
+| Method | Per frame | 88,415 frames |
+|---|---|---|
+| pip, over the wifi mount | 1.65 s | ~40 h |
+| muppet, full read | 0.15 s | ~3.7 h |
+| muppet, `.section[::8,::8]` | **0.09 s** | **~2.2 h** |
+| header only | 0.002 s | ~3 min |
+
+An 11× penalty for reading over wifi — *compute follows the data*, quantified.
+Use `hdu.section[::8,::8]`: it reads a strided slice **without materialising the
+full array**, so decimation saves TIME, not just memory. (Decimating after a
+full read saves nothing — the cost is decompression.)
+
+A full-archive scratch pass is therefore a **single-digit-hours** job.
+
+### First scratch result — metrics are NOT comparable across epochs
+
+Three nights × 20 frames, both epochs, 0 bad reads:
+
+| Night | Epoch | median | contrast |
+|---|---|---|---|
+| 2026-06-10 | 1 (imx219, 3280×2464, BGGR) | **518** | 4.2 |
+| 2026-07-28 | 1 | **516** | 3.8 |
+| 2026-08-12 | 2 (imx708, 4608×2592, RGGB) | **78** | 2.2 |
+
+Two things confirmed, one hazard found:
+
+- **Epoch is derivable from the image** — sensor + resolution + Bayer separate
+  cleanly, and epoch-1 frames show `POSINDEX = none`, so the header genuinely
+  cannot be relied on.
+- **HAZARD: a raw threshold on `median` would bucket by CAMERA, not by
+  QUALITY.** The 518 → 78 drop is not a darker sky; it is a different sensor
+  with a different pedestal (registry: epoch 1 = 512, epoch 2 = 50). Any
+  absolute cut would put every epoch-1 frame in one bucket and every epoch-2
+  frame in another — a plausible-looking number measuring the wrong thing, the
+  same failure shape as the delivery bug and the `sum.fits.fz` miscount.
+- **Therefore: bucket thresholds must be derived PER EPOCH**, or the metrics
+  normalised to their epoch's pedestal (the `log2(mean/pedestal)` "stops" axis
+  the brightness charts already use) before any cut is applied. Percentile-
+  within-epoch is the safer default: it cannot be fooled by a pedestal change.
+
 ## Open questions
 
 - Bucket thresholds are unset — derive from the data, not by guess. (The
