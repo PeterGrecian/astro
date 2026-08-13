@@ -283,6 +283,59 @@ Following `catalogue-deliverable.md`'s pattern, once detection is trustworthy:
 - meteors kept OUT of the accumulator regardless — this table is a *parallel*
   output of the same rejection pass, never an input to the sum.
 
+### Cross-camera, not per-camera (Peter, 2026-08-13)
+
+The shape above still hangs each count off a *camera's* night page, because
+that is how every deliverable is currently built: S3 is
+`<camera>/nights/<night>/`, the site routes `/astro/<camera>/night/<night>`,
+and the calendar is per camera. **Transients cut across that grain.** Peter:
+*"we could do them not per camera — I'm thinking we need more joined up
+unified deliverables. maybe a transients section which has crops of meteors
+with camera and time info."*
+
+Why the cross-camera cut is the right one *for this deliverable specifically*:
+
+- **A meteor is an event in the sky, not an event in a camera.** The camera is
+  metadata about how it was observed. Filing it under one camera is the same
+  category error as filing a star under the lens that saw it.
+- **The prize needs it.** Two cameras on one event give altitude and speed by
+  triangulation; three all recorded meteors on 2026-08-10. Coincidence is only
+  visible if the events sit in ONE list ordered by time — per-camera pages
+  structurally hide the thing we most want to find.
+- **Confidence comes from coincidence.** This doc already says confidence can
+  never come from persistence; multi-camera agreement is the substitute, and
+  it is only computable across cameras.
+- **The rate curve is an estate result, not a camera result.** "What does a
+  year-scale urban dataset yield" is answered by the whole instrument.
+
+Proposed form — a **crop-led** section, evidence first:
+
+- **`/astro/transients`** (Peter, 2026-08-13 — the confirmed path). It sits as a
+  SIBLING of the camera pages, not under one: the route dispatch matches
+  cameras by explicit alternation
+  (`/astro/(astrocam|eclipticam|canon)/night/...`), so `transients` cannot
+  collide, and `/astro/storage` + `/astro/disks` are the existing precedent for
+  a cross-cutting astro page that belongs to no single camera.
+  A time-ordered gallery for a night (and across nights),
+  each entry a **cutout PNG** of the streak with `camera`, `UTC time`,
+  `night`, length/elongation, and class. The crop IS the deliverable: it is
+  what a human uses to judge, and this session proved three times that only
+  the picture settles it.
+- key layout: `transients/<night>/<epoch_ms>-<camera>.png` + a single
+  `transients/<night>/index.json`, aggregated to `transients/index.json`.
+  Note `<epoch_ms>` is already the estate-wide frame naming convention, so a
+  crop's identity is derivable from the frame it came from.
+- **Coincidence badge** when two cameras have events within a few seconds —
+  the cross-camera payoff made visible.
+- per-camera night pages keep a *link* ("3 transients this night →"), so the
+  camera view still works; it just stops being the only axis.
+
+Build order: the per-night `transients.json` (already written locally by
+`find-transients`) is the raw material; upload it, then the crops, then the
+aggregate index, then the page. **All of it gated on detection being
+trustworthy** — see Status; as of 2026-08-13 recall against Peter's 38 probes
+is 1/38, so a published count would be a wrong number on the public face.
+
 ## Provenance
 
 Peter spotted the meteors by eye; both of his physical arguments (mid-night
