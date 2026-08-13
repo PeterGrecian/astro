@@ -712,7 +712,71 @@ against its two simultaneous canon frames — found **no counterpart**, which is
 weak evidence *against* full containment at that moment. Treat nesting as a
 promising hypothesis to test once canon is solved, not as an established fact.
 
+### Storage per instrument: polar for eclipticam, sparse rows for astrocam
+
+Peter, 2026-08-13: *"polar coordinates will be efficient for eclipticam.
+astrocam can use sparse rows. Each row has an x_start value and an x_extent."*
+
+**This is the right split, and it is the opposite of what the section below
+assumed.** The deciding property is simple:
+
+> **astrocam CONTAINS the pole; eclipticam does not** (its annulus starts at
+> r = 30.1°). The sin r degeneracy that ruins a polar grid only exists where
+> r → 0.
+
+**eclipticam → polar (r, θ).** Its swept region is an annulus, and *an annulus
+is a rectangle in polar coordinates*: r is a bounded row index (30.1 … 128.6°),
+θ wraps 0–360°, and **every cell is real sky — no sparseness at all**. Better,
+the sidereal rotation is `+15°/h in θ, identical for every row` — one integer
+index shift, rows independent, wrapping naturally. It is `np.roll` on axis 1.
+
+The cell-area variation that made polar unattractive for a disc is **mild
+here**, because the annulus never approaches the pole:
+
+| r | ring circumference | rel. cell area |
+|---|---|---|
+| 30.1° | 180.5° | 0.50 |
+| 90° | 360.0° | 1.00 |
+| 128.6° | 281.3° | 0.78 |
+
+Max/min ratio across the whole annulus is only **1.99×** — handled by the
+per-cell count planes, no ragged rings needed.
+
+**astrocam → sparse rows.** Its swept region is a disc, which inscribes a square
+and wastes the corners. Storing each row as `x_start` + `x_extent` allocates only
+the chord inside the circle:
+
+| | Cells |
+|---|---|
+| bounding square (3652²) | 1.33e7 |
+| **sparse rows** | **1.05e7 — 78.5%, saves 21.5%** |
+| index overhead (3652 rows × 2 × int32) | 0.029 MB — negligible |
+
+**The trade to be explicit about.** These two schemes differ in what the shift
+costs:
+
+- eclipticam's polar grid: rotation is a **pure index shift**, cells degenerate
+  nowhere (no r → 0).
+- astrocam's sparse rows in a projected plane: cells are **uniform**, but
+  rotation **mixes x and y** — it is a true 2-D resample, not an index shift.
+
+That is an acceptable price *for a disc*, because the alternative (polar about
+the pole) buys the cheap shift only by accepting cells that degenerate to
+nothing at the centre. But it should be measured rather than assumed: if the
+per-frame resample proves expensive, the fallback is to accumulate astrocam in
+polar with the 24 × 2ⁿ ring quantisation described below, and project to the
+sparse-row form only for output.
+
+**Both schemes want the same two things:** per-cell count planes (depth is not
+inferable from geometry in either), and a self-describing header recording the
+scheme, extent and epoch union.
+
 ### The polar cap is circular — sparseness, and how to grid it
+
+**SUPERSEDED for astrocam by the section above** (sparse rows), but kept because
+it (a) quantifies *why* a polar grid is wrong for a pole-containing disc, and
+(b) the 24 × 2ⁿ ring quantisation remains the fallback if astrocam's per-frame
+2-D resample proves too expensive.
 
 Peter, 2026-08-13: *"eclipticam is a good example because it's fairly
 rectangular. the pole is going to be more circular so we might need to do
