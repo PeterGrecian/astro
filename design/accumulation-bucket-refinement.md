@@ -1085,6 +1085,59 @@ Both fall out of statistics already being collected: the count planes record
   samples are phase-clustered can simply be *down-weighted*, which is a
   continuous statistical response rather than a binary classification.
 
+## Relationship to detrans — the working precedent, and its two limits
+
+Peter, 2026-08-13: *"we will start with astrocam. we have done detrans which is
+related to this method but relies on modeling the mapping and the sampling is
+naive."* Exactly right, and worth stating precisely because `bin/detrans-sweep`
+is the **proven, working ancestor** of the map — the same idea (undo the sky's
+motion, then co-add) at one-night scale.
+
+**What detrans does:** undistort each frame, shift each by `-v·(t−t₀)` to cancel
+a near-uniform translation, then max-stack a 10-min window so the per-frame 60 s
+streaks overlap into one sharp high-SNR streak per star. It **works**, and its
+output is on the public site today.
+
+**Limit 1 — the mapping is MODELLED, not measured.** detrans uses a two-parameter
+radial polynomial, `s = 1 + k1·rd² + k2·rd⁴` with `k1 = −0.636, k2 = +0.311`
+fitted once (worklog 2026-06-21), plus a single global velocity `v = 0.040 px/s`
+at a fixed 7.8° from horizontal. That is a *smooth analytic guess* at the true
+transform, uniform across the frame and constant in time. The map instead
+resamples through the **stored, measured vector field** — per-tile effective
+poles, SIP distortion, refined by every night that contributes. The bootstrap
+above is precisely the machinery for producing what detrans assumes.
+
+**Limit 2 — the sampling is naive.** Both stages use `cv2.INTER_LINEAR`
+(bilinear), applied twice: once in the undistort `remap`, once in the
+`warpAffine` shift. `what-accumulation-buys.md` and STATE's accumulation theory
+both warn against exactly this — *"naive interpolation on undersampled data
+aliases"*. Two chained bilinear passes also smooth the PSF twice, which is
+precisely the sub-pixel information the map exists to preserve. The map uses
+**drizzle-style variable-pixel accumulation** (or Fourier-phase placement)
+instead, and resamples **once**, at accumulation time.
+
+**A third difference, implicit in Peter's framing:** detrans models the motion as
+a *uniform translation*, valid only over a short window for a far-off-pole
+camera. That assumption fails outright for astrocam, which contains the pole —
+there the motion is a rotation, and no single velocity vector describes it. This
+is why detrans was built for eclipticam-v3w and why **astrocam needs the map**
+rather than an extension of detrans.
+
+**So: start with astrocam** (Peter's call). It is the right first instrument
+because:
+- its map is a **disc** — the smallest extent of the three (4,328 sq° vs
+  eclipticam's 30,715), so the buffers are small and iteration is fast;
+- it contains the pole, so Polaris is *in frame* — the bootstrap's seed and the
+  natural origin, with distortion ≈ 0 there;
+- it has by far the **most data** (88,415 frames, 61 populated nights, both
+  epochs) — the recursion has something to bite on;
+- and detrans **cannot** serve it, so the map is not duplicating existing
+  capability.
+
+**Keep detrans.** It is the validation reference: for a window where both run,
+the map's output should be at least as sharp. A method that cannot beat two
+bilinear passes and a hand-fitted quartic is not yet earning its complexity.
+
 ## Open questions
 
 - Bucket thresholds are unset — derive from the data, not by guess. (The
