@@ -55,6 +55,9 @@ BYTE_COLS = (
 COLD_CLASSES = {"deep-archive", "glacier", "cold"}
 # rows already known-bad; listed, not re-checked
 DEAD_CLASSES = {"missing"}
+# deliberately-empty dirs: the dir SHOULD exist and SHOULD hold nothing. Checked
+# (both conditions), but zero bytes is the pass condition, not a failure.
+EMPTY_CLASSES = {"empty"}
 
 SSH_OPTS = ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"]
 
@@ -200,6 +203,16 @@ def main() -> int:
             continue
         if verdict == "MISSING":
             missing.append((label, recorded_bytes(r)))
+            continue
+
+        # A known-empty night: the dir must exist AND still be empty. If data
+        # appears in it, that is drift worth knowing about (the night was not
+        # empty after all, or something is writing where it should not).
+        if sclass in EMPTY_CLASSES:
+            if nbytes > 4096:  # bare dir stub is ~4K
+                sized.append((label, 0, nbytes, 100.0))
+            else:
+                ok.append((label, nbytes))
             continue
 
         if args.sizes:

@@ -32,5 +32,6 @@ night,camera,host,path,raw_bayer_bytes,binned_bytes,raw_sum8_bytes,binned_sum2_b
 2026-06-04,starcam,muppet,/mnt/bigstore/astro-data/starcam-frames/night/2026-06-04,5633508115,1651923956,0,0,0,local,not yet squashed; dark; verified 2026-08-12
 2026-06-04,starcam,puppy,~/starcam-frames/night/2026-06-04,5633508115,1651923956,0,0,0,local,not yet squashed; dark
 2026-07-04,eclipticam-v3w,aws,s3://astro-berrylands-eu-west-1/cold/eclipticam-v3w/night/2026-07-04/eclipticam-v3w-night-2026-07-04.tar,0,0,0,0,4737699840,deep-archive,"full-res mosaic night tar (fits.fz, 272 frames); sha256 in sidecar (2fe2036c1c88…)"
+2026-06-08,astrocam,muppet,/mnt/bigstore/astro-data/astrocam-frames/2026-06-08,0,0,0,0,0,empty,"KNOWN-EMPTY night dir — zero entries of any kind (4.0K stub, mtime 2026-06-15). Verified 2026-08-13 by astro-storage + astro-science independently. Recorded so it is not re-investigated and so inventory-drift does not read it as drift. astrocam = 61 populated nights + this one."
 2026-08-10,eos,muppet,/mnt/bigstore/astro-data/eos-frames/2026-08-10,15578157056,0,0,0,0,local,CR2 raws + manifest.csv (461 files); very clear night; first eos row in inventory
 2026-08-10,eos,muppet,/mnt/astrobackup/eos/night/2026-08-10,15578157056,0,0,0,0,usb-stick,CR2 raws + manifest.csv (461 files); copied 2026-08-12; rsync size+mtime verified vs bigstore
