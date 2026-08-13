@@ -135,7 +135,12 @@ the accumulator where every pixel's light belongs on the sphere.
 - **Method: proven in pieces, not yet assembled end-to-end.** Near-pole/optical-
   axis solve works (astrocam plate-solved 2026-07-02, Tycho-2 idx 19); the SIP
   field is what `standing-plate-solve.md`'s `astro-solve` produces per night; the
-  per-tile pole map gives the distortion field. Missing: the layered assembly
+  per-tile pole map gives the distortion field. **The assembly is now specified**
+  — see `accumulation-bucket-refinement.md` § "The bootstrap — locate Polaris,
+  accumulate, store the field" (Peter, 2026-08-13), which adds the element this
+  doc lacked: the field is **stored and accumulated** at
+  `<instrument>/map/field/` rather than re-derived per night, and the deep map
+  feeds fainter anchors back into it. Still missing: the layered assembly
   (bright anchors → field → faint read-off → local catalogue) as a standing loop,
   and validation that the SIP field extrapolates faithfully into the faint regime
   (test on medium stars that can self-solve AND sit near the faint floor).

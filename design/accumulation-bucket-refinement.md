@@ -586,6 +586,83 @@ drizzle it is the difference between ~3.2 GB and ~1 GB per instrument.
 - Do **not** demosaic to form I. Sum the CFA positions that land in the same
   sky cell; that is a sum of measurements, not an interpolation.
 
+## The bootstrap — locate Polaris, accumulate, store the field
+
+Peter, 2026-08-13: *"there's a bootstrapping procedure. locate polaris, and
+other bright stars and start accumulating and storing the transformation vector
+field."*
+
+This is the **missing assembly** `hierarchical-vector-field.md` names in its
+Status section: *"proven in pieces, not yet assembled end-to-end … Missing: the
+layered assembly (bright anchors → field → faint read-off → local catalogue) as
+a standing loop."* The pieces exist (`solve-field` + Tycho-2 on puppy;
+`bin/{solve-detections,fit-pole,fit-geometry,derot-patches,find-candidates}`;
+`pipeline-night` as a known-good centre-out bootstrap). What follows is the loop.
+
+**The new element Peter names is STORAGE:** the vector field is not re-derived
+per night, it is an **accumulating artefact** that improves as frames arrive —
+the same self-bootstrapping shape as the bucket refinement above, applied to
+geometry instead of quality.
+
+### The loop
+
+1. **Seed on Polaris.** On astrocam the brightest detection *is* Polaris, and it
+   sits where distortion is ~zero — the natural origin. This also fixes the
+   polar buffer's centre, so the seed serves both the field and the map.
+2. **Bright anchors → SIP field.** `solve-field --tweak-order 3` on the bright,
+   catalogued stars gives `pixel → true sky direction` **with distortion**. The
+   camera is fixed, so this field is **static per camera per epoch** — measured
+   once, refined forever.
+3. **Store it.** Persist the field beside the map:
+   `<instrument>/map/field/` — versioned, with the epoch it belongs to and the
+   nights that contributed. **This is the object the bootstrap builds.**
+4. **Accumulate through the stored field.** The map co-adds by resampling
+   through exactly this field — *"identification and accumulation are two uses
+   of one object"*. No separate resampling map is ever built.
+5. **Densify from the accumulation.** The deep map has far better SNR than any
+   frame, so more (and fainter) anchors become solvable in it than in a single
+   sub. Feed those back into the field; the field tightens; the resampling gets
+   better; the map gets deeper. **Iterate.**
+
+### Why this closes the calibration gap
+
+Step 5 is the same recursion as the quality buckets, and it produces the
+calibration the estate currently lacks:
+
+- **canon `plate_scale_deg_px` and `pole_prior_xy` are both `null`** — unsolved,
+  which is why canon's projection cannot yet be chosen. Registering canon frames
+  against a deep map is precisely how they get solved.
+- **astrocam's geometry is STALE from the imx219 era** (`plate_scale 0.0190`,
+  `pole_prior_xy [1945,1823]` are epoch-1 values still sitting in live config
+  while the notes say re-solve). The bootstrap re-derives them for epoch 2 from
+  real imx708 sky.
+
+### Known blockers, both on record
+
+- **Occlusion masking is a prerequisite, not a refinement.** The 2026-07-02
+  astrocam solve *stalled extending outward on candidate quality —
+  foreground/glow cells*. Trees, gutter and skyglow generate false anchors that
+  corrupt the field precisely where it is being extended. The occlusion map is
+  also epoch-bounded and marked STALE for epoch 2.
+- **Needs a clean bright-anchor solve on a real imx708 clear night.** Same
+  prerequisite the accumulator has; not yet done.
+
+### Order of work, revised
+
+The bootstrap slots *before* bucketed accumulation, because accumulation
+resamples through the field:
+
+    scratch (plumbing, coarse buckets)   <-- bin/map-scratch, DONE first pass
+      -> occlusion mask (epoch 2)
+      -> bootstrap: Polaris seed -> bright anchors -> stored field
+      -> coarse accumulation through the field
+      -> recursive refinement (field AND buckets both tighten)
+
+Note the coarse map is useful *before* the field is perfect: a rough field still
+co-adds usefully at `[::8]`, and the resulting depth is what makes the next
+round of anchors solvable. **Do not wait for a perfect field to start
+accumulating** — that is the recursion, not a compromise.
+
 ## Open questions
 
 - Bucket thresholds are unset — derive from the data, not by guess. (The
