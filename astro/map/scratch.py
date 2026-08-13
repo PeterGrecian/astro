@@ -174,7 +174,23 @@ def measure(path):
     # Coarse "good pixels vs bad": saturated / dead fractions, and how much
     # structure sits above the sky floor. Deliberately cheap and robust —
     # these choose BUCKETS, they are not science measurements.
-    hi = float((small >= 1020).mean())
+    # Saturation is RELATIVE to the sensor's full scale, never a hardcoded
+    # number. Measured 2026-08-13: a fixed >=1020 (right for the 10-bit Pi
+    # sensors) reported sat_frac = 1.00000 for EVERY eclipticam v3w frame,
+    # whose data sits on a much higher pedestal (median 4544). An absolute
+    # threshold silently declares one whole camera saturated — the same
+    # cross-population failure as bucketing on raw median. Derive full scale
+    # from the header where possible, else from the observed range.
+    full = None
+    for k in ("SATLEVEL", "WHITELEV", "DATAMAX"):
+        if hdr.get(k):
+            full = float(hdr[k])
+            break
+    if not full:
+        bz = float(hdr.get("BZERO", 0) or 0)
+        peak = float(small.max()) + bz
+        full = 65535.0 if peak > 4095 else (4095.0 if peak > 1023 else 1023.0)
+    hi = float((small >= 0.99 * full).mean())
     lo = float((small <= 1).mean())
     mad = float(np.median(np.abs(small - med)))
     return {
