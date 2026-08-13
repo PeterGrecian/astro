@@ -180,3 +180,71 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Sample selection — "thin in time, exhaustive in sources" (Peter, 2026-08-13)
+# ---------------------------------------------------------------------------
+
+def select_nights(nights, every_days=7, per_epoch=True, epoch_of=None):
+    """Thin a night list to ~weekly, but keep EVERY epoch represented.
+
+    Peter: "start with images from each epoch, maybe at weekly intervals, maybe
+    just for the midnight hour, to cut the iteration time down. But still be
+    exhaustive of the data sources."
+
+    So: thin the TIME axis hard, keep the SOURCE axis complete. An epoch with
+    only a few nights must still contribute — thinning must never silently drop
+    a whole calibration epoch, which is exactly the boundary the map must not
+    co-add across.
+    """
+    if not nights:
+        return []
+    nights = sorted(nights)
+    if not per_epoch or epoch_of is None:
+        keep, last = [], None
+        for n in nights:
+            if last is None or _days_between(last, n) >= every_days:
+                keep.append(n)
+                last = n
+        return keep
+
+    by_epoch = {}
+    for n in nights:
+        by_epoch.setdefault(epoch_of(n), []).append(n)
+    keep = []
+    for ep, ns in sorted(by_epoch.items(), key=lambda kv: str(kv[0])):
+        sub, last = [], None
+        for n in sorted(ns):
+            if last is None or _days_between(last, n) >= every_days:
+                sub.append(n)
+                last = n
+        # never drop an epoch entirely, however short it is
+        if not sub and ns:
+            sub = [sorted(ns)[0]]
+        keep.extend(sub)
+    return sorted(keep)
+
+
+def _days_between(a, b):
+    from datetime import date
+    ya, ma, da = (int(x) for x in a.split("-"))
+    yb, mb, db = (int(x) for x in b.split("-"))
+    return (date(yb, mb, db) - date(ya, ma, da)).days
+
+
+def midnight_hours(night_dir, hours=("23", "00", "01")):
+    """Hour dirs near local midnight — the darkest, most comparable slice.
+
+    CAVEAT (measured 2026-08-13): sampling one clock hour weekly advances
+    SIDEREAL phase only ~28 min/week (3.93 min/day). Over a full YEAR that
+    sweeps 23.9 h — effectively complete phase coverage — but over this
+    archive's ~9 weeks it is only ~4.1 h. So a midnight-only sample is fine for
+    plumbing, buckets and photometry, but the tree-vs-star SIDEREAL-PHASE test
+    stays weak until the baseline is long. Use all hours when testing that.
+    """
+    out = []
+    for h in hour_dirs(night_dir):
+        if os.path.basename(h) in hours:
+            out.append(h)
+    return out
