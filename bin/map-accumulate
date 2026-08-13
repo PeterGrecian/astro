@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""map-accumulate — scratch sidereal accumulation (see astro/map/accumulate.py).
+
+  map-accumulate --hour-dir /mnt/bigstore/astro-data/astrocam-frames/2026-08-12/01
+
+Runs on muppet, where the frames are.
+"""
+import pathlib
+import sys
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from astro.map.accumulate import main  # noqa: E402
+
+if __name__ == "__main__":
+    main()
