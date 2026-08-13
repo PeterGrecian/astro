@@ -7,7 +7,7 @@ are rejectable as temporal outliers within each cell before the sum.**
 
 Drafted 2026-08-03 (astro-science). Design only. Prompted by Peter's worry that
 clouds and planes will spoil the accumulation. The accumulation theory in STATE
-("the thrust" + "accumulation theory") assumes clean input; this doc adds the
+(**the map** + "accumulation theory") assumes clean input; this doc adds the
 robustness layer it needs. It is the co-add twin of the identification principle
 already on record ("persistence = identity", `zenith-quests.md`): identity keeps
 transients OUT of the catalogue; this keeps them out of the STACK.

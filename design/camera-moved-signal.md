@@ -175,7 +175,8 @@ gate.
 
 ## Relationship to the accumulator
 
-The static accumulator (STATE "the thrust") integrates every frame into a fixed
+The static accumulator (**the map** — see accumulation-bucket-refinement.md)
+integrates every frame into a fixed
 sphere frame via de-rotation. Its unit of geometric validity is exactly **one
 move epoch**: one (pole, plate-scale, distortion) solution spans all frames with
 the same `(POSINDEX, MOVEID)`. The accumulator's outer loop is therefore *per

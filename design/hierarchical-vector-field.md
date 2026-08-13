@@ -86,7 +86,8 @@ into records.
 ## The new aspect — the field IS the camera→sidereal-space accumulation map
 
 This is what ties the hierarchical field to the strand's thrust (the sidereal-
-space static accumulator; see STATE "the thrust" + "accumulation theory").
+space static accumulator — **the map**; see accumulation-bucket-refinement.md
++ STATE "accumulation theory").
 
 The accumulator's whole premise is a **camera→sphere resampling**: de-rotate every
 frame into a fixed sidereal frame and co-add, so stars stop being streaks and
@@ -153,4 +154,4 @@ the accumulator where every pixel's light belongs on the sphere.
 - `design/camera-moved-signal.md` — the epoch boundary over which one field is valid.
 - `design/zenith-quests.md` — the bright-anchor bridge + time-densification + local catalogue (source of the identification half).
 - `worklog/2026-07-05.md` — the 3-layer schema and "lens interpolates / sensor accumulates".
-- STATE.md (astro-science) — "the thrust" (sidereal-space static accumulator) + "accumulation theory" this field feeds.
+- `accumulation-bucket-refinement.md` — **the map**, the sidereal-space static accumulator this field feeds; STATE.md (astro-science) "accumulation theory".

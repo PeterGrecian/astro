@@ -1,4 +1,34 @@
-# All-time accumulation by quality buckets, recursively refined
+# the map — all-time accumulation by quality buckets, recursively refined
+
+**THE NAME: `map`.** The long-timebase sidereal accumulator is called **the
+map**, chosen by Peter 2026-08-13: *"it's a mapping of image space to the
+celestial sphere. we know its in astro."*
+
+The word is meant in its **mathematical** sense — a mapping from image space to
+the celestial sphere — not in the "picture of a place" sense. That is precisely
+what the accumulator is: every frame from every camera and every epoch is
+*mapped* onto one sidereal coordinate system and summed there. It is the same
+sense as the remap in `hierarchical-vector-field.md`.
+
+Rejected, and why (the reasoning is worth keeping, because names get
+re-litigated): `astromap`/`astrochart` — redundant, everything here is already
+astro, and *astrochart* collides with astrology; `chart` — evokes sailors and
+superstition, and a chart is a *finding aid*, not accumulated photons;
+`starsum`/`starchart` — narrows to stars, but `what-accumulation-buys.md` shows
+the payoff is *structure* (PSF bumps, companions, wobble) plus anything
+extended; `atlas`/`skyatlas` — good, but `atlas` is heavily overloaded in
+computing; `coadd` — accurate survey jargon but names the operation, not the
+thing. **`map` also retires the placeholder "the thrust"**, which named nothing.
+
+Paths follow: `<instrument>/map/`, `/astro/map`. Derived vocabulary: a **map
+tile** (one cell of the sky grid), **map depth** (total integrated exposure at a
+point), a **contributing night** (one admitted to the map).
+
+Note "map" is unqualified here; existing masks keep their qualifiers
+(*occlusion map*, *hot-pixel map*) and do not collide.
+
+---
+
 
 **Accumulate the ENTIRE archive, but not as one undifferentiated sum. Sort
 frames into quality buckets, accumulate best-first, and use each accumulation
@@ -156,7 +186,9 @@ Asked; answered. These are not suggestions:
   pass would be the first archive-wide integrity check the estate has ever had.
   Log **path, night, camera, error, bytes-read-before-failure**, emit as a file
   that diffs between runs. **Do not repair or quarantine — log and carry on.**
-- **Output location: `/mnt/bigstore/astro-data/<instrument>/accumulator/`** —
+- **Output location: `/mnt/bigstore/astro-data/<instrument>/map/`** (agreed with
+  astro-storage as `…/accumulator/` before the artefact was named; the
+  convention is theirs, the spelling is the rename — confirm with them) —
   inside the tree being accumulated from, so it inherits the path conventions,
   the storage-report scan, and the backup story. Give it a `MANIFEST.sha256`
   like the night dirs, **re-emitted whenever the accumulator is rewritten**, so
