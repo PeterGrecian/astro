@@ -33,6 +33,12 @@ from astro.config import CameraConfig
 from astro.state import sun_altitude_deg
 
 NIGHT_SERVICE = "astrocam-v3-night.service"
+COVER_SCRIPT = HERE / "cover.py"
+# The gate is stateless and ticks every minute, but a servo is not idempotent
+# the way `systemctl start` is: re-commanding it each tick would buzz the SG90
+# 60x/hour for no reason. So the cover's last commanded position is persisted
+# here and we move ONLY on a change.
+COVER_STATE_FILE = Path("/var/lib/astrocam/cover.json")
 
 # Defaults if camera.json omits them. Night below -10 matches astrocam's
 # configured sun_altitude_night_deg and eclipticam-v3w. Day threshold a
@@ -71,6 +77,42 @@ def ensure_stopped(unit: str):
         _systemctl("stop", "--no-block", unit)
 
 
+def _read_cover_position() -> str | None:
+    """Last position we commanded, or None if unknown (first run / bad file)."""
+    try:
+        return json.loads(COVER_STATE_FILE.read_text()).get("position")
+    except (OSError, ValueError):
+        return None
+
+
+def _write_cover_position(position: str):
+    try:
+        COVER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        COVER_STATE_FILE.write_text(json.dumps({"position": position}))
+    except OSError as e:
+        logging.error(f"cover state write failed: {e}")
+
+
+def ensure_cover(position: str):
+    """Drive the cover to `position` if it isn't already there.
+
+    Never raises: a stuck servo must not stop the gate from managing the
+    night service (an uncovered lens is a lost day of flats, a dead gate is
+    a lost night of data). Only records the new position if the command
+    actually succeeded, so a failure retries on the next tick.
+    """
+    if _read_cover_position() == position:
+        return
+    logging.info(f"cover -> {position}")
+    try:
+        subprocess.run([sys.executable, str(COVER_SCRIPT), position],
+                       capture_output=True, text=True, timeout=30, check=True)
+    except Exception as e:
+        logging.error(f"cover {position} FAILED: {e}")
+        return
+    _write_cover_position(position)
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -85,6 +127,7 @@ def main() -> int:
         # a way that pins frames all day). Stop the night daemon.
         logging.warning("no location.json lat/lon; defaulting to day (stop)")
         ensure_stopped(NIGHT_SERVICE)
+        ensure_cover("closed")
         return 0
 
     alt = sun_altitude_deg(loc["lat_deg"], loc["lon_deg"])
@@ -94,10 +137,12 @@ def main() -> int:
     # here means: don't actively flip — we key purely off the two edges).
     if alt <= night_deg:
         logging.info(f"sun_alt={alt:.2f} <= {night_deg} -> night")
+        ensure_cover("open")
         ensure_running(NIGHT_SERVICE)
     elif alt >= day_deg:
         logging.info(f"sun_alt={alt:.2f} >= {day_deg} -> day")
         ensure_stopped(NIGHT_SERVICE)
+        ensure_cover("closed")
     else:
         # In the band: leave the service in whatever state it's in.
         logging.info(f"sun_alt={alt:.2f} in ({night_deg},{day_deg}) band; "
