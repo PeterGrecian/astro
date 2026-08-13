@@ -24,6 +24,38 @@ Paths follow: `<instrument>/map/`, `/astro/map`. Derived vocabulary: a **map
 tile** (one cell of the sky grid), **map depth** (total integrated exposure at a
 point), a **contributing night** (one admitted to the map).
 
+### There is not ONE map — there is a map per PROJECTION
+
+Peter, 2026-08-13: *"there are multiple mappings or projections. polecam does
+not easily map onto the celestial sphere so we might use a different projection
+for that. it would be good for eclipticam."* Correct, and the geometry forces
+it. STATE's accumulation theory already anticipated this — *"Polar coords about
+the pole for astrocam/polecam; curved bands for eclipticam's 102° field"* — but
+the naming above assumed a single map, which is wrong.
+
+| Instrument | Projection | Why |
+|---|---|---|
+| **polecam** | **polar / azimuthal about the celestial pole** | It stares at the pole, which is a *coordinate singularity* in RA/Dec: meridians converge, RA is meaningless there, any equatorial grid degenerates. But the sky **rotates about that point**, so a star sits at constant radius and only its angle advances. Polar coords are not a workaround — they are the frame the data is already in, and they make the sidereal shift a pure rotation in one coordinate. |
+| **eclipticam** | **ecliptic-aligned curved bands** | A 102° field cannot use one tangent plane: gnomonic projection diverges long before that. Bands aligned to the ecliptic match what the camera is actually pointed along, and keep distortion bounded across the field. |
+| **astrocam / canon** | polar about the pole (astrocam), TBD for canon | astrocam per STATE. canon's pole and plate scale are both **UNSOLVED** (`pole_prior_xy: null`), so its projection cannot be chosen yet — see the calibration by-product below. |
+
+**Consequences for the design:**
+
+- **The projection is a property of the instrument's geometry, not a global
+  choice.** It belongs in `camera.json` beside `plate_scale` and `pole_prior_xy`
+  — the same calibration-epoch family, and therefore also **epoch-bounded**: an
+  epoch change can change the projection.
+- **`<instrument>/map/` is already the right shape** — each instrument's map
+  lives in its own tree and carries its own projection. Nothing to rename.
+- **Combining instruments happens on a common sphere, late.** Per-instrument
+  maps accumulate in their native projection (where shifts are cheap and
+  distortion is bounded); cross-instrument combination re-projects onto a shared
+  frame only at the end. This is the same discipline as epochs: accumulate in
+  the native frame, combine only where the frames are commensurable.
+- **Record the projection in the map's own metadata**, so a map file is
+  self-describing and cannot be silently misread — the same reasoning that put
+  `POSINDEX` in every frame.
+
 Note "map" is unqualified here; existing masks keep their qualifiers
 (*occlusion map*, *hot-pixel map*) and do not collide.
 
