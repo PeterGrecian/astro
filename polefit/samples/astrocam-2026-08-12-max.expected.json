@@ -1,0 +1,16 @@
+{
+  "camera": "astrocam",
+  "night": "2026-08-12",
+  "epoch": 2,
+  "source": "s3://astro-berrylands-eu-west-1/astrocam/nights/2026-08-12/max.jpg",
+  "image_size": [2304, 1296],
+  "note": "half-res published max stack; full-res frames are 4608x2592",
+  "plate_scale_deg_px": 0.0416142,
+  "plate_scale_note": "2x the full-res 0.0208071 from _epoch.wcs.json, because this JPEG is half-res",
+  "expected": {
+    "x": 696.1, "y": 488.6, "radius_px": 17.5, "sweep_deg": 138,
+    "tolerance_px": 8
+  },
+  "full_res_pole": [1392, 978],
+  "verified_by": "matched-moving-star sharpness on 20 frames of 2026-08-12/01: plain 1.358, gradient-fit pole 1.884, THIS pole 2.549, single-frame ceiling 4.452"
+}

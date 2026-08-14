@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""fit-pole-polaris — celestial pole from a max stack (arcs -> Polaris -> pole).
+
+  fit-pole-polaris --in max.jpg --plate-scale 0.0416142
+  fit-pole-polaris --in max.jpg --plate-scale 0.0416142 --json
+
+See polefit/README.md. Half-res max.jpg has TWICE the full-res plate scale.
+"""
+import argparse
+import json
+import pathlib
+import sys
+
+import numpy as np
+from PIL import Image
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from polefit import fit_pole  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="inp", required=True)
+    ap.add_argument("--plate-scale", type=float, required=True,
+                    help="deg/px OF THIS IMAGE")
+    ap.add_argument("--search-px", type=int, default=140)
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    img = np.asarray(Image.open(a.inp).convert("L"), dtype=np.float32)
+    r = fit_pole(img, a.plate_scale, search_px=a.search_px)
+    if r is None:
+        print("no pole: self-check rejected every candidate "
+              "(no arc matched the Polaris radius)", file=sys.stderr)
+        return 2
+    if a.json:
+        print(json.dumps(r.as_dict(), indent=1))
+    else:
+        print(f"pole ({r.x:.1f}, {r.y:.1f})  radius {r.radius_px:.1f} px "
+              f"(expected {r.expected_radius_px:.1f})  sweep {r.sweep_deg:.0f} deg  "
+              f"residual {r.residual_px:.2f} px  stage1 off by {r.stage1_shift_px:.0f} px")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
