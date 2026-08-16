@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""healpix-view — render a HEALPix accumulator back into PIXEL space.
+
+Why pixel space and not an all-sky mollweide: these views exist to be checked
+against real frames (max.jpg, a de-rotated stack). An all-sky projection is the
+wrong frame for that comparison (design/adaptive-refinement.md).
+
+Views:
+  --view flux     accumulated signal, asinh-stretched
+  --view counts   per-cell depth (how many samples landed there)
+  --view depth    refinement level from the variance criterion -- THE tree made
+                  visible. Stars should be compact DEEP islands in a shallow
+                  sea. Uniformly deep => k too low. Uniformly shallow => k too
+                  high. Deep in a RING => depth is tracking exposure, not
+                  structure (the failure per-cell sigma exists to prevent).
+  --view grid     cell boundaries as polygons over the flux image -- do deep
+                  cells sit ON the stars? A wrong pole shows instantly as a
+                  tree refined BESIDE the trails rather than along them.
+
+Boundaries are drawn as polygons, never fills: the whole point is seeing cell
+SIZE vary, which a fill hides.
+"""
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import astropy.units as u
+from PIL import Image
+
+try:
+    from astropy_healpix import HEALPix
+except ImportError:
+    sys.exit("needs astropy_healpix: sudo apt install python3-astropy-healpix")
+
+SIDEREAL_DEG_PER_S = 360.0 / 86164.0905
+
+
+def asinh_stretch(a, lo_pct=1.0, hi_pct=99.9):
+    """Asinh stretch -- the astronomical standard: linear near zero, log-like
+    for bright pixels, so faint structure survives alongside saturated stars."""
+    finite = a[np.isfinite(a) & (a > 0)]
+    if finite.size == 0:
+        return np.zeros_like(a, dtype=np.uint8)
+    lo, hi = np.percentile(finite, [lo_pct, hi_pct])
+    if hi <= lo:
+        hi = lo + 1.0
+    x = np.clip((a - lo) / (hi - lo), 0, 1)
+    y = np.arcsinh(10.0 * x) / np.arcsinh(10.0)
+    return (255 * y).astype(np.uint8)
+
+
+def refine_depth(total, counts, nsides, k):
+    """The variance criterion, evaluated down the ladder.
+
+    A cell is refined while its four children DISAGREE by more than k sigma.
+    sigma is the cell's OWN noise from its count plane -- never a global
+    threshold, because depth varies hugely across the cap and a global sigma
+    would over-refine deep regions and starve shallow ones.
+
+    Returns a map at the FINEST nside holding, per cell, the order at which
+    refinement stopped.
+    """
+    coarse, fine = nsides[0], nsides[-1]
+    depth = np.full(12 * coarse**2, float(coarse), dtype=np.float64)
+
+    cur = coarse
+    while cur < fine:
+        nxt = cur * 2
+        # children of each cell at `cur`, taken from the map built at `nxt`
+        tot_n = _rebin(total[fine], fine, nxt)
+        cnt_n = _rebin(counts[fine], fine, nxt)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean_n = np.where(cnt_n > 0, tot_n / np.maximum(cnt_n, 1), np.nan)
+        kids = mean_n.reshape(-1, 4)
+        kcnt = cnt_n.reshape(-1, 4)
+        spread = np.nanmax(kids, axis=1) - np.nanmin(kids, axis=1)
+        # Poisson-ish per-cell noise from the cell's own depth
+        tot_c = _rebin(total[fine], fine, cur)
+        cnt_c = _rebin(counts[fine], fine, cur)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean_c = np.where(cnt_c > 0, tot_c / np.maximum(cnt_c, 1), np.nan)
+            sigma = np.sqrt(np.maximum(mean_c, 0)) / np.sqrt(np.maximum(kcnt.min(axis=1), 1))
+        split = np.isfinite(spread) & np.isfinite(sigma) & (spread > k * sigma) & (kcnt.min(axis=1) > 0)
+        # promote: cells that split get depth of the next level, expanded x4
+        depth = np.repeat(depth, 4)
+        promoted = np.repeat(split, 4)
+        depth[promoted] = float(nxt)
+        cur = nxt
+    return depth
+
+
+def _rebin(arr, from_nside, to_nside):
+    if from_nside == to_nside:
+        return arr
+    shift = ((from_nside // to_nside) ** 2).bit_length() - 1
+    parent = np.arange(arr.size) >> shift
+    return np.bincount(parent, weights=arr, minlength=12 * to_nside**2)
+
+
+def render(values, nside, shape, pole_xy, plate, rot_deg, cap_deg):
+    """Sample a HEALPix map back onto the image grid."""
+    hp = HEALPix(nside=nside, order="nested")
+    h, w = shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    dx, dy = xx - pole_xy[0], yy - pole_xy[1]
+    r_px = np.hypot(dx, dy)
+    theta = np.degrees(np.arctan2(dy, dx)) - rot_deg
+    lat = 90.0 - r_px * plate
+    lon = np.mod(theta, 360.0)
+    out = np.full((h, w), np.nan)
+    inside = (r_px * plate) < cap_deg
+    idx = hp.lonlat_to_healpix(lon[inside] * u.deg, lat[inside] * u.deg)
+    out[inside] = values[idx]
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--npz", type=Path, required=True, help="from healpix-ladder --out")
+    ap.add_argument("--view", choices=["flux", "counts", "depth", "grid"], default="depth")
+    ap.add_argument("--nside", type=int, help="which map (default: finest)")
+    ap.add_argument("--k", type=float, default=3.0, help="variance criterion threshold")
+    ap.add_argument("--size", type=int, nargs=2, default=[2304, 1296])
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    d = np.load(args.npz)
+    nsides = sorted(int(k.split("_")[1]) for k in d.files if k.startswith("total_"))
+    total = {n: d[f"total_{n}"] for n in nsides}
+    counts = {n: d[f"counts_{n}"] for n in nsides}
+    pole = d["pole"] / 2.0            # npz pole is full-res; render at half-res
+    plate = float(d["plate"]) * 2.0
+    cap = float(d["cap_deg"])
+    ns = args.nside or nsides[-1]
+    w, h = args.size
+
+    if args.view in ("flux", "grid"):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            vals = np.where(counts[ns] > 0, total[ns] / np.maximum(counts[ns], 1), np.nan)
+        img = render(vals, ns, (h, w), pole, plate, 0.0, cap)
+        arr = asinh_stretch(np.nan_to_num(img))
+        rgb = np.dstack([arr] * 3)
+        if args.view == "grid":
+            depth = refine_depth(total, counts, nsides, args.k)
+            dimg = render(depth, nsides[-1], (h, w), pole, plate, 0.0, cap)
+            edges = np.zeros((h, w), bool)
+            edges[:, 1:] |= dimg[:, 1:] != dimg[:, :-1]
+            edges[1:, :] |= dimg[1:, :] != dimg[:-1, :]
+            rgb[edges] = [255, 90, 0]
+        Image.fromarray(rgb).save(args.out)
+
+    elif args.view == "counts":
+        img = render(counts[ns].astype(float), ns, (h, w), pole, plate, 0.0, cap)
+        Image.fromarray(asinh_stretch(np.nan_to_num(img))).save(args.out)
+
+    else:  # depth
+        depth = refine_depth(total, counts, nsides, args.k)
+        img = render(depth, nsides[-1], (h, w), pole, plate, 0.0, cap)
+        levels = np.array(nsides, dtype=float)
+        lut = np.array([[40, 40, 70], [60, 130, 180], [250, 200, 60],
+                        [250, 90, 40], [255, 255, 255]], dtype=np.uint8)
+        rgb = np.zeros((h, w, 3), np.uint8)
+        for i, lv in enumerate(levels):
+            rgb[img == lv] = lut[min(i, len(lut) - 1)]
+        Image.fromarray(rgb).save(args.out)
+        for i, lv in enumerate(levels):
+            n = int(np.count_nonzero(img == lv))
+            print(f"  nside {int(lv):5d}: {n:9,} px "
+                  f"({100*n/(w*h):5.2f}%)  colour {tuple(lut[min(i,len(lut)-1)])}")
+
+    print(f"wrote {args.out}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

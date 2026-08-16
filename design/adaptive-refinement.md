@@ -258,6 +258,91 @@ afterwards. The variance criterion cannot be calibrated without them, and the
 estate's own history says the numbers will look right while the picture is
 wrong.
 
+## First prototype run — 2026-08-12 hour 01, astrocam (2026-08-16)
+
+`bin/healpix-ladder` (accumulate + exactness test) and `bin/healpix-view`
+(render back to pixel space). 20 frames, cap 20°, pole [1392, 978] and plate
+scale 0.0208071 °/px — the values **measured from Polaris on 2026-08-14**, NOT
+`astrocam/camera.json`, which still carries the stale epoch-1 geometry (a live
+config bug already spooled to `ideas/`).
+
+### PASS — bin-down is exact on real data
+
+| step | result |
+|---|---|
+| nside 1024 → 512 | **IDENTICAL** (5,357,354,088 total) |
+| nside 2048 → 1024 | **IDENTICAL** (5,357,354,088 total) |
+
+Byte-identical arrays with matching totals at all three resolutions. The
+projection is self-consistent and coarsening involves no resampling — the
+property the whole design rests on, now verified on sky data rather than on
+synthetic indices.
+
+### FAIL — the variance criterion refined on HEALPix SEAMS, not stars
+
+**And the numbers looked fine.** 1.74% of the frame reached the deepest level,
+22% stayed coarse — a plausible "compact deep islands in a shallow sea". The
+**picture** showed the deep cells tracing four enormous diamonds: the
+boundaries of the **12 HEALPix base pixels** (confirmed — exactly base pixels
+0,1,2,3 fall in this cap, and the refinement follows their edges). Real star
+trails did refine, but as faint flecks under a dominant grid artefact.
+
+**Fourth time the eyeball has beaten the numbers here** (foliage run, 08-11
+contrail, inverted detector calibration, now this). The visualisation earned its
+place on first use, exactly as `--save-cutouts` did.
+
+**Root cause — the ladder was built one step deeper than the data supports:**
+
+| | arcsec |
+|---|---|
+| nside 2048 cell | 103.1 |
+| astrocam pixel, full-res | 74.9 (cell = **1.38×** px — good) |
+| astrocam pixel, half-res | 149.8 (cell = **0.69×** px — **finer than the data**) |
+
+Accumulating half-res frames into nside-2048 cells means **every cell is fed by
+less than one camera pixel**. Neighbouring cells then disagree from sampling
+aliasing, and at base-pixel seams — where two base grids meet at an angle —
+that aliasing is worst. The criterion correctly reported "children disagree";
+the disagreement simply was not sky.
+
+**So the criterion is not wrong, the input was.** Same lesson as three times
+before: measure structure on data still carrying its instrumental signature and
+you measure the instrument.
+
+**Fixes, in order:**
+1. **Cap N_side at ~1.4× the camera pixel** — nside 2048 for full-res astrocam,
+   1024 for half-res. Never build finer than the data; the drizzle supergrid is
+   the *separate*, later step that earns sub-pixel cells, and it needs many
+   dithered samples per cell to do so.
+2. **Render with area-weighted sampling, not nearest-neighbour.** The seam
+   artefact is amplified by point-sampling the map back into pixel space.
+3. **Then re-evaluate `k`** — it cannot be calibrated until the input is clean.
+
+Counts were healthy throughout (median 38 samples per cell from 20 frames, only
+0.1% singletons), so accumulation itself is sound. This is a resolution and
+rendering fault, not an accumulation one.
+
+### Run cost — and the host rule
+
+Ran on **pip**, which was the wrong call and Peter said so mid-run: *"we should
+really be running this on muppet."* I had priced the read (~196 MB, ~40 s) and
+judged it an acceptable one-off. That is re-deriving a settled rule instead of
+applying it — STATE already records **compute follows the data**, and *"pip on
+wifi is not a compute node, it's my interface to all this."*
+
+Measured: **75/67/87 s per N_side for 20 frames** — most of it NFS read, since
+each accumulate re-reads every frame. A full night is ~400 frames (20×), and the
+year is ~100×. **The prototype was never a one-off**, which is exactly why the
+rule exists.
+
+**Next runs go to muppet** (local NVMe, the frames' own host). Note
+`astropy_healpix` must be installed there too — and per
+`muppet-interfaces-worn-not-silicon`, use its internal NVMe rather than USB.
+
+**Also worth fixing:** the accumulate loop re-reads every frame once per
+N_side. Read once, accumulate into all N_sides in the same pass — or better,
+accumulate only at the finest and bin down, which is exact and now proven.
+
 ## Related
 
 - `accumulation-bucket-refinement.md` — the ring scheme this replaces for

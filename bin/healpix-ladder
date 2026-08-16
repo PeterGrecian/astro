@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""healpix-ladder — accumulate frames into a HEALPix map at several N_side,
+and verify that binning down is EXACT.
+
+The correctness test this exists for (design/adaptive-refinement.md):
+
+    a map BUILT directly at N_side n
+        must equal
+    a map BUILT at N_side 2n, then binned down by parent = child >> 2
+
+If those differ, something in the camera->sphere projection is wrong. It is a
+test on the projection, NOT a quality comparison between resolutions.
+
+Why it must hold: in NESTED ordering four fine cells sit exactly inside one
+coarse cell, so binning down is integer addition of children -- no resampling,
+no interpolation. That is the property the whole adaptive-refinement design
+rests on, because the estate's standing rule is that resampling error bakes in
+permanently.
+
+Geometry: each frame's pixels are mapped to sky directions through the pole +
+plate scale, de-rotated by the sidereal rotation at the frame's own timestamp
+(15.041069 deg/h -- the SIDEREAL rate, never 15.000), and accumulated. A star
+is then stationary by construction.
+
+Usage:
+    healpix-ladder --night-dir <dir> [--limit 20] [--nsides 512 1024 2048]
+"""
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import astropy.units as u
+from astropy.io import fits
+
+try:
+    from astropy_healpix import HEALPix
+except ImportError:
+    sys.exit("needs astropy_healpix: sudo apt install python3-astropy-healpix")
+
+# The sidereal rate. NOT 15.000 deg/h -- that is the solar rate and it costs
+# 1.55 px/hour at astrocam's rim (design/accumulation-bucket-refinement.md).
+SIDEREAL_DAY_S = 86164.0905
+SIDEREAL_DEG_PER_S = 360.0 / SIDEREAL_DAY_S
+
+
+def frame_time_s(path, hdr):
+    """Seconds since epoch. Prefer the <epoch_ms> filename stem (the house
+    convention across all three cameras), fall back to DATE-OBS."""
+    stem = Path(path).name.split(".")[0]
+    if stem.isdigit():
+        return int(stem) / 1000.0
+    from datetime import datetime, timezone
+    d = hdr.get("DATE-OBS")
+    if not d:
+        raise ValueError(f"no time for {path}")
+    return datetime.fromisoformat(d).replace(tzinfo=timezone.utc).timestamp()
+
+
+def load_frame(path):
+    with fits.open(path) as hdul:
+        for hdu in hdul:
+            if hdu.data is not None and hdu.data.ndim == 2:
+                return np.asarray(hdu.data, dtype=np.float64), hdu.header
+    raise ValueError(f"no 2-D image in {path}")
+
+
+def pixels_to_sphere(shape, pole_xy, plate_deg_px, rot_deg):
+    """Map image pixels to (lon, lat) on the sphere.
+
+    Gnomonic-free small-angle treatment: the camera is treated as a plane
+    tangent near the pole, so radius from the pole pixel is angular distance
+    and the pixel's azimuth about the pole is longitude. Adequate for this
+    prototype -- the real map applies the SIP vector field. rot_deg de-rotates
+    the sidereal spin for this frame's timestamp.
+    """
+    h, w = shape
+    yy, xx = np.mgrid[0:h, 0:w]
+    dx = xx - pole_xy[0]
+    dy = yy - pole_xy[1]
+    r_px = np.hypot(dx, dy)
+    theta = np.degrees(np.arctan2(dy, dx)) - rot_deg   # de-rotate
+    lat = 90.0 - r_px * plate_deg_px                   # colatitude -> latitude
+    lon = np.mod(theta, 360.0)
+    return lon, lat, r_px
+
+
+def accumulate(frames, nside, pole_xy, plate_deg_px, t0, cap_deg, verbose=True):
+    """Accumulate frames into a NESTED HEALPix map at this nside."""
+    hp = HEALPix(nside=nside, order="nested")
+    npix = hp.npix
+    total = np.zeros(npix, dtype=np.int64)
+    counts = np.zeros(npix, dtype=np.int64)
+
+    for i, path in enumerate(frames):
+        img, hdr = load_frame(path)
+        t = frame_time_s(path, hdr)
+        rot_deg = (t - t0) * SIDEREAL_DEG_PER_S
+        lon, lat, r_px = pixels_to_sphere(img.shape, pole_xy, plate_deg_px, rot_deg)
+
+        # Keep only pixels inside the usable cap -- corners of the frame are
+        # far from the pole where the small-angle treatment degrades.
+        keep = (r_px * plate_deg_px) < cap_deg
+        idx = hp.lonlat_to_healpix(lon[keep] * u.deg, lat[keep] * u.deg)
+        vals = img[keep].astype(np.int64)
+        # bincount, not np.add.at -- the latter is orders of magnitude slower
+        total += np.bincount(idx, weights=vals, minlength=npix).astype(np.int64)
+        counts += np.bincount(idx, minlength=npix)
+        if verbose:
+            print(f"    frame {i+1}/{len(frames)}  rot {rot_deg:7.3f} deg", end="\r")
+    if verbose:
+        print(" " * 60, end="\r")
+    return total, counts
+
+
+def bin_down(arr, from_nside, to_nside):
+    """Bin a NESTED map down. parent = child >> 2 per halving.
+
+    EXACT: integer addition of children, no resampling."""
+    assert from_nside > to_nside
+    ratio = (from_nside // to_nside) ** 2       # 4 per level
+    shift = ratio.bit_length() - 1               # log2(ratio)
+    parent = np.arange(arr.size) >> shift
+    return np.bincount(parent, weights=arr, minlength=12 * to_nside**2).astype(arr.dtype)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--night-dir", type=Path, required=True,
+                    help="directory of .fits.fz frames (one hour)")
+    ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--nsides", type=int, nargs="+", default=[512, 1024, 2048])
+    ap.add_argument("--pole", type=float, nargs=2, default=[1392.0, 978.0],
+                    help="full-res pole pixel (measured 2026-08-14)")
+    ap.add_argument("--plate-scale", type=float, default=0.0208071,
+                    help="deg/px full-res (measured from Polaris, 2026-08-14)")
+    ap.add_argument("--cap-deg", type=float, default=20.0,
+                    help="only accumulate within this angle of the pole")
+    ap.add_argument("--out", type=Path, help="write .npz of the maps")
+    args = ap.parse_args()
+
+    frames = sorted(args.night_dir.glob("*.fits.fz"))[: args.limit]
+    if not frames:
+        sys.exit(f"no frames in {args.night_dir}")
+
+    _, hdr0 = load_frame(frames[0])
+    t0 = frame_time_s(frames[0], hdr0)
+    span = frame_time_s(frames[-1], load_frame(frames[-1])[1]) - t0
+    print(f"{len(frames)} frames, span {span/60:.1f} min, "
+          f"sky rotates {span*SIDEREAL_DEG_PER_S:.3f} deg")
+    print(f"pole {args.pole}, plate {args.plate_scale} deg/px, cap {args.cap_deg} deg\n")
+
+    maps = {}
+    for ns in sorted(args.nsides):
+        t = time.time()
+        total, counts = accumulate(frames, ns, args.pole, args.plate_scale,
+                                   t0, args.cap_deg)
+        hit = counts > 0
+        maps[ns] = (total, counts)
+        print(f"  nside {ns:5d}: {hit.sum():9,} cells hit  "
+              f"({100*hit.sum()/counts.size:6.3f}% of sphere)  "
+              f"{time.time()-t:6.2f} s")
+
+    # ---- THE CORRECTNESS TEST ----
+    print("\n=== bin-down exactness (built directly vs binned from finer) ===")
+    ok = True
+    nsides = sorted(maps)
+    for fine, coarse in zip(nsides[1:], nsides[:-1]):
+        direct = maps[coarse][0]
+        binned = bin_down(maps[fine][0], fine, coarse)
+        same = np.array_equal(direct, binned)
+        ok &= same
+        if same:
+            print(f"  nside {fine} -> {coarse}: IDENTICAL ({direct.sum():,} total)")
+        else:
+            d = direct - binned
+            bad = np.count_nonzero(d)
+            print(f"  nside {fine} -> {coarse}: DIFFER in {bad:,} cells "
+                  f"(max |d| {np.abs(d).max():,}, sums {direct.sum():,} vs {binned.sum():,})")
+    print(f"\n{'PASS' if ok else 'FAIL'}: binning down is "
+          f"{'exact' if ok else 'NOT exact -- projection bug'}")
+
+    if args.out:
+        np.savez_compressed(args.out, **{f"total_{k}": v[0] for k, v in maps.items()},
+                            **{f"counts_{k}": v[1] for k, v in maps.items()},
+                            pole=np.array(args.pole), plate=args.plate_scale,
+                            cap_deg=args.cap_deg, t0=t0)
+        print(f"wrote {args.out}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
