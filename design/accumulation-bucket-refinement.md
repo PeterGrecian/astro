@@ -727,8 +727,9 @@ assumed.** The deciding property is simple:
 **eclipticam → polar (r, θ).** Its swept region is an annulus, and *an annulus
 is a rectangle in polar coordinates*: r is a bounded row index (30.1 … 128.6°),
 θ wraps 0–360°, and **every cell is real sky — no sparseness at all**. Better,
-the sidereal rotation is `+15°/h in θ, identical for every row` — one integer
-index shift, rows independent, wrapping naturally. It is `np.roll` on axis 1.
+the sidereal rotation is `+15.041069°/h in θ, identical for every row` — rows
+independent, wrapping naturally. (Not an integer index shift — see "the shift is
+not an integer anyway" below, and the withdrawn quantisation.)
 
 The cell-area variation that made polar unattractive for a disc is **mild
 here**, because the annulus never approaches the pole:
@@ -747,8 +748,10 @@ per-cell count planes, no ragged rings needed.
 straight shift."* Right, and it separates into two claims that land differently:
 
 - **The sky's MOTION is genuinely uniform in (r, θ).** A star at fixed dec has
-  fixed r and its RA advances exactly 15°/h, so *r constant, θ += 15°/h* holds
-  for every star regardless of where the camera points. That part stands.
+  fixed r and its RA advances at the sidereal rate, so *r constant,
+  θ += 15.041069°/h* holds for every star regardless of where the camera points.
+  That part stands. **Use the sidereal rate, never 15.000°** — the solar figure
+  is wrong by 1.55 px/hour at astrocam's rim.
 - **But the frame is nowhere near "horizontal" in this grid.** eclipticam's
   field spans **r = 30.1° at its corners to 88.6° at its centre — ~58° of
   radius within a single frame.** A row of sensor pixels crosses many rows of
@@ -857,15 +860,43 @@ every shift. That trades the cheap-shift advantage for the memory saving.
 
 **The fix — quantise ring θ-counts to 24 × 2ⁿ** (the HEALPix idea in its
 simplest useful form). Rings still scale ~sin r, but because every count is a
-multiple of 24 and 24 divides 360, a 15° rotation is **exactly n/24 cells — an
-integer in every ring**:
+multiple of 24 and 24 divides 360, a **15.000°** rotation is exactly n/24 cells
+— an integer in every ring:
 
 | Scheme | Cells | vs floor | Shift |
 |---|---|---|---|
-| **24 × 2ⁿ quantised rings** | **1.87e7** | **+4%** | **integer in every ring** |
+| **24 × 2ⁿ quantised rings** | **1.87e7** | **+4%** | integer for 15.000° only |
 
-56% of the naive scheme's memory, within 4% of the theoretical optimum, and the
-sidereal shift stays a pure index shift. That is the one to build.
+56% of the naive scheme's memory and within 4% of the theoretical optimum.
+
+**WITHDRAWN 2026-08-16 — the integer-shift justification does not survive.**
+The +4% was paid to keep the shift an integer, and that property is worth
+nothing here, for two independent reasons:
+
+1. **15.000°/h is the SOLAR rate; the sky turns at the SIDEREAL rate,
+   15.041069°/h** (360° / 86164.0905 s). 24 divides 360 for the solar day, and
+   the sidereal rate lands on no nice fraction of it. Rounding to the nearest
+   cell against true sidereal time leaves ~0.1–0.2 px of residual at the rim
+   (bounded, since each frame re-rounds against absolute time — it does not
+   accumulate). **Implementing the literal "15°/h" would be a real bug worth
+   +1.55 px/hour at the rim, +10.85 px over a 7 h night.**
+2. **Sub-pixel is the whole point** (Peter, 2026-08-16: *"we are aiming for
+   subpixel resolution so this is not important"*). Even the correct-rate
+   rounding error, ~0.24 px at worst at the rim, is larger than the measured
+   0.14 px single-frame astrometric precision — so an integer shift would
+   quantise away the project's best measurement, position-dependently. And
+   resampling error bakes in permanently.
+
+**Drizzle already handles the fractional part** — it is the estate's stated
+resampling strategy and fractional offsets are precisely what it is for. So the
+integer shift buys cheapness for an operation that is not the bottleneck and
+costs accuracy in the one dimension that matters.
+
+**Consequence: prefer pure equal-area rings (θ-count ∝ sin r) at the 1.81e7
+floor.** Drop the quantisation and take the 4%. This agrees with the
+"Neither gets a free shift" finding above, reached independently on 2026-08-13
+from the 11.28-cells-per-exposure measurement; the rate error is a second,
+sharper reason for the same conclusion.
 
 **Consequences:**
 
@@ -1017,7 +1048,7 @@ etc. I'm hoping this might be achievable statistically rather than explicitly."*
 classify; stars obey the rotation, everything else doesn't."*** That is the
 whole discriminator. It needs **no model of what a plane or a tree is**, only a
 model of what a star does, which is the one thing here that is known exactly:
-sidereal rotation about the pole at 15°/hour.
+sidereal rotation about the pole at 15.041069°/hour.
 
 Two layers exist and are complementary:
 
