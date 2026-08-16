@@ -76,11 +76,20 @@ def refine_depth(total, counts, nsides, k):
         kcnt = cnt_n.reshape(-1, 4)
         spread = np.nanmax(kids, axis=1) - np.nanmin(kids, axis=1)
         # Poisson-ish per-cell noise from the cell's own depth
-        tot_c = _rebin(total[fine], fine, cur)
-        cnt_c = _rebin(counts[fine], fine, cur)
+        # sigma MUST be measured, not modelled. A Poisson guess on raw ADU
+        # (sqrt(mean)/sqrt(N)) overestimated the real sibling-to-sibling scatter
+        # by 2.2x on the first run (1.56 vs 0.71 ADU) -- these are co-added
+        # frames with gain, so ADU are not photons. The inflated threshold meant
+        # ordinary sky never refined and only abrupt geometric steps at HEALPix
+        # base-pixel seams cleared the bar, so the tree traced the GRID rather
+        # than the sky. Measure the scatter from the data instead.
+        with np.errstate(invalid="ignore"):
+            resid = np.abs(kids - np.nanmean(kids, axis=1)[:, None])
+        scatter = 1.4826 * np.nanmedian(resid)          # robust global MAD
+        # scale by each cell's own depth: deeper cells are quieter
+        depth_ref = np.nanmedian(kcnt.min(axis=1))
         with np.errstate(invalid="ignore", divide="ignore"):
-            mean_c = np.where(cnt_c > 0, tot_c / np.maximum(cnt_c, 1), np.nan)
-            sigma = np.sqrt(np.maximum(mean_c, 0)) / np.sqrt(np.maximum(kcnt.min(axis=1), 1))
+            sigma = scatter * np.sqrt(depth_ref / np.maximum(kcnt.min(axis=1), 1))
         split = np.isfinite(spread) & np.isfinite(sigma) & (spread > k * sigma) & (kcnt.min(axis=1) > 0)
         # promote: cells that split get depth of the next level, expanded x4
         depth = np.repeat(depth, 4)
