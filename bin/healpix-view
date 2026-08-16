@@ -62,12 +62,18 @@ def refine_depth(total, counts, nsides, k):
     refinement stopped.
     """
     coarse, fine = nsides[0], nsides[-1]
+
+    # `alive` tracks cells still being considered at the CURRENT level. A cell
+    # is only tested if its parent split -- otherwise refinement would not be a
+    # tree at all, just an independent per-level test (the bug that made `k`
+    # have no effect: every cell reached the finest level regardless).
     depth = np.full(12 * coarse**2, float(coarse), dtype=np.float64)
+    alive = np.ones(12 * coarse**2, dtype=bool)
 
     cur = coarse
     while cur < fine:
         nxt = cur * 2
-        # children of each cell at `cur`, taken from the map built at `nxt`
+        # child cells at `nxt`, grouped in fours under their parent at `cur`
         tot_n = _rebin(total[fine], fine, nxt)
         cnt_n = _rebin(counts[fine], fine, nxt)
         with np.errstate(invalid="ignore", divide="ignore"):
@@ -75,26 +81,24 @@ def refine_depth(total, counts, nsides, k):
         kids = mean_n.reshape(-1, 4)
         kcnt = cnt_n.reshape(-1, 4)
         spread = np.nanmax(kids, axis=1) - np.nanmin(kids, axis=1)
-        # Poisson-ish per-cell noise from the cell's own depth
+
         # sigma MUST be measured, not modelled. A Poisson guess on raw ADU
         # (sqrt(mean)/sqrt(N)) overestimated the real sibling-to-sibling scatter
-        # by 2.2x on the first run (1.56 vs 0.71 ADU) -- these are co-added
-        # frames with gain, so ADU are not photons. The inflated threshold meant
-        # ordinary sky never refined and only abrupt geometric steps at HEALPix
-        # base-pixel seams cleared the bar, so the tree traced the GRID rather
-        # than the sky. Measure the scatter from the data instead.
+        # by 2.2x (1.56 vs 0.71 ADU) -- these are co-added frames with gain, so
+        # ADU are not photons.
         with np.errstate(invalid="ignore"):
             resid = np.abs(kids - np.nanmean(kids, axis=1)[:, None])
         scatter = 1.4826 * np.nanmedian(resid)          # robust global MAD
-        # scale by each cell's own depth: deeper cells are quieter
         depth_ref = np.nanmedian(kcnt.min(axis=1))
         with np.errstate(invalid="ignore", divide="ignore"):
             sigma = scatter * np.sqrt(depth_ref / np.maximum(kcnt.min(axis=1), 1))
-        split = np.isfinite(spread) & np.isfinite(sigma) & (spread > k * sigma) & (kcnt.min(axis=1) > 0)
-        # promote: cells that split get depth of the next level, expanded x4
+
+        split = (alive & np.isfinite(spread) & np.isfinite(sigma)
+                 & (spread > k * sigma) & (kcnt.min(axis=1) > 0))
+
         depth = np.repeat(depth, 4)
-        promoted = np.repeat(split, 4)
-        depth[promoted] = float(nxt)
+        depth[np.repeat(split, 4)] = float(nxt)
+        alive = np.repeat(split, 4)     # only children of split cells continue
         cur = nxt
     return depth
 
