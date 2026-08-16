@@ -343,6 +343,60 @@ rule exists.
 N_side. Read once, accumulate into all N_sides in the same pass — or better,
 accumulate only at the finest and bin down, which is exact and now proven.
 
+## Second run — on muppet, 2026-08-16. THREE bugs, criterion still not clean.
+
+Moved to muppet (Peter: *"we should really be running this on muppet"*).
+`astropy_healpix` 1.0.0 there vs 1.1.2 on pip — the exactness property was
+re-verified on the older version before trusting any result. Frames are
+**full-res 4608×2592**, so `[1392, 978]` is already the correct full-res pole.
+Runtime **98 s** for 20 frames including the direct-rebuild check, reading local
+NVMe instead of NFS.
+
+**Bin-down exactness still PASSES** under the stronger test (coarsest rebuilt
+directly from frames vs binned from the finest): IDENTICAL, 5,357,354,088.
+
+**My oversampling diagnosis was WRONG.** Re-running at 1.38× px produced a
+**byte-identical depth map** to the 0.69× run. Ruled out by measurement:
+counts are uniform across base pixels (38.02 each) and
+`corr(spread, child-count-imbalance) = -0.002`. Neither sampling ratio nor
+depth explains the seams. *Recorded because the first run's writeup asserted it
+confidently.*
+
+Three real bugs, each found by instrumenting rather than reasoning:
+
+1. **The noise model was invented, not measured.** `sqrt(mean)/sqrt(N)` on raw
+   ADU gave σ=1.56 against a *measured* sibling scatter of 0.71 — 2.2× too
+   large. These are co-added frames with gain; **ADU are not photons.** With
+   3σ=4.84 against a median spread of 1.51, ordinary sky could never refine, so
+   the only features clearing the bar were the abrupt cell-geometry steps at
+   base-pixel seams. **The tree traced the grid because the bar was set where
+   only the grid could reach it.**
+2. **Refinement was not a tree.** Every cell was tested independently at every
+   level, so a cell refined even when its parent had stopped. `k=3` and `k=40`
+   gave byte-identical maps. Fixed by carrying the parent's decision down.
+3. **σ collapsed to zero.** `depth_ref = median(kcnt.min(axis=1))` over ALL
+   parents is **0**, because the cap covers ~3% of the sphere and only 94,612
+   of 3.1M parents have all four children sampled. σ=0 ⇒ everything splits,
+   regardless of `k`. Fixed by computing scatter and reference over judgeable
+   cells only.
+
+**`k` now responds monotonically** — 19.3% deep at k=1, 8.1% at k=2, 2.9% at
+k=3, 0.13% at k=8.
+
+**Status: partly working, not yet trustworthy.** At k=3 the refinement clearly
+traces **concentric arcs about the pole** — real star trails, the first time
+the tree has followed sky. But the diamond seam pattern is still faintly
+present and refinement is scattered broadly rather than concentrating on
+sources. The criterion is finding trails **and** grid.
+
+**Do not tune `k` further until the seam residual is understood.** Three
+diagnoses have already been wrong; the next step is to *measure* what
+distinguishes seam cells from arc cells (e.g. compare spread distributions for
+cells adjacent to a base-pixel boundary against the rest), not to guess a
+fourth mechanism. The likely remaining candidate is the **nearest-neighbour
+render** in `healpix-view` amplifying cell-to-cell steps — but that is a
+hypothesis, not a finding.
+
 ## Related
 
 - `accumulation-bucket-refinement.md` — the ring scheme this replaces for
