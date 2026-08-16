@@ -121,19 +121,28 @@ def main():
     ap.add_argument("--view", choices=["flux", "counts", "depth", "grid"], default="depth")
     ap.add_argument("--nside", type=int, help="which map (default: finest)")
     ap.add_argument("--k", type=float, default=3.0, help="variance criterion threshold")
-    ap.add_argument("--size", type=int, nargs=2, default=[2304, 1296])
+    ap.add_argument("--size", type=int, nargs=2, default=None,
+                    help="render size WxH (default: the frames' own shape)")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
+    args.size_given = args.size is not None
+    if args.size is None:
+        args.size = [2304, 1296]
 
     d = np.load(args.npz)
     nsides = sorted(int(k.split("_")[1]) for k in d.files if k.startswith("total_"))
     total = {n: d[f"total_{n}"] for n in nsides}
     counts = {n: d[f"counts_{n}"] for n in nsides}
-    pole = d["pole"] / 2.0            # npz pole is full-res; render at half-res
-    plate = float(d["plate"]) * 2.0
+    # pole/plate are stored AS USED by healpix-ladder (half-res already applied
+    # there if it was), so never re-scale them here.
+    pole = d["pole"]
+    plate = float(d["plate"])
     cap = float(d["cap_deg"])
     ns = args.nside or nsides[-1]
-    w, h = args.size
+    if "image_shape" in d.files and not args.size_given:
+        h, w = (int(x) for x in d["image_shape"])
+    else:
+        w, h = args.size
 
     if args.view in ("flux", "grid"):
         with np.errstate(invalid="ignore", divide="ignore"):

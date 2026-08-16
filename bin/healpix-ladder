@@ -138,8 +138,15 @@ def main():
                     help="deg/px full-res (measured from Polaris, 2026-08-14)")
     ap.add_argument("--cap-deg", type=float, default=20.0,
                     help="only accumulate within this angle of the pole")
+    ap.add_argument("--half-res", action="store_true",
+                    help="frames are half-res (doubles the effective plate scale)")
+    ap.add_argument("--allow-oversampling", action="store_true",
+                    help="permit an nside finer than the data supports (see below)")
     ap.add_argument("--out", type=Path, help="write .npz of the maps")
     args = ap.parse_args()
+
+    plate = args.plate_scale * (2.0 if args.half_res else 1.0)
+    pole = [p / 2.0 for p in args.pole] if args.half_res else list(args.pole)
 
     frames = sorted(args.night_dir.glob("*.fits.fz"))[: args.limit]
     if not frames:
@@ -150,43 +157,73 @@ def main():
     span = frame_time_s(frames[-1], load_frame(frames[-1])[1]) - t0
     print(f"{len(frames)} frames, span {span/60:.1f} min, "
           f"sky rotates {span*SIDEREAL_DEG_PER_S:.3f} deg")
-    print(f"pole {args.pole}, plate {args.plate_scale} deg/px, cap {args.cap_deg} deg\n")
+    print(f"pole {pole}, plate {plate:.7f} deg/px, cap {args.cap_deg} deg")
 
-    maps = {}
+    # --- do not build finer than the data supports ---
+    # A cell smaller than a camera pixel is fed by less than one pixel, so
+    # neighbouring cells disagree from SAMPLING ALIASING, not sky structure --
+    # which is exactly what defeated the first prototype run (2026-08-16), where
+    # the variance criterion refined along HEALPix base-pixel seams. Drizzle is
+    # the separate, later step that earns sub-pixel cells.
+    px_arcsec = plate * 3600.0
+    finest = max(args.nsides)
+    cell_arcsec = HEALPix(nside=finest).pixel_resolution.to(u.arcsec).value
+    ratio = cell_arcsec / px_arcsec
+    print(f"camera px {px_arcsec:.1f}\", finest cell (nside {finest}) "
+          f"{cell_arcsec:.1f}\" = {ratio:.2f}x px")
+    if ratio < 1.0:
+        msg = (f"nside {finest} is FINER than the data ({ratio:.2f}x px). "
+               f"Cap at ~1.4x px, or pass --allow-oversampling.")
+        if not args.allow_oversampling:
+            sys.exit(f"refusing: {msg}")
+        print(f"  WARNING: {msg}")
+    print()
+
+    # --- read ONCE, accumulate at the finest, bin down (exact) ---
+    # The old loop re-read every frame per nside; over NFS that dominated the
+    # runtime. Binning down is byte-exact (verified), so the coarser maps are
+    # free.
+    t = time.time()
+    total_f, counts_f = accumulate(frames, finest, pole, plate, t0, args.cap_deg)
+    read_s = time.time() - t
+    maps = {finest: (total_f, counts_f)}
     for ns in sorted(args.nsides):
-        t = time.time()
-        total, counts = accumulate(frames, ns, args.pole, args.plate_scale,
-                                   t0, args.cap_deg)
-        hit = counts > 0
-        maps[ns] = (total, counts)
+        if ns == finest:
+            continue
+        maps[ns] = (bin_down(total_f, finest, ns), bin_down(counts_f, finest, ns))
+    for ns in sorted(maps):
+        hit = maps[ns][1] > 0
+        note = f"{read_s:6.2f} s (read)" if ns == finest else "binned down"
         print(f"  nside {ns:5d}: {hit.sum():9,} cells hit  "
-              f"({100*hit.sum()/counts.size:6.3f}% of sphere)  "
-              f"{time.time()-t:6.2f} s")
+              f"({100*hit.sum()/hit.size:6.3f}% of sphere)  {note}")
 
     # ---- THE CORRECTNESS TEST ----
-    print("\n=== bin-down exactness (built directly vs binned from finer) ===")
-    ok = True
-    nsides = sorted(maps)
-    for fine, coarse in zip(nsides[1:], nsides[:-1]):
-        direct = maps[coarse][0]
-        binned = bin_down(maps[fine][0], fine, coarse)
-        same = np.array_equal(direct, binned)
-        ok &= same
-        if same:
-            print(f"  nside {fine} -> {coarse}: IDENTICAL ({direct.sum():,} total)")
-        else:
-            d = direct - binned
-            bad = np.count_nonzero(d)
-            print(f"  nside {fine} -> {coarse}: DIFFER in {bad:,} cells "
-                  f"(max |d| {np.abs(d).max():,}, sums {direct.sum():,} vs {binned.sum():,})")
+    # The coarse maps above were BINNED, so comparing them to each other proves
+    # nothing. Rebuild the coarsest DIRECTLY from the frames and compare: that
+    # is the real test on the projection.
+    print("\n=== bin-down exactness (built directly from frames vs binned) ===")
+    coarsest = min(maps)
+    direct, dcounts = accumulate(frames, coarsest, pole, plate, t0, args.cap_deg)
+    binned, bcounts = maps[coarsest]
+    ok = np.array_equal(direct, binned) and np.array_equal(dcounts, bcounts)
+    if ok:
+        print(f"  nside {finest} -> {coarsest}: IDENTICAL ({direct.sum():,} total)")
+    else:
+        d = direct - binned
+        print(f"  nside {finest} -> {coarsest}: DIFFER in "
+              f"{np.count_nonzero(d):,} cells (max |d| {np.abs(d).max():,}, "
+              f"sums {direct.sum():,} vs {binned.sum():,})")
     print(f"\n{'PASS' if ok else 'FAIL'}: binning down is "
           f"{'exact' if ok else 'NOT exact -- projection bug'}")
 
     if args.out:
+        # pole/plate as ACTUALLY USED (already half-res-adjusted if --half-res),
+        # so the viewer never has to guess or re-apply the factor.
         np.savez_compressed(args.out, **{f"total_{k}": v[0] for k, v in maps.items()},
                             **{f"counts_{k}": v[1] for k, v in maps.items()},
-                            pole=np.array(args.pole), plate=args.plate_scale,
-                            cap_deg=args.cap_deg, t0=t0)
+                            pole=np.array(pole), plate=plate,
+                            cap_deg=args.cap_deg, t0=t0,
+                            image_shape=np.array(load_frame(frames[0])[0].shape))
         print(f"wrote {args.out}")
     return 0 if ok else 1
 
