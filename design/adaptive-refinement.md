@@ -174,6 +174,71 @@ returning in new clothes. The answer is the same as before: **drizzle absorbs
 the fractional shift; do not buy shift-cheapness with structure.** Convert to
 `RING` only if a spherical-harmonic analysis is ever wanted.
 
+## Visualisation — required, not decorative
+
+Peter, 2026-08-16: *"we will need to visualise this."* Right, and it is a
+correctness tool here rather than a presentation one.
+
+**Why an adaptive tree specifically demands it.** A uniform grid can be checked
+numerically — one resolution, one number per cell. An adaptive tree's central
+question is *where did it refine, and was that sensible?*, which is inherently
+spatial. `k` cannot be calibrated by reading statistics: the failure modes are
+"refined into noise everywhere" and "refined nowhere", and both look plausible
+as scalars while being obvious as pictures.
+
+This estate's own record argues the point. **Three times the eyeball beat the
+numbers** (STATE, transients): the foliage run where "every *number* looked
+right (conf 1.00, ends=0, single sub); only the picture was wrong", the 08-11
+contrail, and the detector calibration that came out inverted against Peter's
+splay probes. `--save-cutouts` "earned its place on first use". The same
+discipline applies here — **look at the tree before trusting its depth map.**
+
+### Four views, in order of usefulness
+
+1. **Depth map — the primary view.** Colour each cell by its refinement level
+   (N_side order). This *is* the tree made visible: stars should appear as
+   compact deep islands in a shallow sea, and the picture immediately shows
+   whether refinement tracked structure or noise. A depth map that is uniformly
+   deep means `k` is too low; uniformly shallow means too high; deep in a
+   *ring* or along an *edge* means depth is tracking exposure rather than
+   structure — the failure the per-cell sigma exists to prevent.
+
+2. **Cell-boundary overlay on a real stack.** Draw the tree's cell edges over
+   `max.jpg` or a de-rotated stack. Answers the question the depth map cannot:
+   do deep cells sit *on* the stars? Wrong pole or wrong projection shows up
+   instantly as a tree refined next to the trails rather than along them. This
+   is the geometric sanity check, and it is the one worth building first
+   alongside the depth map.
+
+3. **Refinement history.** Since the cadence is iterative, colour by *when* a
+   cell reached its depth. Directly visualises "the archive appreciates" — and
+   is the diagnostic for the open storage question above, where a cell's
+   history may be coarser than its present.
+
+4. **Ladder comparison.** The same region at N_side 512 / 1024 / 2048 / 4096
+   side by side — the coarse-to-fine idea shown directly, and the natural way
+   to present the deliverable to a reader.
+
+### Practicalities
+
+- **House pattern**: a standalone `bin/` script, `--out` PNG, PIL or matplotlib,
+  docstring stating the geometry — following `plot-distortion`,
+  `plot-residuals`, `make-epoch-graticule`, `sky-chart-polar`.
+- **Project HEALPix cells back through the camera→sphere map for display**, so
+  views land in *pixel* space where they can be compared against real frames.
+  A mollweide or orthographic all-sky plot is the wrong frame for checking
+  against `max.jpg`. (`healpy` has all-sky plotting built in, but we did not
+  install it — and its projections are not the ones we want to check against.)
+- **Draw cell boundaries as polygons, not pixel fills.** The whole point is
+  seeing *cell size vary*, which a fill hides. `astropy_healpix` gives cell
+  corner coordinates directly.
+- **Expect to view in `splay`** — the estate's still-image viewer, already the
+  route for frame inspection and probe marking.
+- **This is a `/astro` deliverable too.** A depth map is a genuinely striking
+  image — the map showing you where it found things — and
+  `catalogue-deliverable.md` wants exactly this kind of public face. But its
+  first job is debugging.
+
 ## Status and next step
 
 **Design + verified primitives. No accumulator code yet.**
@@ -187,6 +252,11 @@ Next: **prototype on one astrocam hour** — accumulate at N_side 512/1024/2048,
 verify a direct build at 512 equals a 2048 build binned down (a correctness
 test on the projection itself, not a quality comparison), and time it. Then
 apply the variance criterion and see where the tree actually refines.
+
+**Build the depth map and the boundary overlay in the same pass** — not
+afterwards. The variance criterion cannot be calibrated without them, and the
+estate's own history says the numbers will look right while the picture is
+wrong.
 
 ## Related
 
