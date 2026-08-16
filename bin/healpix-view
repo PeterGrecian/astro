@@ -86,15 +86,21 @@ def refine_depth(total, counts, nsides, k):
         # (sqrt(mean)/sqrt(N)) overestimated the real sibling-to-sibling scatter
         # by 2.2x (1.56 vs 0.71 ADU) -- these are co-added frames with gain, so
         # ADU are not photons.
+        kmin = kcnt.min(axis=1)
+        # Only cells with all four children sampled can be judged. Most cannot:
+        # the cap covers ~3% of the sphere, so the median over ALL parents is 0
+        # -- which made depth_ref 0, sigma 0, and every valid cell split
+        # regardless of k. Compute the reference over judgeable cells only.
+        judgeable = kmin > 0
         with np.errstate(invalid="ignore"):
             resid = np.abs(kids - np.nanmean(kids, axis=1)[:, None])
-        scatter = 1.4826 * np.nanmedian(resid)          # robust global MAD
-        depth_ref = np.nanmedian(kcnt.min(axis=1))
+        scatter = 1.4826 * np.nanmedian(resid[judgeable])   # robust MAD
+        depth_ref = np.median(kmin[judgeable]) if judgeable.any() else 1.0
         with np.errstate(invalid="ignore", divide="ignore"):
-            sigma = scatter * np.sqrt(depth_ref / np.maximum(kcnt.min(axis=1), 1))
+            sigma = scatter * np.sqrt(depth_ref / np.maximum(kmin, 1))
 
-        split = (alive & np.isfinite(spread) & np.isfinite(sigma)
-                 & (spread > k * sigma) & (kcnt.min(axis=1) > 0))
+        split = (alive & judgeable & np.isfinite(spread) & np.isfinite(sigma)
+                 & (spread > k * sigma))
 
         depth = np.repeat(depth, 4)
         depth[np.repeat(split, 4)] = float(nxt)
