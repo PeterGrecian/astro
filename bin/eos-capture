@@ -97,7 +97,7 @@ def grab(outdir, tag="", stem=None):
     # Class-B USB error (-110) that only a 12V power pull clears. "Press
     # Full" fires the shutter directly with no AF wait; always follow with
     # "Release Full" or the shutter stays held down. Same recipe as
-    # eos-night-watch / eos-psf-dither / eos-bulb-run; swept here
+    # eos-night-watch / eos-psf-dither; swept here
     # 2026-08-12 (astro-capture) — this is the LIVE nightly path and was
     # the last holdout still on the wedging call.
     gp("--set-config", "eosremoterelease=Press Full", timeout=15)
