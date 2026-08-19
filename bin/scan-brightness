@@ -52,6 +52,11 @@ def epoch_ms_from_header(path: Path) -> int | None:
             for hdu in h:
                 if "EPOCH_MS" in hdu.header:
                     return int(hdu.header["EPOCH_MS"])
+                if "DATE-OBS" in hdu.header:
+                    dt = datetime.fromisoformat(hdu.header["DATE-OBS"])
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return int(dt.timestamp() * 1000)
     except Exception:
         return None
     return None
