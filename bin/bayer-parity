@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""bayer-parity — which Bayer phase actually carries a star's flux?
+
+BAYERPAT in the header names the SENSOR's pattern, but the capture engine
+rotates 180 in-capture (StreamingConfig.rotation_180, `bayer[::-1,::-1]`),
+and a 180 rotation swaps the diagonal: an RGGB sensor stored rotated is
+BGGR in stored coordinates. Get that backwards and every per-channel
+measurement downstream is colour-swapped — a red star reads blue, and an
+"empty red channel" is really an empty blue one.
+
+So don't trust the keyword: measure it. Point this at a real star and it
+sums flux by GLOBAL (y%2, x%2) phase, then names the colour each phase
+would be under the header pattern and under its 180-rotated form. A star
+of known colour, or simply the sky's own R/B asymmetry under urban sodium
+and LED light, then settles which hypothesis matches.
+
+The brightest and dimmest phases are the informative ones. If the two
+green phases dominate together, the parity is consistent either way (both
+hypotheses put G on the same two cells) — pick a star where R and B
+differ, or widen the box to catch more of the trail.
+
+Usage:
+    bayer-parity FRAME.fits.fz --x 4343 --y 698
+    bayer-parity FRAME --box 4335 655 4352 738        # explicit x0 y0 x1 y1
+    bayer-parity FRAME --x .. --y .. --size 24 --pattern RGGB
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from astro.bayer import (local_sky, normalise_pattern,        # noqa: E402
+                         open_frame, phase_colours)
+
+
+def rotate180(pattern: str) -> str:
+    """The stored pattern after a 180 rotation: reverse the 2x2 read."""
+    p = normalise_pattern(pattern)
+    return p[3] + p[2] + p[1] + p[0]
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("frame")
+    ap.add_argument("--x", type=int)
+    ap.add_argument("--y", type=int)
+    ap.add_argument("--size", type=int, default=24,
+                    help="box side around --x/--y (default 24)")
+    ap.add_argument("--box", nargs=4, type=int, metavar=("X0", "Y0", "X1", "Y1"),
+                    help="explicit global box instead of --x/--y")
+    ap.add_argument("--pattern", help="override FITS BAYERPAT")
+    a = ap.parse_args(argv)
+
+    data, hdr = open_frame(a.frame)
+    header_pat = normalise_pattern(a.pattern, hdr)
+    rotated = rotate180(header_pat)
+
+    if a.box:
+        x0, y0, x1, y1 = a.box
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if y1 < y0:
+            y0, y1 = y1, y0
+        cy, cx = (y0 + y1) // 2, (x0 + x1) // 2
+    elif a.x is not None and a.y is not None:
+        b = a.size // 2
+        x0, x1, y0, y1 = a.x - b, a.x + b, a.y - b, a.y + b
+        cy, cx = a.y, a.x
+    else:
+        ap.error("need --x/--y or --box")
+
+    sky = local_sky(data, cy, cx)
+    sub = data[y0:y1, x0:x1] - sky
+    ys, xs = np.mgrid[y0:y1, x0:x1]
+
+    print(f"frame     {a.frame}")
+    print(f"BAYERPAT  {hdr.get('BAYERPAT')}  -> as-read {header_pat}, "
+          f"rot180 {rotated}")
+    print(f"shape     {data.shape} (even x even = phase (0,0) at origin)")
+    print(f"box       x {x0}..{x1}  y {y0}..{y1}   sky {sky:.0f}\n")
+
+    tot = {}
+    print("flux summed by GLOBAL (y%2, x%2) phase:")
+    for py in (0, 1):
+        for px in (0, 1):
+            m = (ys % 2 == py) & (xs % 2 == px)
+            v = sub[m]
+            tot[(py, px)] = float(v[v > 0].sum())
+            print(f"  phase (y%2={py}, x%2={px}): sum(>0)={tot[(py, px)]:8.0f}"
+                  f"  max={v.max():5.0f}")
+
+    as_read = phase_colours(header_pat)
+    as_rot = phase_colours(rotated)
+    print(f"\n{'phase':>10} {header_pat + ' (as read)':>16} "
+          f"{rotated + ' (rot180)':>16} {'flux':>9}")
+    for ph in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        print(f"{str(ph):>10} {as_read[ph]:>16} {as_rot[ph]:>16} {tot[ph]:>9.0f}")
+
+    hi = max(tot, key=tot.get)
+    lo = min(tot, key=tot.get)
+    print(f"\nbrightest phase {hi} -> {header_pat} says {as_read[hi]}, "
+          f"{rotated} says {as_rot[hi]}")
+    print(f"dimmest   phase {lo} -> {header_pat} says {as_read[lo]}, "
+          f"{rotated} says {as_rot[lo]}")
+    if as_read[hi] == as_rot[hi] and as_read[lo] == as_rot[lo]:
+        print("\nINCONCLUSIVE: both hypotheses assign the same colours to the "
+              "brightest and dimmest phases.\nPick a star where R and B "
+              "differ, or use --box to cover more of the trail.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

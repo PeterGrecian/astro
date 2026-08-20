@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""bayer-heatmap — a star PSF at the individual photosite.
+
+Renders a raw Bayer-mosaic crop as an intensity heat-map with a coloured
+channel dot in every cell, optionally with a 3D-stem panel. This is how
+you see undersampling directly: a star whose PSF is near the pixel pitch
+lands on ONE Bayer phase, the neighbouring phases stay at sky, and the
+result is a checkerboard rather than a smooth core. Applying an
+assume-white balance (default) removes the sensor's 2x green weighting so
+the true PSF shape shows through.
+
+The filmstrip mode renders the same star across consecutive frames at
+per-frame positions, which is how you watch the sub-pixel dither move a
+source over the mosaic between exposures.
+
+Usage:
+    bayer-heatmap FRAME.fits.fz --x 4343 --y 698 [--size 32]
+    bayer-heatmap FRAME --x .. --y .. --no-white --no-3d --out /tmp/hm.png
+    bayer-heatmap --strip track.csv --dir <night>/HH   # filmstrip
+    bayer-heatmap --strip - --dir <night>/HH < track.csv
+
+--strip reads `frame_id,x,y` rows (the output of `bayer-channels --follow`)
+and renders one panel per frame. Faint stars are best read with
+--no-white: a white balance on a source that barely clears the noise
+amplifies whichever channel happens to be emptiest.
+
+--pattern overrides the FITS BAYERPAT (RGGB / SBGGR / SGBRG). Note the
+header names the SENSOR; if capture rotated 180 the stored array is the
+diagonal swap. Settle it with `bayer-parity` rather than guessing.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from astro.bayer import normalise_pattern, open_frame, render   # noqa: E402
+
+
+def _crop(data, x: int, y: int, size: int):
+    b = size // 2
+    return data[y - b:y + b, x - b:x + b], x - b, y - b
+
+
+def _strip_rows(spec: str):
+    fh = sys.stdin if spec == "-" else open(spec, newline="")
+    try:
+        for row in csv.DictReader(fh):
+            yield row["frame_id"], int(float(row["x"])), int(float(row["y"]))
+    finally:
+        if fh is not sys.stdin:
+            fh.close()
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("frame", nargs="?", help="a .fits/.fits.fz frame")
+    ap.add_argument("--x", type=int)
+    ap.add_argument("--y", type=int)
+    ap.add_argument("--size", type=int, default=32)
+    ap.add_argument("--pattern", help="override FITS BAYERPAT")
+    ap.add_argument("--out", default="/tmp/bayer-heatmap.png")
+    ap.add_argument("--no-white", action="store_true",
+                    help="skip assume-white (right for faint stars)")
+    ap.add_argument("--no-3d", action="store_true")
+    ap.add_argument("--strip", metavar="TRACK_CSV",
+                    help="filmstrip from frame_id,x,y rows ('-' for stdin)")
+    ap.add_argument("--dir", type=Path, help="frame dir, with --strip")
+    a = ap.parse_args(argv)
+
+    if a.strip:
+        if not a.dir:
+            ap.error("--strip needs --dir")
+        out_dir = Path(a.out).parent
+        for i, (fid, x, y) in enumerate(_strip_rows(a.strip)):
+            path = a.dir / f"{fid}.fits.fz"
+            data, hdr = open_frame(path)
+            pat = normalise_pattern(a.pattern, hdr)
+            t = str(hdr.get("DATE-OBS", ""))[11:19]
+            crop, x0, y0 = _crop(data, x, y, a.size)
+            out = out_dir / f"heat-{i:02d}-{t.replace(':', '')}.png"
+            render(crop, x0, y0, pattern=pat, out=str(out),
+                   white=not a.no_white, threed=not a.no_3d,
+                   title=f"{t} UTC  star@({x},{y})")
+            print(f"wrote {out}")
+        return 0
+
+    if not (a.frame and a.x is not None and a.y is not None):
+        ap.error("need FRAME with --x and --y (or --strip)")
+    data, hdr = open_frame(a.frame)
+    pat = normalise_pattern(a.pattern, hdr)
+    crop, x0, y0 = _crop(data, a.x, a.y, a.size)
+    out, (wr, wb) = render(crop, x0, y0, pattern=pat, out=a.out,
+                           white=not a.no_white, threed=not a.no_3d,
+                           title=f"{Path(a.frame).name} @({a.x},{a.y}) {pat}")
+    print(f"wrote {out}  pattern={pat}  WB R x{wr:.2f} B x{wb:.2f}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

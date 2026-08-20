@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""bayer-channels — is that channel dead, or did the star just miss it?
+
+The question this answers came up on astrocam: a star showed strong green
+and essentially nothing in red, which looks exactly like a defective
+channel and is far more often undersampling — the PSF is comparable to
+the pixel pitch, so the source lands on one Bayer phase and never
+illuminates the red photosite two cells away. Three modes, each a
+different decisive test:
+
+--stats (whole frame)
+    Per-phase sky level, noise and bright tail. A DEAD channel reads a
+    stuck value or pure zero everywhere, with near-zero std and no bright
+    tail. A LIVE one has a real sky median, real noise, and a tail of
+    stars. Also lists each phase's brightest pixels: if red saturates
+    somewhere in the frame, red works and your star simply missed it.
+
+--at X Y (one source)
+    Per-channel peak and summed flux above sky, each colour's own peak
+    location, and a raw ADU grid with every cell's colour marked — so you
+    can read the mosaic directly rather than trusting any renderer.
+
+--follow (across frames)
+    Follows the brightest source in a search box frame to frame and
+    reports time, position, per-channel values and the step in y. A real
+    sidereally-trailing star marches smoothly; a hot pixel does not move
+    and a cosmic ray appears once. Emits `frame_id,x,y` so the output
+    feeds `bayer-heatmap --strip`.
+
+Usage:
+    bayer-channels FRAME.fits.fz --stats
+    bayer-channels FRAME.fits.fz --at 4343 698 [--size 8]
+    bayer-channels --follow <night>/HH --box 4310 660 4375 740 [--csv out.csv]
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from astro.bayer import (bayer_channel, find_peak, local_sky,   # noqa: E402
+                         local_sky_by_channel, normalise_pattern,
+                         open_frame, phase_colours)
+
+
+def cmd_stats(data, pattern: str, top: int = 5) -> None:
+    h, w = data.shape
+    ys, xs = np.mgrid[0:h, 0:w]
+    colour = phase_colours(pattern)
+    print(f"=== whole-frame statistics by Bayer phase ({pattern}) ===")
+    for ph in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        m = (ys % 2 == ph[0]) & (xs % 2 == ph[1])
+        a = data[m]
+        label = f"{ph} {colour[ph]}"
+        print(f"  {label:>10}: median {np.median(a):6.1f}  mean {a.mean():6.1f}"
+              f"  std {a.std():5.1f}  p99.9 {np.percentile(a, 99.9):5.0f}"
+              f"  max {a.max():5.0f}")
+    print("  -> DEAD: near-zero std, stuck value, no bright tail.")
+    print("     LIVE: real sky median, real std, a tail of stars.\n")
+
+    print(f"=== brightest {top} pixels in each phase ===")
+    for ph in [(0, 0), (0, 1), (1, 0), (1, 1)]:
+        m = (ys % 2 == ph[0]) & (xs % 2 == ph[1])
+        flat = np.where(m, data, -1).ravel()
+        best = np.sort(np.partition(flat, -top)[-top:])[::-1]
+        print(f"  {str(ph) + ' ' + colour[ph]:>10}: {best.astype(int)}")
+    print("  -> if a phase's top pixels reach saturation anywhere, that")
+    print("     channel WORKS; the star simply missed its photosites.")
+
+
+def cmd_at(data, pattern: str, x: int, y: int, size: int) -> None:
+    # Per-channel sky: the phases do not share a background, and a mixed
+    # median makes the least-sensitive channel read negative on a real star.
+    sky = local_sky_by_channel(data, y, x, pattern=pattern)
+    px, py, peak = find_peak(data, y=y, x=x, radius=max(4, size // 2))
+    colour = phase_colours(pattern)
+    print("local sky per channel: " +
+          "  ".join(f"{c} {sky[c]:.1f}" for c in "RGB") +
+          f"   (mixed median {local_sky(data, y, x):.1f})")
+    print(f"true peak x={px} y={py} value={peak:.0f} "
+          f"(phase y%2={py % 2} x%2={px % 2} = {colour[(py % 2, px % 2)]})\n")
+
+    b = size // 2
+    y0, x0 = py - b, px - b
+    crop = data[y0:y0 + size, x0:x0 + size]
+    ys, xs = np.mgrid[y0:y0 + size, x0:x0 + size]
+    chan = bayer_channel(ys, xs, pattern)
+
+    print(f"{'channel':>8} {'max':>6} {'sum(>0)':>9} {'mean':>7}   "
+          f"(ADU above that channel's own sky)")
+    for c in "RGB":
+        m = chan == c
+        if not m.any():
+            continue
+        a = crop[m] - sky[c]
+        print(f"{c:>8} {a.max():6.0f} {a[a > 0].sum():9.0f} {a.mean():7.1f}")
+
+    print("\nper-colour peak location (global px):")
+    for c in "RGB":
+        m = chan == c
+        if not m.any():
+            continue
+        vals = np.where(m, crop - sky[c], -1e9)
+        iy, ix = np.unravel_index(np.argmax(vals), vals.shape)
+        print(f"  {c}: peak {(crop - sky[c])[iy, ix]:5.0f} ADU "
+              f"at x={x0 + ix} y={y0 + iy}")
+
+    print(f"\nraw ADU grid with cell colour, origin x={x0} y={y0}:")
+    for j in range(size):
+        row = [f"{int(crop[j, i]):4d}{chan[j, i]}" for i in range(size)]
+        print("  " + " ".join(row))
+
+
+def cmd_follow(frame_dir: Path, box, pattern_override, csv_out,
+               around=None, span=3) -> None:
+    x0, y0, x1, y1 = box
+    frames = sorted(frame_dir.glob("*.fits.fz"))
+    if not frames:
+        print(f"no frames under {frame_dir}", file=sys.stderr)
+        return
+    if around:
+        hits = [i for i, f in enumerate(frames) if around in f.name]
+        if not hits:
+            print(f"{around} not found under {frame_dir}", file=sys.stderr)
+            return
+        i = hits[0]
+        frames = frames[max(0, i - span):i + span + 1]
+    sky = None
+    prev_y = None
+    rows = []
+    print(f"{'frame_id':>16} {'UTC':>9} {'x':>6} {'y':>6} {'peak':>6}  "
+          f"{'R':>5} {'G':>5} {'B':>5}  {'dy':>4}")
+    for path in frames:
+        data, hdr = open_frame(path)
+        pattern = normalise_pattern(pattern_override, hdr)
+        if sky is None:
+            # Per-channel, for the same reason as cmd_at: a mixed median
+            # drives the least-sensitive channel negative on a real star.
+            sky = local_sky_by_channel(data, (y0 + y1) // 2, (x0 + x1) // 2,
+                                       pattern=pattern)
+            peak_sky = float(np.mean(list(sky.values())))
+        sub = data[y0:y1, x0:x1] - peak_sky
+        iy, ix = np.unravel_index(np.argmax(sub), sub.shape)
+        px, py, peak = x0 + int(ix), y0 + int(iy), float(sub[iy, ix])
+
+        ys, xs = np.mgrid[py - 1:py + 2, px - 1:px + 2]
+        chan = bayer_channel(ys, xs, pattern)
+        win = data[py - 1:py + 2, px - 1:px + 2]
+        vals = {c: (win[chan == c].max() - sky[c] if (chan == c).any()
+                    else float("nan")) for c in "RGB"}
+
+        t = str(hdr.get("DATE-OBS", ""))[11:19]
+        fid = path.name.split(".")[0]
+        dy = "" if prev_y is None else f"{py - prev_y:+d}"
+        prev_y = py
+        print(f"{fid:>16} {t:>9} {px:>6} {py:>6} {peak:>6.0f}  "
+              f"{vals['R']:>5.0f} {vals['G']:>5.0f} {vals['B']:>5.0f}  {dy:>4}")
+        rows.append({"frame_id": fid, "utc": t, "x": px, "y": py,
+                     "peak": f"{peak:.0f}"})
+    print("\nsky per channel: " + "  ".join(f"{c} {sky[c]:.1f}" for c in "RGB")
+          + "   (R/G/B are ADU above that channel's own sky)")
+    print("a real trailing star steps smoothly in y; a hot pixel does not move")
+    if csv_out:
+        with open(csv_out, "w", newline="") as fh:
+            wr = csv.DictWriter(fh, fieldnames=["frame_id", "utc", "x", "y", "peak"])
+            wr.writeheader()
+            wr.writerows(rows)
+        print(f"wrote {csv_out}  (feed to: bayer-heatmap --strip)")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("frame", nargs="?", help="a .fits/.fits.fz frame")
+    ap.add_argument("--stats", action="store_true", help="whole-frame per-phase")
+    ap.add_argument("--at", nargs=2, type=int, metavar=("X", "Y"))
+    ap.add_argument("--size", type=int, default=8, help="grid side for --at")
+    ap.add_argument("--follow", type=Path, metavar="FRAME_DIR")
+    ap.add_argument("--box", nargs=4, type=int, metavar=("X0", "Y0", "X1", "Y1"),
+                    help="search box for --follow")
+    ap.add_argument("--csv", help="write the --follow track to a CSV")
+    ap.add_argument("--around", help="frame id to centre --follow on")
+    ap.add_argument("--span", type=int, default=3,
+                    help="frames either side of --around (default 3)")
+    ap.add_argument("--pattern", help="override FITS BAYERPAT")
+    a = ap.parse_args(argv)
+
+    if a.follow:
+        if not a.box:
+            ap.error("--follow needs --box X0 Y0 X1 Y1")
+        cmd_follow(a.follow, a.box, a.pattern, a.csv,
+                   around=a.around, span=a.span)
+        return 0
+
+    if not a.frame:
+        ap.error("need a FRAME (or --follow)")
+    data, hdr = open_frame(a.frame)
+    pattern = normalise_pattern(a.pattern, hdr)
+    if a.stats:
+        cmd_stats(data, pattern)
+    elif a.at:
+        cmd_at(data, pattern, x=a.at[0], y=a.at[1], size=a.size)
+    else:
+        ap.error("need --stats or --at X Y")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

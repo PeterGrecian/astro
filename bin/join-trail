@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""join-trail — one star's streaks across N frames, joined into one trail.
+
+Each night frame is a ~60 s exposure, so a star is already a streak within
+a single frame; between frames it also steps by the sidereal rate plus
+whatever the focus dither moved it. Looking at frames one at a time you
+see disconnected fragments. This drops each frame's crop at its TRUE
+global (x, y) into a shared canvas and max-combines the overlaps, so the
+fragments join into the continuous arc the star actually traced.
+
+That joined view is what makes the sub-pixel structure legible: the step
+between segments is the inter-frame dither, and it is exactly the sampling
+diversity that sub-pixel reconstruction feeds on. Panel B colours each
+segment by its source frame so you can see the steps rather than infer
+them.
+
+Two renderings:
+
+  (default) green sublattice only — the dense diagonal channel, at native
+    resolution, with the green photosites marked. No interpolation, so
+    nothing is invented; you are looking at real measurements.
+
+  --rgb     each crop demosaiced 2x2 to colour (half resolution, still no
+    interpolation) so the star's colour along the trail shows. Panel B
+    then applies the capped assume-white balance from astro.bayer, whose
+    empty-channel guard stops a near-empty channel being amplified into
+    false colour.
+
+Usage:
+    join-trail <night>/HH --box 4330 650 4358 745
+    join-trail <night>/HH --box .. --rgb --out /tmp/trail.png
+    join-trail <night>/HH --box .. --around 1785550053740 --span 3
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from astro.bayer import (assume_white_rgb, bayer_channel,   # noqa: E402
+                         demosaic_rggb, local_sky_by_channel,
+                         normalise_pattern, open_frame)
+
+
+def select_frames(frame_dir: Path, around: str | None, span: int):
+    frames = sorted(frame_dir.glob("*.fits.fz"))
+    if not frames:
+        raise SystemExit(f"no frames under {frame_dir}")
+    if around:
+        hits = [i for i, f in enumerate(frames) if around in f.name]
+        if not hits:
+            raise SystemExit(f"{around} not found under {frame_dir}")
+        i = hits[0]
+        frames = frames[max(0, i - span):i + span + 1]
+    return frames
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("frame_dir", type=Path)
+    ap.add_argument("--box", nargs=4, type=int, required=True,
+                    metavar=("X0", "Y0", "X1", "Y1"))
+    ap.add_argument("--rgb", action="store_true", help="demosaic to colour")
+    ap.add_argument("--around", help="frame id to centre the selection on")
+    ap.add_argument("--span", type=int, default=3,
+                    help="frames either side of --around (default 3)")
+    ap.add_argument("--threshold", type=float, default=12.0,
+                    help="ADU above sky to count as trail (default 12)")
+    ap.add_argument("--out", default="/tmp/join-trail.png")
+    ap.add_argument("--pattern", help="override FITS BAYERPAT")
+    a = ap.parse_args(argv)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    x0, y0, x1, y1 = a.box
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    # Snap to an even origin so the Bayer phase of the canvas matches the frame.
+    x0 -= x0 % 2
+    y0 -= y0 % 2
+    h, w = y1 - y0, x1 - x0
+
+    frames = select_frames(a.frame_dir, a.around, a.span)
+    sky = None
+    times = []
+    pattern = "RGGB"
+
+    if a.rgb:
+        acc = np.zeros((h // 2, w // 2, 3))
+    else:
+        canvas = np.full((h, w), -1.0)
+        whichf = np.full((h, w), -1)
+
+    sky_plane = None
+    for fi, path in enumerate(frames):
+        data, hdr = open_frame(path)
+        pattern = normalise_pattern(a.pattern, hdr)
+        if sky is None:
+            # Per-channel sky, expanded to a plane over the crop: the four
+            # phases have different backgrounds, so one scalar biases every
+            # channel but green (see astro.bayer.local_sky_by_channel).
+            sky = local_sky_by_channel(data, (y0 + y1) // 2, (x0 + x1) // 2,
+                                       pattern=pattern)
+            ys_, xs_ = np.mgrid[y0:y1, x0:x1]
+            chan_ = bayer_channel(ys_, xs_, pattern)
+            sky_plane = np.zeros((h, w))
+            for c in "RGB":
+                sky_plane[chan_ == c] = sky[c]
+        times.append(str(hdr.get("DATE-OBS", ""))[11:19])
+        seg = data[y0:y1, x0:x1] - sky_plane
+        if a.rgb:
+            acc = np.maximum(acc, demosaic_rggb(seg, y0, x0, pattern))
+        else:
+            take = (seg > a.threshold) & (seg > canvas)
+            canvas[take] = seg[take]
+            whichf[take] = fi
+
+    ext = [x0 - .5, x1 - .5, y0 - .5, y1 - .5]
+    fig, axes = plt.subplots(1, 2, figsize=(11, 9))
+
+    if a.rgb:
+        shown = np.clip(acc / max(acc.max(), 1e-9), 0, 1)
+        axes[0].imshow(shown, origin="lower", extent=ext, aspect="equal")
+        axes[0].set_title("as captured (green-dominated)")
+        bal, (wr, wb) = assume_white_rgb(acc)
+        axes[1].imshow(np.clip(bal / max(bal.max(), 1e-9), 0, 1),
+                       origin="lower", extent=ext, aspect="equal")
+        axes[1].set_title(f"assume-white (R x{wr:.2f} B x{wb:.2f})")
+    else:
+        canvas = np.clip(canvas, 0, None)
+        ys, xs = np.mgrid[y0:y1, x0:x1]
+        green = bayer_channel(ys, xs, pattern) == "G"
+        im = axes[0].imshow(canvas, origin="lower", cmap="inferno",
+                            extent=ext, aspect="equal")
+        gy, gx = np.where(green)
+        axes[0].plot(x0 + gx, y0 + gy, ".", ms=1.5, color="#20c020", alpha=0.35)
+        axes[0].set_title("joined trail: green-channel intensity")
+        plt.colorbar(im, ax=axes[0], shrink=0.6)
+
+        tint = np.zeros((h, w, 3))
+        cols = plt.cm.turbo(np.linspace(0.1, 0.9, len(frames)))[:, :3]
+        norm = canvas / max(canvas.max(), 1)
+        for fi in range(len(frames)):
+            mk = whichf == fi
+            for c in range(3):
+                tint[mk, c] = cols[fi][c] * (0.25 + 0.75 * norm[mk])
+        axes[1].imshow(tint, origin="lower", extent=ext, aspect="equal")
+        axes[1].set_title("coloured by frame (the inter-frame dither steps)")
+        for fi, t in enumerate(times):
+            axes[1].plot([], [], "s", color=cols[fi], label=t)
+        axes[1].legend(fontsize=7, loc="upper right", framealpha=0.3)
+
+    skytxt = " ".join(f"{c}{sky[c]:.0f}" for c in "RGB")
+    fig.suptitle(f"{len(frames)} frames {times[0]}..{times[-1]} UTC  "
+                 f"box x {x0}..{x1} y {y0}..{y1}  sky {skytxt}  {pattern}",
+                 fontsize=12)
+    plt.tight_layout()
+    plt.savefig(a.out, dpi=110)
+    plt.close(fig)
+    print(f"wrote {a.out}  ({len(frames)} frames, sky " +
+          " ".join(f"{c} {sky[c]:.0f}" for c in "RGB") + ")")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""rect-heat — heat-map a small rectangle of a raw frame, four ways.
+
+Built for the workflow where you probe a feature in `splay`, read the
+rectangle's full-res pixel coordinates off it, and want to see what is
+actually there at the ADU level. A few-pixel box is unviewable at native
+size, so everything is nearest-neighbour upscaled — no smoothing, so each
+output pixel is one real photosite and the mosaic stays visible.
+
+Writes four PNGs:
+
+  <stem>-raw-heat.png     luminance of the demosaiced rect, turbo colormap
+  <stem>-raw-colour.png   demosaiced colour as captured
+  <stem>-wb-heat.png      luminance after grey-world balance
+  <stem>-wb-colour.png    colour after grey-world balance
+
+Grey-world assumes the AVERAGE of the rectangle is neutral and scales R
+and B to match G's mean. That is the right assumption for a rectangle of
+mostly sky, and the wrong one for a rectangle dominated by a single
+coloured star — for a star use `bayer-heatmap`, whose assume-white
+balances on the bright patch and guards against amplifying an empty
+channel. The two answer different questions: this one reveals colour
+structure against the background, that one reveals the PSF.
+
+The box is snapped to an even origin so the Bayer phase is preserved, and
+padded so the feature has context.
+
+Usage:
+    rect-heat FRAME.fits.fz X0 Y0 X1 Y1 [--pad 40] [--upscale 12]
+    rect-heat FRAME.fits.fz 4335 655 4352 738 --out-dir /tmp/probe
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from astro.bayer import normalise_pattern, open_frame          # noqa: E402
+
+# OpenCV's Bayer codes are named for the SECOND row's first two pixels,
+# which is why the constant for an RGGB sensor reads "BayerRG".
+CV_BAYER = {"RGGB": "COLOR_BayerRG2BGR", "BGGR": "COLOR_BayerBG2BGR",
+            "GRBG": "COLOR_BayerGR2BGR", "GBRG": "COLOR_BayerGB2BGR"}
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("frame")
+    ap.add_argument("coords", nargs=4, type=int, metavar=("X0", "Y0", "X1", "Y1"))
+    ap.add_argument("--pad", type=int, default=40,
+                    help="expand the box for context (default 40)")
+    ap.add_argument("--upscale", type=int, default=12,
+                    help="nearest-neighbour zoom (default 12)")
+    ap.add_argument("--out-dir", type=Path, default=Path("/tmp"))
+    ap.add_argument("--stem", default="rect", help="output filename stem")
+    ap.add_argument("--pattern", help="override FITS BAYERPAT")
+    a = ap.parse_args(argv)
+
+    import cv2
+
+    data, hdr = open_frame(a.frame)
+    pattern = normalise_pattern(a.pattern, hdr)
+    if pattern not in CV_BAYER:
+        print(f"unsupported pattern {pattern}", file=sys.stderr)
+        return 1
+
+    x0, y0, x1, y1 = a.coords
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    h, w = data.shape
+    x0 = max(0, x0 - a.pad); y0 = max(0, y0 - a.pad)
+    x1 = min(w, x1 + a.pad); y1 = min(h, y1 + a.pad)
+    x0 -= x0 % 2; y0 -= y0 % 2          # keep the Bayer phase
+    sub = data[y0:y1, x0:x1].astype(np.float32)
+
+    print(f"frame     {a.frame}")
+    print(f"DATE-OBS  {hdr.get('DATE-OBS')}  LENSPOS {hdr.get('LENSPOS')}  "
+          f"POSINDEX {hdr.get('POSINDEX')}  RAWSHIFT {hdr.get('RAWSHIFT')}")
+    print(f"rect      x {x0}..{x1}  y {y0}..{y1} = "
+          f"{sub.shape[1]}x{sub.shape[0]} px  pattern {pattern}")
+
+    quad = {"R": sub[0::2, 0::2], "G1": sub[0::2, 1::2],
+            "G2": sub[1::2, 0::2], "B": sub[1::2, 1::2]}
+    gm = 0.5 * (quad["G1"] + quad["G2"])
+    print(f"channel means  R {quad['R'].mean():.1f}  G {gm.mean():.1f}  "
+          f"B {quad['B'].mean():.1f}")
+    print(f"rect raw  min {sub.min():.0f}  max {sub.max():.0f}  "
+          f"mean {sub.mean():.1f}  median {np.median(sub):.0f}")
+
+    # 10-bit raw -> 8-bit for OpenCV's demosaic (0..1023 -> 0..255).
+    b8 = np.clip(sub / 4, 0, 255).astype(np.uint8)
+    bgr = cv2.cvtColor(b8, getattr(cv2, CV_BAYER[pattern])).astype(np.float32)
+
+    a.out_dir.mkdir(parents=True, exist_ok=True)
+    up = a.upscale
+
+    def save_heat(arr, name):
+        v = arr.astype(np.float32)
+        lo, hi = np.percentile(v, 1), np.percentile(v, 99.5)
+        g = np.clip((v - lo) * 255.0 / max(1, hi - lo), 0, 255).astype(np.uint8)
+        g = cv2.resize(g, None, fx=up, fy=up, interpolation=cv2.INTER_NEAREST)
+        path = a.out_dir / name
+        cv2.imwrite(str(path), cv2.applyColorMap(g, cv2.COLORMAP_TURBO))
+        return path
+
+    def save_bgr(arr, name):
+        im = np.clip(arr, 0, 255).astype(np.uint8)
+        im = cv2.resize(im, None, fx=up, fy=up, interpolation=cv2.INTER_NEAREST)
+        path = a.out_dir / name
+        cv2.imwrite(str(path), im)
+        return path
+
+    written = [
+        save_heat(cv2.cvtColor(np.clip(bgr, 0, 255).astype(np.uint8),
+                               cv2.COLOR_BGR2GRAY), f"{a.stem}-raw-heat.png"),
+        save_bgr(bgr, f"{a.stem}-raw-colour.png"),
+    ]
+
+    kr = gm.mean() / max(1e-3, quad["R"].mean())
+    kb = gm.mean() / max(1e-3, quad["B"].mean())
+    print(f"grey-world gains  R x{kr:.3f}  B x{kb:.3f}  (G x1.000)")
+    wb = bgr.copy()
+    wb[:, :, 2] *= kr        # OpenCV is BGR: index 2 is red
+    wb[:, :, 0] *= kb        # index 0 is blue
+    written += [
+        save_heat(cv2.cvtColor(np.clip(wb, 0, 255).astype(np.uint8),
+                               cv2.COLOR_BGR2GRAY), f"{a.stem}-wb-heat.png"),
+        save_bgr(wb, f"{a.stem}-wb-colour.png"),
+    ]
+
+    print("wrote " + " ".join(str(p) for p in written))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
