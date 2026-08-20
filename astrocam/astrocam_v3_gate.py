@@ -22,6 +22,8 @@ import json
 import logging
 import subprocess
 import sys
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -113,6 +115,19 @@ def ensure_cover(position: str):
     _write_cover_position(position)
 
 
+def is_raining(lat: float, lon: float) -> bool:
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'astro-gate/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+            code = data.get("current_weather", {}).get("weathercode", 0)
+            return code >= 50
+    except Exception as e:
+        logging.error(f"weather fetch failed: {e}")
+        return False
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
@@ -131,22 +146,33 @@ def main() -> int:
         return 0
 
     alt = sun_altitude_deg(loc["lat_deg"], loc["lon_deg"])
+    raining = is_raining(loc["lat_deg"], loc["lon_deg"])
 
     # Asymmetric thresholds give natural hysteresis: enter night below
     # night_deg, return to day above day_deg, hold state in between (which
     # here means: don't actively flip — we key purely off the two edges).
     if alt <= night_deg:
-        logging.info(f"sun_alt={alt:.2f} <= {night_deg} -> night")
-        ensure_cover("open")
-        ensure_running(NIGHT_SERVICE)
+        if raining:
+            logging.info(f"sun_alt={alt:.2f} <= {night_deg} but RAINING -> stopping & closing")
+            ensure_stopped(NIGHT_SERVICE)
+            ensure_cover("closed")
+        else:
+            logging.info(f"sun_alt={alt:.2f} <= {night_deg} and clear -> night")
+            ensure_cover("open")
+            ensure_running(NIGHT_SERVICE)
     elif alt >= day_deg:
         logging.info(f"sun_alt={alt:.2f} >= {day_deg} -> day")
         ensure_stopped(NIGHT_SERVICE)
         ensure_cover("closed")
     else:
-        # In the band: leave the service in whatever state it's in.
-        logging.info(f"sun_alt={alt:.2f} in ({night_deg},{day_deg}) band; "
-                     f"holding {'running' if _is_active(NIGHT_SERVICE) else 'stopped'}")
+        # In the band: leave the service in whatever state it's in, unless it's raining
+        if raining and _is_active(NIGHT_SERVICE):
+            logging.info(f"sun_alt={alt:.2f} in band but RAINING -> stopping & closing")
+            ensure_stopped(NIGHT_SERVICE)
+            ensure_cover("closed")
+        else:
+            logging.info(f"sun_alt={alt:.2f} in ({night_deg},{day_deg}) band; "
+                         f"holding {'running' if _is_active(NIGHT_SERVICE) else 'stopped'}")
     return 0
 
 
