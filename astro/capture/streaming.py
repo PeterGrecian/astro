@@ -126,13 +126,13 @@ def _capture_thread(cfg: StreamingConfig, picam2, q: queue.Queue,
                     stop: threading.Event,
                     log: logging.Logger, focus_dither: Optional[dict] = None):
     """Pull frames as fast as the camera will deliver; drop nothing
-    here. Each item is (epoch_ms, bayer_uint16_copy, lens_cmd, lens_rep).
+    here. Each item is (epoch_ms, bayer, lens_cmd, lens_rep, sensor_temp_c).
 
     focus_dither {"base","top","step"}: step LensPosition each frame in a
     sawtooth before capturing (settle briefly), and tag the frame with the
     commanded + reported focus. None = fixed focus (lens_cmd/lens_rep None)."""
     i = 0
-    lp_cmd = lp_rep = None
+    lp_cmd = lp_rep = temp_c = None
     if focus_dither:
         base = focus_dither["base"]; top = focus_dither["top"]
         step = focus_dither["step"]
@@ -163,12 +163,16 @@ def _capture_thread(cfg: StreamingConfig, picam2, q: queue.Queue,
                          f"(max={bayer.max()}, {cfg.sample_bits}-bit samples)")
             if cfg.raw_shift:
                 bayer >>= cfg.raw_shift
+            # One metadata fetch serves both the focus dither and the
+            # thermal reading the nightly health gate needs.
+            meta = req.get_metadata()
             if focus_dither:
-                lp_rep = req.get_metadata().get("LensPosition")
+                lp_rep = meta.get("LensPosition")
+            temp_c = meta.get("SensorTemperature")
         finally:
             req.release()
         epoch_ms = int(time.time() * 1000)
-        q.put((epoch_ms, bayer, lp_cmd, lp_rep))
+        q.put((epoch_ms, bayer, lp_cmd, lp_rep, temp_c))
         i += 1
 
 
@@ -192,7 +196,7 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
 
     while not (stop.is_set() and q.empty()):
         try:
-            epoch_ms, bayer, lp_cmd, lp_rep = q.get(timeout=1.0)
+            epoch_ms, bayer, lp_cmd, lp_rep, temp_c = q.get(timeout=1.0)
         except queue.Empty:
             continue
         # Saturation guard: if the frame is bright enough to be daylight
@@ -249,6 +253,14 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         h["RAWSHIFT"] = (cfg.raw_shift or 0,
                          "bits shifted off ISP-aligned raw")
         h["SAMPBITS"] = (cfg.sample_bits, "sensor raw sample depth")
+        if temp_c is not None:
+            # Direct reading, not a proxy. Dark current is NOT observable in
+            # these frames — Sony's on-chip black-level correction references
+            # optically-black pixels that share the thermal signal, so it is
+            # subtracted before readout, and London sky-glow dominates what is
+            # left. The thermal effect that does matter is focus drift, so the
+            # nightly gate wants this alongside LENSPOS.
+            h["SENSTEMP"] = (round(float(temp_c), 2), "sensor temperature, degC")
         if cfg.black_level is not None:
             h["BLACKLVL"] = (cfg.black_level,
                              "sensor electronic zero (NOT the chart pedestal)")
