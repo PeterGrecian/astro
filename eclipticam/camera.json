@@ -25,8 +25,8 @@
       "sensor": "IMX708",
       "bayer": "SRGGB10",
       "resolution": [2304, 1296],
-      "pedestal": 68,
-      "pedestal_notes": "Sensor black level (now LSB-aligned). Originally 4380 (MSB-aligned 16-bit container), divided by 64 in the 2026-08 archive repack.",
+      "pedestal": 50,
+      "pedestal_notes": "Set to 50 (down from true LSB-pedestal 68) to match Astrocam and guarantee a safe mathematical footroom for chart axes during deep winter darks.",
       "plate_scale_deg_px": 0.0443,
       "plate_scale_notes": "Module 3 Wide, 102 deg horizontal / 2304 px at the half-res capture mode in use (native 4608x2592)."
     }
