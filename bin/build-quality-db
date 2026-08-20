@@ -109,6 +109,7 @@ CREATE TABLE frames (
     gain        REAL,
     pixel_sec   REAL,     -- npix * exptime_s: the real accumulation currency
     raw_shift   INTEGER,  -- RAWSHIFT: 6 = repacked from Pi5 MSB, 0/NULL = native
+    ncoadd      INTEGER,  -- NCOADD: frames summed. The v2 era's basis (x8).
     cohort      TEXT,     -- everything that must MATCH for frames to be poolable
     sun_alt     REAL,
     flags       TEXT      -- comma-separated quality flags; '' = clean
@@ -153,6 +154,12 @@ def dir_metadata(directory: Path, cache: dict) -> dict:
                 "width": hdr.get("NAXIS1"), "height": hdr.get("NAXIS2"),
                 "exptime_s": hdr.get("EXPTIME"), "gain": hdr.get("GAIN"),
                 "raw_shift": hdr.get("RAWSHIFT"), "sensor": hdr.get("CAMERA"),
+                # NCOADD is explicit in the header — use it rather than
+                # inferring the coadd depth from where max_adu tops out.
+                # It is the v2 era's calibration BASIS: every quantity there
+                # (black level, ceiling, saturation) is NCOADD x a frame,
+                # exactly analogous to v3's x64 bit-shift.
+                "ncoadd": hdr.get("NCOADD"),
             }
     except Exception as e:                                   # noqa: BLE001
         meta = {"_error": f"{type(e).__name__}: {e}"}
@@ -182,7 +189,7 @@ def quality_flags(mean, median, mx, black_level, full_scale) -> list[str]:
     return flags
 
 
-def cohort_of(cam, stream, sensor, w, h, exp, gain, raw_shift) -> str:
+def cohort_of(cam, stream, sensor, w, h, exp, gain, raw_shift, ncoadd=None) -> str:
     """A key that groups frames which may legitimately be pooled.
 
     Frames only combine if they share a calibration basis, and the things
@@ -203,7 +210,8 @@ def cohort_of(cam, stream, sensor, w, h, exp, gain, raw_shift) -> str:
     e = f"{float(exp):g}s" if exp else "?"
     g = f"g{float(gain):g}" if gain else "g?"
     rs = f"rs{raw_shift}" if raw_shift else "rs0"
-    return f"{cam}/{stream or '-'}/{sensor or '?'}/{geom}/{e}/{g}/{rs}"
+    co = f"/x{int(ncoadd)}" if ncoadd else ""
+    return f"{cam}/{stream or '-'}/{sensor or '?'}/{geom}/{e}/{g}/{rs}{co}"
 
 
 def stream_of(path: Path) -> str:
@@ -319,10 +327,11 @@ def main(argv=None) -> int:
                             int(row["bright_pixels"]) if row.get("bright_pixels") else None,
                             w, h, npix, exp, meta.get("gain"),
                             (npix * exp) if (npix and exp) else None,
-                            rs,
+                            rs, meta.get("ncoadd"),
                             cohort_of(cam, stream_of(Path(fname)),
                                       meta.get("sensor"), w, h, exp,
-                                      meta.get("gain"), rs),
+                                      meta.get("gain"), rs,
+                                      meta.get("ncoadd")),
                             sun_alt, ",".join(flags),
                         ))
                         tally["rows_ok"] += 1
@@ -334,7 +343,7 @@ def main(argv=None) -> int:
             if a.limit and total >= a.limit:
                 break
         conn.executemany(
-            "INSERT INTO frames VALUES (" + ",".join("?" * 22) + ")", rows)
+            "INSERT INTO frames VALUES (" + ",".join("?" * 23) + ")", rows)
         conn.executemany("INSERT INTO scan_log VALUES (?,?,?,?)",
                          [(ran_at, cam, k, v) for k, v in sorted(tally.items())])
         conn.commit()
