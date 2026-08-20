@@ -16,10 +16,11 @@ uploader service drains .fits.fz from tmpfs to NFS.
 Caller responsibilities:
 - Provide a StreamingConfig with sensor format, exposure, gain, and
   output dir paths (tmpfs and NFS).
-- Run() blocks until SIGTERM/SIGINT or the brightness saturation guard
-  fires (frame mean > saturation_pedestal_multiplier × pedestal).
-  Returning lets the per-tick mode controller take over with day
-  capture instead.
+- Run() blocks until SIGTERM/SIGINT, the saturation guard fires (frame
+  mean > saturation_full_scale_fraction × raw full scale), or the
+  capture thread dies. Returning lets the per-tick mode controller take
+  over with day capture instead; the return value says which happened
+  ("signal" | "saturation" | "capture_failed").
 """
 from __future__ import annotations
 
@@ -72,17 +73,49 @@ class StreamingConfig:
     # written to the FITS header (LENSPOS / LENSPREP). Sweeps focus for
     # star-focus discovery + VCM mechanics + super-resolution radial dither.
     focus_dither: Optional[dict] = None
-    # Exit streaming when frame mean reaches this fraction of the
-    # uint16 container's max (65535). Expressed as a fraction, not as
-    # "stops above pedestal", because saturated raw means CANNOT
-    # exceed the dtype ceiling — the previous "13 stops above
-    # pedestal" guard wanted mean >= 35.9M, unreachable in uint16, so
-    # it never fired (stayed in night mode through full daylight on
-    # 2026-06-16, 21 h of pegged frames).
-    saturation_dtype_fraction: float = 0.95
+    # Sensor bit depth of a raw sample, independent of the uint16
+    # container it arrives in. Full scale is (1 << sample_bits) - 1.
+    sample_bits: int = 10
+    # Raw alignment within the container. The Pi 5 (PiSP) unpacks 10-bit
+    # raw into the TOP bits of the uint16 (every pixel a multiple of 64,
+    # frame max 65472); the Pi 4 (VC6) unpacks into the bottom bits. None
+    # = detect once from the first frame and latch; 0 = never shift. The
+    # latched value is stamped into every FITS as RAWSHIFT so no
+    # downstream reader has to infer alignment from pixel values.
+    raw_shift: Optional[int] = None
+    # Exit streaming when frame mean reaches this fraction of raw full
+    # scale. Expressed as a fraction, not as "stops above pedestal",
+    # because saturated raw means CANNOT exceed full scale — the old
+    # "13 stops above pedestal" guard wanted mean >= 35.9M, unreachable,
+    # so it never fired (night mode through full daylight on 2026-06-16,
+    # 21 h of pegged frames). It is a fraction of SAMPLE full scale, not
+    # of the uint16 ceiling: once raw_shift lands the data 10-bit, a
+    # 0.95 x 65535 threshold is equally unreachable.
+    saturation_full_scale_fraction: float = 0.95
 
 
-def _capture_thread(picam2, q: queue.Queue, stop: threading.Event,
+def _detect_raw_shift(bayer, sample_bits: int) -> int:
+    """How many bits the ISP left-shifted this raw frame, 0 if none.
+
+    MSB-aligned raw is recognised by two facts together: it overflows
+    sample full scale, and every pixel is a multiple of the shift. Both
+    are needed — eclipticam's pre-2026-06-15 frames overflow too, but
+    were *rescaled* by 65535/1023 = 64.06 rather than shifted, and must
+    not be shifted. Run once per session, not per frame: a lens-capped
+    or dead readout would fail a per-frame max test and silently emit
+    one frame on the wrong scale inside an otherwise correct night.
+    """
+    full_scale = (1 << sample_bits) - 1
+    if bayer.max() <= full_scale:
+        return 0
+    shift = 16 - sample_bits
+    if np.all(bayer % (1 << shift) == 0):
+        return shift
+    return 0
+
+
+def _capture_thread(cfg: StreamingConfig, picam2, q: queue.Queue,
+                    stop: threading.Event,
                     log: logging.Logger, focus_dither: Optional[dict] = None):
     """Pull frames as fast as the camera will deliver; drop nothing
     here. Each item is (epoch_ms, bayer_uint16_copy, lens_cmd, lens_rep).
@@ -113,9 +146,15 @@ def _capture_thread(picam2, q: queue.Queue, stop: threading.Event,
             continue
         try:
             bayer = req.make_array("raw").view(np.uint16).copy()
-            # Hardware abstraction: Pi 5 (PiSP) MSB-aligns 10-bit raw, Pi 4 (VC6) LSB-aligns it.
-            if cfg.bayer_format == "SRGGB10" and bayer.max() > 1023:
-                bayer >>= 6
+            # Hardware abstraction: Pi 5 (PiSP) MSB-aligns raw, Pi 4 (VC6)
+            # LSB-aligns it. Decide once on the first frame and latch, so
+            # every frame this session lands on one scale.
+            if cfg.raw_shift is None:
+                cfg.raw_shift = _detect_raw_shift(bayer, cfg.sample_bits)
+                log.info(f"raw alignment: shift={cfg.raw_shift} bits "
+                         f"(max={bayer.max()}, {cfg.sample_bits}-bit samples)")
+            if cfg.raw_shift:
+                bayer >>= cfg.raw_shift
             if focus_dither:
                 lp_rep = req.get_metadata().get("LensPosition")
         finally:
@@ -173,12 +212,12 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
                 # NFS hiccup — keep capturing; stage 1 will fall back to
                 # sun_altitude until brightness rows resume.
                 log.warning(f"brightness.csv append failed: {e}")
-        dtype_max = float(np.iinfo(bayer.dtype).max)
-        threshold = cfg.saturation_dtype_fraction * dtype_max
+        full_scale = float((1 << cfg.sample_bits) - 1)
+        threshold = cfg.saturation_full_scale_fraction * full_scale
         if mean >= threshold:
             log.info(f"saturation: frame mean {mean:.0f} >= {threshold:.0f} "
-                     f"({cfg.saturation_dtype_fraction*100:.0f}% of "
-                     f"{bayer.dtype} ceiling {dtype_max:.0f}); exiting")
+                     f"({cfg.saturation_full_scale_fraction*100:.0f}% of "
+                     f"{cfg.sample_bits}-bit full scale {full_scale:.0f}); exiting")
             saturated.set()
             stop.set()
             break
@@ -194,6 +233,14 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         h["BAYERPAT"] = cfg.bayer_pattern
         h["DATE-OBS"] = datetime.fromtimestamp(epoch_ms/1000, tz=timezone.utc).isoformat()
         h["CAMERA"] = cfg.camera_name
+        # Self-describing raw alignment: how many bits were shifted off
+        # the ISP's container to land these samples LSB-aligned. Archive
+        # frames repacked after the fact carry the same keyword (see
+        # bin/repack-msb); frames with neither are pre-2026-08 and must
+        # be probed with max>full_scale and all(%64==0).
+        h["RAWSHIFT"] = (cfg.raw_shift or 0,
+                         "bits shifted off ISP-aligned raw")
+        h["SAMPBITS"] = (cfg.sample_bits, "sensor raw sample depth")
         if cfg.position_index is not None:
             h["POSINDEX"] = (cfg.position_index,
                              "camera/lens generation (camera.json position_index)")
@@ -237,6 +284,7 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
 
     stop = threading.Event()
     saturated = threading.Event()
+    capture_failed = False
 
     def _on_signal(signum, _frame):
         log.info(f"signal {signum}; stopping")
@@ -250,7 +298,8 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
         # Drop first frame — controls may not be applied yet.
         req = cam.capture_request(); req.release()
         cap_t = threading.Thread(target=_capture_thread,
-                                 args=(cam, q, stop, log, cfg.focus_dither),
+                                 args=(cfg, cam, q, stop, log,
+                                       cfg.focus_dither),
                                  daemon=True)
         comp_t = threading.Thread(target=_compress_thread,
                                   args=(cfg, q, stop, saturated, log),
@@ -261,6 +310,15 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
                  f"focus_dither={cfg.focus_dither}")
         while not stop.is_set():
             time.sleep(1.0)
+            # A capture thread that dies (bad control, driver wedge, a
+            # NameError in this file) used to leave run() sleeping here
+            # forever: service "running", queue empty, zero frames, and
+            # Restart=on-failure never triggered because nothing failed.
+            if not cap_t.is_alive():
+                log.error("capture thread died; ending the stream")
+                capture_failed = True
+                stop.set()
+                break
         cap_t.join(timeout=5)
         comp_t.join(timeout=cfg.exposure_us / 1e6 + 10)
     finally:
@@ -268,4 +326,6 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
             cam.stop(); cam.close()
         except Exception as e:
             log.warning(f"camera close: {e}")
+    if capture_failed:
+        return "capture_failed"
     return "saturation" if saturated.is_set() else "signal"

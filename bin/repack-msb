@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""repack-msb — right-shift MSB-aligned 10-bit raw frames to LSB alignment.
+
+The Pi 5 (BCM2712 / PiSP) unpacks 10-bit sensor raw into the *top* 10 bits
+of a uint16, so every pixel is a multiple of 64 and the frame maxes at
+65472 (= 1023 << 6). The Pi 4 (VC6) unpacks into the *bottom* 10 bits.
+eclipticam is a Pi 5, astrocam a Pi 4 — so the same sensor produced two
+archives on scales 64x apart, and the eclipticam FITS carry six dead
+low-order bits that Rice cannot compress away (~48% wasted on disk).
+
+This walks a night tree, and for every eligible frame writes a shifted
+copy, verifies it round-trips, then atomically replaces the original.
+Eligibility is deliberately strict:
+
+    dtype is an unsigned int  AND  data.max() > 1023  AND  all(data % 64 == 0)
+
+The `% 64` test is what makes this safe to re-run and safe against the
+eras that are NOT bit-shifted: eclipticam's pre-2026-06-15 "coexist"
+frames are *rescaled* by 65535/1023 = 64.06 (max 65535, not 65472), so
+they fail the test and are left alone. Already-shifted frames fail the
+`max > 1023` test. Both are counted as skips, not errors.
+
+Every repacked frame gets a RAWSHIFT header keyword recording how many
+bits were removed, so alignment is self-describing from here on and no
+downstream reader has to guess from the pixel values.
+
+MEAN and PER_S headers (written at capture time on the old scale) are
+divided by 64 to match. With --csv, each night's brightness.csv is then
+reconciled *against its own frames* (see reconcile_csv) rather than
+rescaled on the row values, because a row alone cannot tell a shifted
+frame from a rescaled one.
+
+Usage:
+    repack-msb <night-dir> [<night-dir> ...]      # repack those nights
+    repack-msb --dry-run <root>                   # report, change nothing
+    repack-msb --jobs 6 <root>                    # parallel workers
+    repack-msb --csv <night-dir>                  # + reconcile brightness.csv
+    repack-msb --limit 20 <night-dir>             # smoke test
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import os
+import sys
+import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+
+SHIFT = 6
+TENBIT_MAX = (1 << 10) - 1
+
+
+class Skip(Exception):
+    """Frame is not eligible — carries a short reason for the tally."""
+
+
+def _eligible(data) -> None:
+    """Raise Skip unless `data` is MSB-aligned 10-bit in an unsigned int."""
+    if data is None:
+        raise Skip("no data")
+    if data.dtype.kind != "u":
+        raise Skip(f"dtype {data.dtype}")
+    if data.max() <= TENBIT_MAX:
+        raise Skip("already 10-bit")
+    if not np.all(data % (1 << SHIFT) == 0):
+        raise Skip("not bit-shifted (rescaled?)")
+
+
+def repack_frame(path: Path, dry_run: bool = False) -> tuple[str, int, int]:
+    """Repack one .fits.fz. Returns (outcome, size_before, size_after)."""
+    before = path.stat().st_size
+    with fits.open(path) as hdul:
+        hdu = hdul[-1]
+        data = hdu.data
+        try:
+            _eligible(data)
+        except Skip as e:
+            return (f"skip: {e}", before, before)
+        if "RAWSHIFT" in hdu.header:
+            return ("skip: already stamped", before, before)
+        header = hdu.header.copy()
+        shifted = np.right_shift(data, SHIFT).astype(np.uint16)
+        original = data.copy()
+
+    for key, comment in (("MEAN", None), ("PER_S", None)):
+        if key in header:
+            try:
+                header[key] = float(header[key]) / (1 << SHIFT)
+            except (TypeError, ValueError):
+                pass
+    header["RAWSHIFT"] = (SHIFT, "bits removed from Pi5 MSB-aligned raw")
+
+    if dry_run:
+        # Compress to memory just to measure the real saving.
+        import io
+        buf = io.BytesIO()
+        probe = fits.CompImageHDU(data=shifted, header=header,
+                                  compression_type="RICE_1")
+        fits.HDUList([fits.PrimaryHDU(), probe]).writeto(buf)
+        return ("would repack", before, buf.getbuffer().nbytes)
+
+    # Write beside the original so the replace is a same-filesystem rename.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".fits.fz.tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        out = fits.CompImageHDU(data=shifted, header=header,
+                                compression_type="RICE_1")
+        fits.HDUList([fits.PrimaryHDU(), out]).writeto(tmp, overwrite=True)
+        # Verify the round-trip before we destroy the original.
+        with fits.open(tmp) as check:
+            got = check[-1].data
+            if got is None or got.shape != original.shape:
+                raise ValueError("shape mismatch after repack")
+            if not np.array_equal(got, np.right_shift(original, SHIFT)):
+                raise ValueError("pixel mismatch after repack")
+            if check[-1].header.get("RAWSHIFT") != SHIFT:
+                raise ValueError("RAWSHIFT not written")
+        after = tmp.stat().st_size
+        os.replace(tmp, path)
+        return ("repacked", before, after)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def reconcile_csv(night: Path) -> str:
+    """Bring a night's brightness.csv onto the same scale as its FITS.
+
+    The scale of a row cannot be inferred from the row alone. Both a
+    bit-shifted frame and a *rescaled* one (eclipticam pre-2026-06-15,
+    x65535/1023) read > 1023 before repacking, but only the first may be
+    divided by 64. So the FITS is the authority: a repacked frame carries
+    RAWSHIFT, an untouched one does not, and each row is moved to match
+    its own frame. That makes this safe to re-run and able to correct a
+    row in either direction.
+
+    Only the header is read, so this is cheap even over a whole night.
+    """
+    path = night / "brightness.csv"
+    if not path.exists():
+        return "no brightness.csv"
+    scaled = ("mean", "median", "p95", "max")
+    # basename -> was it repacked (has RAWSHIFT)?
+    shifted: dict[str, bool] = {}
+    for frame in night.rglob("*.fits.fz"):
+        try:
+            hdr = fits.getheader(frame, ext=-1)
+        except Exception:                                    # noqa: BLE001
+            continue
+        shifted[frame.name] = hdr.get("RAWSHIFT", 0) == SHIFT
+
+    with path.open(newline="") as fh:
+        reader = csv.DictReader(fh)
+        fields = reader.fieldnames
+        rows = list(reader)
+
+    down = up = unknown = 0
+    for row in rows:
+        name = Path(row.get("filename", "")).name
+        if name not in shifted:
+            unknown += 1
+            continue
+        try:
+            row_max = float(row["max"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        # A row already on the 10-bit scale reads below 1024. Test the
+        # boundary, not TENBIT_MAX: a container-scale 65535 divided by 64
+        # lands on 1023.98, which is 10-bit but not <= 1023.
+        if shifted[name] and row_max >= TENBIT_MAX + 1:
+            factor, down = 1 / (1 << SHIFT), down + 1
+        elif not shifted[name] and row_max < TENBIT_MAX + 1:
+            # Row was divided but its frame never was — put it back.
+            factor, up = float(1 << SHIFT), up + 1
+        else:
+            continue
+        for col in scaled:
+            if col in row and row[col] not in ("", None):
+                row[col] = f"{float(row[col]) * factor:g}"
+
+    if not (down or up):
+        return f"csv consistent ({unknown} rows with no frame)"
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".csv.tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    with tmp.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+    os.replace(tmp, path)
+    parts = []
+    if down:
+        parts.append(f"{down} rows -> 10-bit")
+    if up:
+        parts.append(f"{up} rows restored (frame not shifted)")
+    if unknown:
+        parts.append(f"{unknown} rows with no frame")
+    return "csv: " + ", ".join(parts)
+
+
+def _worker(args):
+    path, dry_run = args
+    try:
+        outcome, before, after = repack_frame(Path(path), dry_run)
+        return (outcome, before, after, None)
+    except Exception as e:                                   # noqa: BLE001
+        return ("error", 0, 0, f"{path}: {e}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("roots", nargs="+", type=Path,
+                    help="night dirs (or any tree containing .fits.fz)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="report what would change, write nothing")
+    ap.add_argument("--jobs", type=int, default=1, help="parallel workers")
+    ap.add_argument("--limit", type=int, help="stop after N frames")
+    ap.add_argument("--csv-only", action="store_true",
+                    help="skip the frames; only reconcile brightness.csv")
+    ap.add_argument("--csv", action="store_true",
+                    help="also reconcile each night's brightness.csv "
+                         "against the repacked frames")
+    args = ap.parse_args()
+
+    frames: list[Path] = []
+    for root in args.roots:
+        if root.is_file():
+            frames.append(root)
+        else:
+            frames.extend(sorted(root.rglob("*.fits.fz")))
+    if args.limit:
+        frames = frames[:args.limit]
+    if not frames:
+        print("no .fits.fz found", file=sys.stderr)
+        return 1
+
+    tally: dict[str, int] = {}
+    total_before = total_after = 0
+    errors: list[str] = []
+
+    if args.csv_only:
+        args.csv = True
+        results = []
+    elif args.jobs > 1:
+        work = [(str(f), args.dry_run) for f in frames]
+        with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+            results = [f.result() for f in
+                       as_completed([pool.submit(_worker, w) for w in work])]
+    else:
+        work = [(str(f), args.dry_run) for f in frames]
+        results = [_worker(w) for w in work]
+
+    for outcome, before, after, err in results:
+        tally[outcome] = tally.get(outcome, 0) + 1
+        total_before += before
+        total_after += after
+        if err:
+            errors.append(err)
+
+    gib = 1 << 30
+    print(f"{len(frames)} frames under {', '.join(str(r) for r in args.roots)}")
+    for outcome in sorted(tally):
+        print(f"  {tally[outcome]:>7d}  {outcome}")
+    saved = total_before - total_after
+    print(f"  {total_before/gib:.1f} GiB -> {total_after/gib:.1f} GiB "
+          f"(saved {saved/gib:.1f} GiB, {100*saved/total_before:.0f}%)"
+          if total_before else "")
+    for err in errors[:10]:
+        print(f"  ERROR {err}", file=sys.stderr)
+    if len(errors) > 10:
+        print(f"  ... and {len(errors)-10} more errors", file=sys.stderr)
+
+    if args.csv and not args.dry_run:
+        nights = {f.parent for f in frames} | {r for r in args.roots if r.is_dir()}
+        seen = set()
+        for night in sorted(nights):
+            # brightness.csv lives at the night dir, above the stream/HH dirs.
+            for cand in (night, night.parent, night.parent.parent):
+                if cand in seen or not (cand / "brightness.csv").exists():
+                    continue
+                seen.add(cand)
+                print(f"  {cand.name}: {reconcile_csv(cand)}")
+
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

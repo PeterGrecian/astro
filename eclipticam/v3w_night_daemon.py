@@ -107,6 +107,11 @@ def main() -> int:
         focus_dither=focus_dither,
     )
     reason = run(cfg)
+    if reason == "capture_failed":
+        # Non-zero so systemd's Restart=on-failure retries the night
+        # instead of leaving a "running" service producing no frames.
+        logging.error(f"exiting on capture failure (reason={reason})")
+        return 1
     logging.info(f"exiting cleanly (reason={reason})")
     return 0
 
