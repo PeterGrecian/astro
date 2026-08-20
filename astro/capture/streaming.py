@@ -113,6 +113,9 @@ def _capture_thread(picam2, q: queue.Queue, stop: threading.Event,
             continue
         try:
             bayer = req.make_array("raw").view(np.uint16).copy()
+            # Hardware abstraction: Pi 5 (PiSP) MSB-aligns 10-bit raw, Pi 4 (VC6) LSB-aligns it.
+            if cfg.bayer_format == "SRGGB10" and bayer.max() > 1023:
+                bayer >>= 6
             if focus_dither:
                 lp_rep = req.get_metadata().get("LensPosition")
         finally:

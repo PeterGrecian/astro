@@ -25,8 +25,8 @@
       "sensor": "IMX708",
       "bayer": "SRGGB10",
       "resolution": [2304, 1296],
-      "pedestal": 4380,
-      "pedestal_notes": "Sensor black level in libcamera's 16-bit container — measured 2026-06-12 as the minimum mean across deep-night (00:00-03:00 UTC) frames from 3 nights of v3w data. Slightly above the documented IMX708 black level (~4096) due to dark current. Use as fixed zero point so 'stops above pedestal' is comparable across nights.",
+      "pedestal": 68,
+      "pedestal_notes": "Sensor black level (now LSB-aligned). Originally 4380 (MSB-aligned 16-bit container), divided by 64 in the 2026-08 archive repack.",
       "plate_scale_deg_px": 0.0443,
       "plate_scale_notes": "Module 3 Wide, 102 deg horizontal / 2304 px at the half-res capture mode in use (native 4608x2592)."
     }
