@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""build-quality-db — the archive quality DB, rebuilt honestly.
+
+One row per frame across every camera, so cross-camera questions ("which
+hours were clear on both cameras?", "how many pixel-seconds has this epoch
+accumulated?") are a SQL query rather than a bespoke script.
+
+Replaces a loose ~/build_db.py that had five defects, each of which had
+already produced a wrong conclusion:
+
+1. It labelled epochs by DATE RANGE, so `ov5647_v3w_coexist` was a date
+   window, not a sensor — the frames in it are IMX708 v3w, and a session
+   concluded "the OV5647 black level is exactly 64" from them. Here the
+   sensor comes from the stream directory and the FITS header.
+2. It got resolution boundaries wrong for the same reason. eclipticam ran
+   full-res 06-10..06-14, back to BINNED 06-15..06-21, then full-res from
+   06-23; no date range describes that. Here shape is read from the frames.
+3. It bucketed nights with date(timestamp) — UTC calendar days, which split
+   a night at midnight and label it by its END date. Here: astro.nightdir's
+   night_of (noon rollover), the house convention.
+4. Every row and every file was wrapped in `except Exception: pass`, so a
+   malformed row vanished silently and "we found all the frames" was not
+   verifiable. Here every skip is counted, reported, and stored in scan_log.
+5. It began with os.remove(db_path). Re-running it therefore REVERTED the
+   2026-08-20 MSB repack correction, because that fix was an ad-hoc UPDATE
+   that was never folded in. Here the scale is read per frame from RAWSHIFT
+   and recorded, so a rebuild reproduces the truth instead of undoing it.
+
+Metadata comes from ONE FITS header read per directory (shape, EXPTIME,
+GAIN, RAWSHIFT, BAYERPAT, POSINDEX), cached and applied to that directory's
+rows. Assumes those are uniform within an hour directory, which is what the
+capture daemons guarantee — and it is authoritative where a date range is
+only a guess.
+
+QUALITY FLAGS are the point of the `flags` column. `clipped_low` catches
+frames whose black level was subtracted and clamped: ~8,000 starcam frames
+from 2026-06-01..03 have 96% of pixels at exactly 0 and a median of 0.
+Their noise distribution is TRUNCATED, so averaging them is biased, not
+merely noisy — and because they are the DARKEST frames in the archive by
+mean, a "add the darkest frames first" accumulator would swallow them
+FIRST. Anything selecting frames for accumulation must filter on flags.
+
+A flag is NOT a delete list. Peter on the starcam frames (2026-08-20): they
+are interesting because they are OLD — the beginning of the project, when
+it took a week to see the first stars — not because they are high quality.
+Historical value and scientific value are different things, and this column
+separates them: exclude from accumulation, keep on disk. That distinction
+also settles the cull question, since a runtime exclusion is reversible and
+a deletion is not.
+
+TWO CSV SCHEMAS EXIST, and only one is the census. `scan-brightness` writes
+`epoch_ms,iso_utc,filename,mean,median,p95,max,bright_pixels` into the night
+tree; the capture daemons separately write
+`utc_iso,epoch_ms,mode,exptime_s,gain,mean,per_s,stops_above_pedestal` into
+the stage-1 `YYYY/MM/DD/<camera>/` tree. The second DESCRIBES THE SAME FRAMES
+— measured 2026-08-20 on astrocam, 8,780 of its 8,795 rows were already
+present via the first. Ingesting both would have inflated astrocam's census
+by 10%, and the capture-time schema has no `filename` column to dedupe on.
+
+So capture-time rows are skipped DELIBERATELY, counted as
+`skip:capture_schema_dup`, not silently swallowed and not "recovered". If you
+ever want them, dedupe on epoch_ms — do not simply relax the parser.
+
+Usage:
+    build-quality-db                          # rebuild to the default path
+    build-quality-db --output /tmp/q.db       # elsewhere
+    build-quality-db --camera eclipticam      # one camera
+    build-quality-db --limit 500              # smoke test
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import sqlite3
+import sys
+import tempfile
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from astro.nightdir import night_of                      # noqa: E402
+
+DEFAULT_DB = Path("/mnt/bigstore/astro-data/archive_quality.db")
+DEFAULT_ROOT = Path("/mnt/bigstore/astro-data")
+REPO = Path(__file__).resolve().parent.parent
+
+SCHEMA = """
+CREATE TABLE frames (
+    timestamp   TEXT,     -- ISO UTC, as captured
+    epoch_ms    INTEGER,
+    night       TEXT,     -- astro.nightdir.night_of: noon-rollover night label
+    camera      TEXT,
+    stream      TEXT,     -- v3w / v1 / '' — the physical camera on that host
+    sensor      TEXT,     -- from the FITS CAMERA header where present
+    filename    TEXT,
+    mean_adu    REAL,
+    median_adu  REAL,
+    p95_adu     REAL,
+    max_adu     INTEGER,
+    bright_px   INTEGER,
+    width       INTEGER,  -- from the frames, not a date range
+    height      INTEGER,
+    npix        INTEGER,
+    exptime_s   REAL,
+    gain        REAL,
+    pixel_sec   REAL,     -- npix * exptime_s: the real accumulation currency
+    raw_shift   INTEGER,  -- RAWSHIFT: 6 = repacked from Pi5 MSB, 0/NULL = native
+    cohort      TEXT,     -- everything that must MATCH for frames to be poolable
+    sun_alt     REAL,
+    flags       TEXT      -- comma-separated quality flags; '' = clean
+);
+CREATE INDEX idx_night   ON frames(night);
+CREATE INDEX idx_cam     ON frames(camera, stream);
+CREATE INDEX idx_sun     ON frames(sun_alt);
+CREATE INDEX idx_flags   ON frames(flags);
+CREATE INDEX idx_cohort  ON frames(cohort);
+CREATE TABLE scan_log (
+    ran_at TEXT, camera TEXT, key TEXT, count INTEGER
+);
+"""
+
+
+def load_location() -> tuple[float, float]:
+    """Observer lat/lon from the repo's location.json, not a hardcoded pair."""
+    for cand in (REPO / "eclipticam" / "location.json",
+                 REPO / "astrocam" / "location.json"):
+        if cand.exists():
+            d = json.loads(cand.read_text())
+            if "lat_deg" in d and "lon_deg" in d:
+                return float(d["lat_deg"]), float(d["lon_deg"])
+    raise SystemExit("no location.json with lat_deg/lon_deg found")
+
+
+def dir_metadata(directory: Path, cache: dict) -> dict:
+    """One FITS header per directory: shape, exposure, gain, alignment.
+
+    Authoritative where a date range is a guess — this is what caught
+    eclipticam flipping full-res -> binned -> full-res inside a fortnight.
+    """
+    if directory in cache:
+        return cache[directory]
+    meta = {}
+    try:
+        from astropy.io import fits
+        frames = sorted(directory.glob("*.fits.fz")) or sorted(directory.glob("*.fits"))
+        if frames:
+            hdr = fits.getheader(frames[len(frames) // 2], ext=-1)
+            meta = {
+                "width": hdr.get("NAXIS1"), "height": hdr.get("NAXIS2"),
+                "exptime_s": hdr.get("EXPTIME"), "gain": hdr.get("GAIN"),
+                "raw_shift": hdr.get("RAWSHIFT"), "sensor": hdr.get("CAMERA"),
+            }
+    except Exception as e:                                   # noqa: BLE001
+        meta = {"_error": f"{type(e).__name__}: {e}"}
+    cache[directory] = meta
+    return meta
+
+
+def quality_flags(mean, median, mx, black_level, full_scale) -> list[str]:
+    """Flags that decide whether a frame may enter an accumulation.
+
+    `clipped_low` is the important one — see the module docstring. A frame
+    whose median is 0, or whose mean sits below half the sensor's black
+    level, has had its pedestal removed and its negative noise clamped. The
+    distribution is truncated, so it biases a stack rather than just adding
+    noise, and no weighting scheme recovers it. It must be EXCLUDED, not
+    down-weighted.
+    """
+    flags = []
+    if median is not None and median <= 0:
+        flags.append("clipped_low")
+    elif black_level and mean is not None and mean < black_level * 0.5:
+        flags.append("clipped_low")
+    if mx is not None and full_scale and mx >= full_scale:
+        flags.append("has_saturated_px")
+    if mean is not None and full_scale and mean >= 0.9 * full_scale:
+        flags.append("frame_saturated")
+    return flags
+
+
+def cohort_of(cam, stream, sensor, w, h, exp, gain, raw_shift) -> str:
+    """A key that groups frames which may legitimately be pooled.
+
+    Frames only combine if they share a calibration basis, and the things
+    that must match are all measured, not assumed: sensor, geometry,
+    exposure, gain and raw alignment. GROUP BY cohort is therefore the
+    honest unit for any accumulation, census or pixel-second total —
+    replacing the old `mode` column, which guessed from date ranges and got
+    both the sensor and the resolution boundary wrong.
+
+    It also makes "treat these separately" structural rather than a thing
+    to remember (Peter, 2026-08-20). canon is a 14-bit EOS 2000D at
+    6020x4015 with a black level of 2048; starcam is a 10-bit OV5647 with a
+    black level of ~15 and a clipped early era. Averaging across those is
+    meaningless, and a distinct cohort string makes that visible instead of
+    silently letting a query pool them.
+    """
+    geom = f"{w}x{h}" if (w and h) else "?"
+    e = f"{float(exp):g}s" if exp else "?"
+    g = f"g{float(gain):g}" if gain else "g?"
+    rs = f"rs{raw_shift}" if raw_shift else "rs0"
+    return f"{cam}/{stream or '-'}/{sensor or '?'}/{geom}/{e}/{g}/{rs}"
+
+
+def stream_of(path: Path) -> str:
+    """Physical camera from the path — 'v3w'/'v1' — not inferred from a date."""
+    for part in path.parts:
+        if part in ("v1", "v3w", "v3s"):
+            return part
+    return ""
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--output", type=Path, default=DEFAULT_DB)
+    ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    ap.add_argument("--camera", action="append",
+                    help="limit to these cameras (repeatable)")
+    ap.add_argument("--limit", type=int, help="stop after N rows (smoke test)")
+    a = ap.parse_args(argv)
+
+    import ephem
+    lat, lon = load_location()
+    obs = ephem.Observer()
+    obs.lat, obs.lon = str(lat), str(lon)
+    obs.pressure = 0          # geometric altitude; refraction is meaningless at -20 deg
+    sun = ephem.Sun()
+
+    black_levels, full_scales = {}, {}
+    for cfg in sorted(REPO.glob("*/camera.json")):
+        try:
+            d = json.loads(cfg.read_text())
+        except Exception:                                    # noqa: BLE001
+            continue
+        name = d.get("name") or cfg.parent.name
+        if d.get("black_level") is not None:
+            black_levels[name] = float(d["black_level"])
+        for sub in (d.get("subcams") or {}).values():
+            if sub.get("black_level") is not None:
+                black_levels.setdefault(name, float(sub["black_level"]))
+
+    cameras = a.camera or ["astrocam", "eclipticam", "canon", "starcam"]
+    tmp_fd, tmp_name = tempfile.mkstemp(dir=a.output.parent, suffix=".db.tmp")
+    os.close(tmp_fd)
+    tmp = Path(tmp_name)
+    tmp.unlink()
+    conn = sqlite3.connect(tmp)
+    conn.executescript(SCHEMA)
+
+    meta_cache: dict = {}
+    total = 0
+    ran_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    for cam in cameras:
+        tally = Counter()
+        root = a.root / f"{cam}-frames"
+        if not root.is_dir():
+            print(f"{cam}: no tree at {root}", file=sys.stderr)
+            continue
+        rows = []
+        bl = black_levels.get(cam)
+        for csv_path in sorted(root.rglob("brightness.csv")):
+            tally["csv_files"] += 1
+            try:
+                fh = csv_path.open(newline="")
+            except OSError as e:
+                tally[f"file_unreadable:{type(e).__name__}"] += 1
+                continue
+            with fh:
+                reader = csv.DictReader(fh)
+                fields = reader.fieldnames or []
+                if "max" not in fields and "utc_iso" in fields:
+                    # Capture-daemon schema: the same frames scan-brightness
+                    # already measured, without a filename to dedupe on.
+                    tally["skip:capture_schema_dup"] += sum(1 for _ in reader)
+                    continue
+                for row in reader:
+                    try:
+                        fname = row.get("filename") or ""
+                        frame_dir = Path(fname).parent
+                        # brightness.csv records the CAPTURE host's paths; map
+                        # them onto this host's tree by matching the tail.
+                        local_dir = csv_path.parent
+                        for part in frame_dir.parts:
+                            if part in ("v1", "v3w", "v3s") or part.isdigit():
+                                cand = local_dir / part
+                                if cand.is_dir():
+                                    local_dir = cand
+                        meta = dir_metadata(local_dir, meta_cache)
+
+                        ts = row.get("iso_utc") or row.get("utc_iso") or ""
+                        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        obs.date = dt.strftime("%Y/%m/%d %H:%M:%S")
+                        sun.compute(obs)
+                        sun_alt = float(sun.alt) * 180.0 / 3.141592653589793
+
+                        mean = float(row["mean"])
+                        median = float(row["median"]) if row.get("median") else None
+                        p95 = float(row["p95"]) if row.get("p95") else None
+                        mx = int(float(row["max"]))
+                        w, h = meta.get("width"), meta.get("height")
+                        npix = (w * h) if (w and h) else None
+                        exp = meta.get("exptime_s")
+                        rs = meta.get("raw_shift")
+                        fs = 1023 if (rs == 6 or (mx and mx <= 1023)) else None
+                        flags = quality_flags(mean, median, mx, bl, fs)
+                        if flags:
+                            tally["flagged:" + flags[0]] += 1
+
+                        rows.append((
+                            ts, int(row["epoch_ms"]), night_of(dt), cam,
+                            stream_of(Path(fname)), meta.get("sensor"), fname,
+                            mean, median, p95, mx,
+                            int(row["bright_pixels"]) if row.get("bright_pixels") else None,
+                            w, h, npix, exp, meta.get("gain"),
+                            (npix * exp) if (npix and exp) else None,
+                            rs,
+                            cohort_of(cam, stream_of(Path(fname)),
+                                      meta.get("sensor"), w, h, exp,
+                                      meta.get("gain"), rs),
+                            sun_alt, ",".join(flags),
+                        ))
+                        tally["rows_ok"] += 1
+                        total += 1
+                        if a.limit and total >= a.limit:
+                            break
+                    except Exception as e:                   # noqa: BLE001
+                        tally[f"row_bad:{type(e).__name__}"] += 1
+            if a.limit and total >= a.limit:
+                break
+        conn.executemany(
+            "INSERT INTO frames VALUES (" + ",".join("?" * 22) + ")", rows)
+        conn.executemany("INSERT INTO scan_log VALUES (?,?,?,?)",
+                         [(ran_at, cam, k, v) for k, v in sorted(tally.items())])
+        conn.commit()
+        print(f"{cam}: " + "  ".join(f"{k}={v}" for k, v in sorted(tally.items())))
+
+    conn.commit()
+    conn.close()
+    # Swap in atomically; never os.remove the live DB before the new one exists.
+    os.replace(tmp, a.output)
+    print(f"\nwrote {a.output} ({total} rows)")
+    print("counts above are also in the scan_log table — a silent skip is a bug")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
