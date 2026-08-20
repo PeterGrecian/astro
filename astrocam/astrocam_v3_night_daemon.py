@@ -70,6 +70,8 @@ def main() -> int:
     lens_position = _param("ASTROCAM_LENS_POSITION", cap.get("lens_position"),
                            1.4, float)
     pedestal = _param("ASTROCAM_PEDESTAL", cfg_cam.get("pedestal"), 512, int)
+    # Physical sensor zero, distinct from the chart pedestal above.
+    black_level = cfg_cam.get("black_level")
 
     # Focus dither: on by default from camera.json's capture.focus_dither
     # (probed lp=1.0 +/- 0.5, step 0.1). Set ASTROCAM_FOCUS_DITHER=0 to
@@ -106,6 +108,7 @@ def main() -> int:
         camera_name="imx708",
         buffer_dir=BUFFER_DIR,
         pedestal=pedestal,
+        black_level=black_level,
         camera=CAMERA,
         frames_root=frames_root,
         mode="night",

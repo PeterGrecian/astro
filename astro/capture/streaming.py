@@ -56,7 +56,15 @@ class StreamingConfig:
     rotation_180: bool                     # match rpicam-still --rotation 180
     camera_name: str                       # FITS CAMERA header
     buffer_dir: Path                       # tmpfs scratch for .fits.fz
-    pedestal: int                          # sensor black level (camera.json)
+    pedestal: int                          # CHART FLOOR (camera.json "pedestal")
+    # The sensor's electronic zero (camera.json "black_level") — a physical
+    # property, unlike `pedestal` which is an axis reference chosen for
+    # footroom and is deliberately below the real floor. Kept separate because
+    # conflating the two is what made a 2026-08 session read a fake chart floor
+    # as a measurement. Stamped as BLACKLVL so downstream (accumulation, any
+    # "ADU above zero" arithmetic) subtracts the physical value, never the
+    # chart one. None = don't write the header.
+    black_level: Optional[float] = None
     # Stage-1 inputs: brightness.csv lands at <frames_root>/YYYY/MM/DD/<camera>/.
     camera: str = ""                       # canonical camera name for brightness.csv path
     frames_root: Optional[Path] = None     # NFS root; if None, brightness.csv stays in buffer_dir
@@ -241,6 +249,9 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         h["RAWSHIFT"] = (cfg.raw_shift or 0,
                          "bits shifted off ISP-aligned raw")
         h["SAMPBITS"] = (cfg.sample_bits, "sensor raw sample depth")
+        if cfg.black_level is not None:
+            h["BLACKLVL"] = (cfg.black_level,
+                             "sensor electronic zero (NOT the chart pedestal)")
         if cfg.position_index is not None:
             h["POSINDEX"] = (cfg.position_index,
                              "camera/lens generation (camera.json position_index)")

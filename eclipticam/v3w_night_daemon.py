@@ -63,6 +63,8 @@ def main() -> int:
     lens_position = _param("V3W_LENS_POSITION", cap.get("lens_position"),
                            3.15, float)
     pedestal = _param("V3W_PEDESTAL", cfg_v3w.get("pedestal"), 4380, int)
+    # Physical sensor zero, distinct from the chart pedestal above.
+    black_level = cfg_v3w.get("black_level")
     # Focus-dither experiment (opt-in via env). V3W_FOCUS_DITHER=1 enables a
     # per-frame sawtooth focus sweep (base->top by step), writing LENSPOS to
     # each FITS header. Overridable ranges via V3W_FD_BASE/TOP/STEP. Unset =
@@ -101,6 +103,7 @@ def main() -> int:
         camera_name="imx708",
         buffer_dir=BUFFER_DIR,
         pedestal=pedestal,
+        black_level=black_level,
         camera=CAMERA,
         frames_root=frames_root,
         mode="night",
