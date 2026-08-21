@@ -1,0 +1,10 @@
+[Unit]
+Description=astro: Timer for gdrive-sync (runs every 8 hours)
+
+[Timer]
+OnCalendar=*-*-* 02,10,18:00:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

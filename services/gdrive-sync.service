@@ -1,0 +1,11 @@
+[Unit]
+Description=astro: Quality-gated file-by-file backup to Google Drive
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=peter
+ExecStart=/home/peter/astro/bin/gdrive-sync
+StandardOutput=journal
+StandardError=journal
