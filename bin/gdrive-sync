@@ -2,8 +2,32 @@
 """gdrive-sync — quality-gated file-by-file backup to Google Drive.
 
 Pulls copy counts from DynamoDB, joins against astro-science's quality DB,
-and uses rclone to push the darkest single-copy frames to Google Drive.
+and uses rclone to push the darkest, least-copied frames to Google Drive.
 Tracks successful uploads in a persistent SQLite ledger snapshotted to S3.
+
+PATHS. The quality DB records each frame by its path ON THE CAPTURE HOST
+(`/home/peter/<cam>-frames/<night>/<hh>/<file>`), not by where the archive
+now holds it. muppet's bigstore mirrors those trees one level down, so the
+mapping is `/home/peter/X` -> `<root>/X`. The root differs per host:
+muppet has it at /mnt/bigstore/astro-data, puppy NFS-mounts that same
+export at /mnt/muppet/bigstore. Hence --root/auto-detect rather than a
+hardcoded prefix: getting this wrong uploads NOTHING while reporting
+success, which is the one failure mode a backup must not have.
+
+V3 ONLY by default (Peter, 2026-08-21): the new cameras matter, the ancient
+frames do not. "v3" is the imx708 sensor — astrocam-v3s (from 2026-07-29) and
+eclipticam-v3w — selected BY SENSOR, not by camera name or date range, which
+is the same trap build-quality-db's own docstring documents. eclipticam is
+wholly v3w, so its header-less rows are caught by `stream` instead. This drops
+astrocam's imx219 era and starcam entirely. `--all-sensors` to override.
+
+~7,755 starcam rows (2026-05-23) carry RELATIVE filenames — a defect in the
+CSVs build-quality-db read. They cannot be resolved to a camera root, so
+they are skipped and counted, not guessed at.
+
+LEDGER. Kept on LOCAL disk, never on the NFS mount: sqlite locking over NFS
+is unsafe, and the mount carries idle-timeout=60 so it can vanish mid-write.
+Durability comes from the S3 snapshot instead.
 """
 import os
 import sys
@@ -18,13 +42,41 @@ try:
 except ImportError:
     boto3 = None
 
-DB_PATH = "/mnt/bigstore/astro-data/astro-storage.db"
-SCIENCE_DB = "/mnt/bigstore/astro-data/archive_quality.db"
+DB_PATH = os.path.expanduser("~/.local/state/astro/astro-storage.db")
 S3_BACKUP = "s3://astro-berrylands-eu-west-1/state/astro-storage.db"
 RCLONE_REMOTE = "gdrive:astro-backup"
-RCLONE_ROOT = "/mnt/bigstore/astro-data"
+
+# Archive roots that mirror the capture-host `/home/peter/<cam>-frames` trees,
+# most-preferred first. muppet holds the disk; puppy NFS-mounts the export.
+CANDIDATE_ROOTS = [
+    "/mnt/bigstore/astro-data",   # muppet, local
+    "/mnt/muppet/bigstore",       # puppy, NFS mount of the same export
+]
+CAPTURE_PREFIX = "/home/peter/"
+
+# The v3-camera predicate. imx708 IS the Camera Module 3; eclipticam's
+# sensor header is absent on some nights but the stream name is not.
+V3_ONLY_SQL = "AND (s.sensor = 'imx708' OR s.stream = 'v3w')"
+
+
+def resolve_root(explicit):
+    """The archive root on THIS host, or exit with a usable message."""
+    if explicit:
+        if not os.path.isdir(explicit):
+            sys.exit(f"Error: --root {explicit} is not a directory.")
+        return explicit
+    for r in CANDIDATE_ROOTS:
+        if os.path.isdir(r):
+            return r
+    sys.exit(
+        "Error: no archive root found. Tried: "
+        + ", ".join(CANDIDATE_ROOTS)
+        + "\nOn puppy this means the NFS automount to muppet is down."
+    )
+
 
 def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS frame_copies (
@@ -40,6 +92,7 @@ def init_db():
     """)
     return conn
 
+
 def update_night_copies(conn):
     if not boto3:
         print("Warning: boto3 not installed, skipping DynamoDB copy counts.")
@@ -47,8 +100,13 @@ def update_night_copies(conn):
     print("Fetching inventory from DynamoDB...")
     try:
         table = boto3.resource("dynamodb", region_name="eu-west-1").Table("astro-storage-inventory")
-        resp = table.scan()
-        items = resp.get("Items", [])
+        items, kwargs = [], {}
+        while True:
+            resp = table.scan(**kwargs)
+            items.extend(resp.get("Items", []))
+            if "LastEvaluatedKey" not in resp:
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
     except Exception as e:
         print(f"Warning: Failed to fetch DynamoDB inventory ({e}). Using existing copy counts.")
         return
@@ -64,93 +122,150 @@ def update_night_copies(conn):
         [(night, cam, c) for ((night, cam), c) in counts.items()]
     )
     conn.commit()
+    print(f"  {len(items)} inventory items -> {len(counts)} (night, camera) copy counts.")
 
-def find_frames_to_sync(conn, limit):
-    if not os.path.exists(SCIENCE_DB):
-        print(f"Error: {SCIENCE_DB} not found. Has astro-science built it?")
-        sys.exit(1)
 
-    print(f"Querying best frames (limit {limit})...")
-    conn.execute(f"ATTACH DATABASE '{SCIENCE_DB}' AS science")
-    
+def to_relpath(filename, root):
+    """Map a quality-DB filename to a path relative to `root`, or None.
+
+    None means "cannot be resolved here" — a relative/foreign row, or a file
+    this archive root does not hold. Never guess; the caller counts these.
+    """
+    if not filename.startswith("/"):
+        return None                      # malformed relative row
+    if filename.startswith(CAPTURE_PREFIX):
+        rel = filename[len(CAPTURE_PREFIX):]
+    elif filename.startswith(root + "/"):
+        rel = filename[len(root) + 1:]
+    else:
+        return None
+    return rel if os.path.exists(os.path.join(root, rel)) else None
+
+
+def find_frames_to_sync(conn, science_db, root, limit, all_sensors=False):
+    if not os.path.exists(science_db):
+        sys.exit(f"Error: {science_db} not found. Has astro-science built it?")
+
+    scope = "all sensors" if all_sensors else "v3 only (imx708 / v3w)"
+    print(f"Querying darkest least-copied frames, {scope} (want {limit})...")
+    conn.execute("ATTACH DATABASE ? AS science", (f"file:{science_db}?mode=ro",))
+
+    # Ordered by the backup priority: fewest existing copies first, then
+    # darkest (lowest mean_adu), then newest. Over-fetch, because rows drop
+    # out when they cannot be resolved on this root.
     cur = conn.execute(f"""
-        SELECT s.filename 
-        FROM science.frames s 
-        LEFT JOIN frame_copies c ON s.filename = c.filename 
+        SELECT s.filename
+        FROM science.frames s
+        LEFT JOIN frame_copies c ON s.filename = c.filename
         LEFT JOIN night_copies n ON s.night = n.night AND s.camera = n.camera
-        WHERE s.flags = '' 
+        WHERE s.flags = ''
           AND c.gdrive_sync_date IS NULL
-        ORDER BY 
+          {"" if all_sensors else V3_ONLY_SQL}
+        ORDER BY
           COALESCE(n.copies, 1) ASC,
           s.mean_adu ASC,
           s.epoch_ms DESC
-        LIMIT {limit}
-    """)
-    return [r[0] for r in cur.fetchall()]
+        LIMIT ?
+    """, (limit * 4,))
+
+    picked, unresolved = [], 0
+    for (fn,) in cur:
+        rel = to_relpath(fn, root)
+        if rel is None:
+            unresolved += 1
+            continue
+        picked.append((fn, rel))
+        if len(picked) >= limit:
+            break
+
+    if unresolved:
+        print(f"  Skipped {unresolved} rows not resolvable under {root}.")
+    return picked
+
 
 def main():
     parser = argparse.ArgumentParser()
     # 4500 frames * ~4.6MB/frame is ~20GB.
-    parser.add_argument("--limit", type=int, default=4500, help="Max frames to query/sync")
+    parser.add_argument("--limit", type=int, default=4500, help="Max frames to sync")
+    parser.add_argument("--root", help="Archive root (default: auto-detect for this host)")
+    parser.add_argument("--all-sensors", action="store_true",
+                        help="Include the pre-v3 archive (imx219 astrocam, starcam)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Select and report frames; upload nothing, record no copies")
     args = parser.parse_args()
 
-    if not os.path.exists("/usr/bin/rclone") and not os.path.exists("/usr/local/bin/rclone") and subprocess.run(["which", "rclone"], capture_output=True).returncode != 0:
-        print("Error: rclone is not installed or not in PATH.")
-        sys.exit(1)
+    if subprocess.run(["which", "rclone"], capture_output=True).returncode != 0:
+        sys.exit("Error: rclone is not installed or not in PATH.")
+
+    root = resolve_root(args.root)
+    science_db = os.path.join(root, "archive_quality.db")
+    print(f"Archive root: {root}")
 
     conn = init_db()
     update_night_copies(conn)
-    frames = find_frames_to_sync(conn, args.limit)
+    frames = find_frames_to_sync(conn, science_db, root, args.limit, args.all_sensors)
 
     if not frames:
         print("No eligible frames found to sync.")
         return
 
-    print(f"Found {len(frames)} frames to sync.")
-    
-    with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
-        for fname in frames:
-            rel_fname = fname
-            if rel_fname.startswith(RCLONE_ROOT + "/"):
-                rel_fname = rel_fname[len(RCLONE_ROOT) + 1:]
-            elif rel_fname.startswith(RCLONE_ROOT):
-                rel_fname = rel_fname[len(RCLONE_ROOT):]
-            f.write(f"{rel_fname}\n")
+    total = sum(os.path.getsize(os.path.join(root, rel)) for _, rel in frames)
+    print(f"Selected {len(frames)} frames, {total / 1e6:.1f} MB.")
+
+    if args.dry_run:
+        print("--dry-run: nothing uploaded, no frame recorded as copied. First 10:")
+        for _, rel in frames[:10]:
+            print(f"  {rel}")
+        return
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".files") as f:
+        f.write("".join(f"{rel}\n" for _, rel in frames))
         list_path = f.name
 
-    print(f"Starting rclone sync from {list_path}...")
-    cmd = [
-        "rclone", "copy", RCLONE_ROOT, RCLONE_REMOTE,
-        "--files-from", list_path,
-        "--checksum",
-        "--transfers=2",
-        "--bwlimit=2M",
-        "--fast-list",
-        "-v",
-        "--stats", "1m"
-    ]
-    
     try:
-        # Popen to stream stdout/stderr in real time to journal
-        with subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr) as p:
-            p.wait()
-            if p.returncode == 0:
-                now = datetime.now(timezone.utc).isoformat()
-                print("Upload finished. Updating ledger...")
-                conn.executemany(
-                    "INSERT INTO frame_copies (filename, gdrive_sync_date) VALUES (?, ?)",
-                    [(f, now) for f in frames]
-                )
-                conn.commit()
-            else:
-                print(f"rclone failed with exit code {p.returncode}. Ledger not updated.")
-                print("Note: run rclone again, or check logs. No frames were marked as synced.")
+        cmd = [
+            "rclone", "copy", root, RCLONE_REMOTE,
+            "--files-from", list_path,
+            "--checksum", "--transfers=2", "--bwlimit=2M",
+            "--fast-list", "-v", "--stats", "1m",
+        ]
+        # `copy --files-from` lists the destination root and fails outright if
+        # it does not exist yet — it will not create it. Harmless if present.
+        subprocess.run(["rclone", "mkdir", RCLONE_REMOTE], check=False)
+
+        print(f"Uploading to {RCLONE_REMOTE}...")
+        rc = subprocess.run(cmd, stdout=sys.stdout, stderr=sys.stderr).returncode
+        if rc != 0:
+            print(f"rclone copy failed (exit {rc}). Ledger not updated.")
+            sys.exit(rc)
+
+        # Exit 0 is NOT proof the bytes landed — an empty or mis-rooted file
+        # list also exits 0. Verify against the remote before recording, so
+        # the ledger can never claim a copy that does not exist.
+        print("Verifying uploads against the remote...")
+        check = subprocess.run(
+            ["rclone", "check", root, RCLONE_REMOTE,
+             "--files-from", list_path, "--one-way", "--checksum"],
+            stdout=sys.stdout, stderr=sys.stderr,
+        ).returncode
+        if check != 0:
+            print(f"rclone check failed (exit {check}). Ledger NOT updated.")
+            sys.exit(check)
+
+        now = datetime.now(timezone.utc).isoformat()
+        conn.executemany(
+            "INSERT OR REPLACE INTO frame_copies (filename, gdrive_sync_date) VALUES (?, ?)",
+            [(fn, now) for fn, _ in frames],
+        )
+        conn.commit()
+        print(f"Verified and recorded {len(frames)} frames.")
     finally:
         os.remove(list_path)
 
     print(f"Snapshotting ledger to {S3_BACKUP}...")
     subprocess.run(["aws", "s3", "cp", DB_PATH, S3_BACKUP], stdout=sys.stdout, stderr=sys.stderr)
     print("Done.")
+
 
 if __name__ == "__main__":
     main()
