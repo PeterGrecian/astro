@@ -24,10 +24,13 @@ def main():
     ap.add_argument("--plate-scale", type=float, required=True,
                     help="deg/px OF THIS IMAGE")
     ap.add_argument("--search-px", type=int, default=140)
+    ap.add_argument("--epoch", type=float, default=None,
+                    help="fractional year of the frame (default: now). Sets the "
+                         "Polaris-pole separation, which precession moves fast.")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     img = np.asarray(Image.open(a.inp).convert("L"), dtype=np.float32)
-    r = fit_pole(img, a.plate_scale, search_px=a.search_px)
+    r = fit_pole(img, a.plate_scale, search_px=a.search_px, epoch=a.epoch)
     if r is None:
         print("no pole: self-check rejected every candidate "
               "(no arc matched the Polaris radius)", file=sys.stderr)

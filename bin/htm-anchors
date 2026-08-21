@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""htm-anchors — the bootstrap anchor set: N bright stars as HTM trixel ids.
+
+The first rung of the progressive ladder. Pick the brightest stars near the
+pole, give each its trixel id at a coarse level, and report the predicted
+radius of its arc in an all-night max stack so the identification can be
+checked against the image before anything is accumulated.
+
+Two independent things are printed and should not be confused:
+
+  * the trixel id      — pure catalogue geometry, needs no image and no optics
+  * the ring radius    — needs a plate scale, and is therefore the part that
+                         can be wrong; it is the CHECK, not the input
+
+Trixel ids are a prefix code, so the level-(N-1) id is the level-N id shifted
+right by two bits: the same anchor set serves every rung of the ladder.
+
+  htm-anchors --level 4 --n 10
+  htm-anchors --level 4 --n 10 --plate-scale 0.0338 --epoch 2026.617
+"""
+import argparse
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from astro.htm import htm_id, htm_name, trixel_area          # noqa: E402
+from astro.skypos import BRIGHT_NORTH, current_epoch, pole_distance  # noqa: E402
+
+
+def anchors(level, n, epoch, max_pole_dist):
+    rows = []
+    for name, ra, dec, v, pmra, pmdec in BRIGHT_NORTH:
+        pd = float(pole_distance(ra, dec, epoch, pmra, pmdec))
+        if pd > max_pole_dist:
+            continue
+        ident = htm_id(ra, dec, level)
+        rows.append({"name": name, "v_mag": v, "ra_j2000": ra, "dec_j2000": dec,
+                     "pole_dist_deg": pd, "htm_id": ident,
+                     "htm_name": htm_name(ident),
+                     "trixel_area_deg2": trixel_area(ident),
+                     "parent_id": ident >> 2, "parent_name": htm_name(ident >> 2)})
+    rows.sort(key=lambda r: r["v_mag"])
+    return rows[:n]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--level", type=int, default=4)
+    ap.add_argument("--n", type=int, default=10)
+    ap.add_argument("--epoch", type=float, default=None)
+    ap.add_argument("--max-pole-dist", type=float, default=45.0,
+                    help="deg; keep anchors inside the pole-centred field")
+    ap.add_argument("--plate-scale", type=float, default=None,
+                    help="deg/px OF THE IMAGE you will check against")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+
+    epoch = current_epoch() if a.epoch is None else a.epoch
+    rows = anchors(a.level, a.n, epoch, a.max_pole_dist)
+    if a.plate_scale:
+        for r in rows:
+            r["ring_radius_px"] = r["pole_dist_deg"] / a.plate_scale
+
+    if a.json:
+        print(json.dumps({"epoch": epoch, "level": a.level, "anchors": rows}, indent=1))
+        return 0
+
+    dup = len(rows) - len({r["htm_id"] for r in rows})
+    print(f"epoch {epoch:.3f}   HTM level {a.level}   {len(rows)} anchors"
+          f"   {dup} sharing a trixel")
+    hdr = f"  {'star':<11} {'V':>5}  {'pole dist':>9}  {'trixel (L%d)' % a.level:<12}"
+    if a.plate_scale:
+        hdr += f" {'ring px':>8}"
+    print(hdr + f"  {'parent':<10} {'area deg2':>9}")
+    for r in rows:
+        line = (f"  {r['name']:<11} {r['v_mag']:5.2f}  {r['pole_dist_deg']:8.3f}°  "
+                f"{r['htm_name']:<12}")
+        if a.plate_scale:
+            line += f" {r['ring_radius_px']:8.1f}"
+        print(line + f"  {r['parent_name']:<10} {r['trixel_area_deg2']:9.3f}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

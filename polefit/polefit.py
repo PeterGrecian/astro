@@ -9,15 +9,21 @@ Public API:
 from __future__ import annotations
 
 import math
+import pathlib
+import sys
 from dataclasses import dataclass, asdict
 
 import numpy as np
 from scipy import ndimage
 
-# Polaris–NCP angular separation. Slowly changing (precession): 0.7525 deg in
-# 2026, decreasing ~0.3 arcmin/yr until closest approach ~2100. Recompute if
-# this is ever used far from the present epoch.
-POLARIS_SEP_DEG = 0.7525
+# Polaris–NCP separation is NOT a constant to hardcode. Precession shrinks it
+# fast in fractional terms — 0.736 deg at J2000, 0.626 deg in 2026 — and this
+# figure is the SELECTOR that picks Polaris out of the candidate arcs (see
+# fit_pole), so a stale value can select the wrong star, not merely misreport
+# the expected radius. It used to be pinned at 0.7525 (a mid-1990s value, 20%
+# high); it now comes from astro.skypos for the epoch of the frame.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from astro.skypos import polaris_pole_distance  # noqa: E402
 
 
 @dataclass
@@ -185,11 +191,12 @@ def _fit_circle(X, Y):
 
 
 def fit_pole(img, plate_scale_deg_px, search_px=140, min_sweep_deg=60.0,
-             radius_tol=0.25, coarse=None, max_candidates=12):
+             radius_tol=0.25, coarse=None, max_candidates=12, epoch=None):
     """Fit the celestial pole. Returns PoleFit, or None if nothing passes.
 
     plate_scale_deg_px must match THIS image (a half-res max.jpg has twice the
-    per-pixel scale of the full-res frames).
+    per-pixel scale of the full-res frames). `epoch` is the fractional year the
+    frame was taken; it sets the Polaris–pole separation and defaults to now.
 
     STRATEGY. Stage 1 is only accurate to ~90 px (measured), which is not enough
     to pick Polaris by proximity — a brighter star nearby yields an arc of
@@ -205,7 +212,7 @@ def fit_pole(img, plate_scale_deg_px, search_px=140, min_sweep_deg=60.0,
     if c is None:
         return None
     cx0, cy0 = c
-    expected = POLARIS_SEP_DEG / plate_scale_deg_px
+    expected = polaris_pole_distance(epoch) / plate_scale_deg_px
     H, W = img.shape
 
     # Local maxima within the search box, brightest first, thinned so that

@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""fit-pole-track — the celestial pole by tracking ONE star across a night.
+
+Peter's construction, made operational: imagine the image rotated about the
+pole; every point of a star's trail then slides along the trail. So track the
+star through N single frames and fit the centre of the rotation that carries it
+from one to the next. The rotation ANGLES are not free parameters — they come
+from the frame timestamps and the sidereal rate — which makes the fit linear:
+
+    p_i = c + Rot(w t_i) v        unknowns c (the pole) and v; solved exactly
+
+WHY NOT FIT A CIRCLE TO THE MAX STACK. That is what fit-pole-polaris does, and
+on astrocam 2026-08-12 it returns radius 21.1 px against ~16 px here. In a max
+stack Polaris's trail is a 4-5 px thick band — the PSF smeared along the arc,
+not saturation; per-frame peaks run ~440 of 1023 ADU. That thickness is a third
+of the trail's radius, and algebraic circle fits are badly biased in that
+regime, while rotational self-consistency of the band is nearly as degenerate
+because a thick arc maps onto a thick arc. In a SINGLE 60 s frame the same star
+is a point — 60 s is 0.25 deg of rotation, far less than the PSF — so tracking
+it frame to frame throws the thickness away entirely.
+
+KNOWN LIMIT: Polaris is a poor choice of target for this despite being the
+obvious one. Its arc radius is only ~16 px, sagging ~6 px from a straight
+chord, so the ~1.5 px scatter of a single detection propagates to ~25% on the
+radius. Measured over 14 nights of a fixed camera the per-night radius ranged
+15.4-19.5 px. Use a star FAR from the pole to fix the centre (Kochab's arc is
+~470 px), then measure Polaris's radius from that centre.
+
+The sweep is a free consistency check: a night of length T can subtend exactly
+15.041*T degrees and no more. An arc that appears to subtend more is a wrong
+centre or a mis-identified star, every time.
+
+Also the daily nudge gate: re-run nightly and the pole should not move. If it
+does, the camera did.
+
+  fit-pole-track --night ~/bigstore-astro/astrocam-frames/2026-08-12 \
+                 --pole-x 696 --pole-y 490
+"""
+import argparse
+import datetime
+import json
+import pathlib
+import sys
+
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from astro.skypos import current_epoch, polaris_pole_distance  # noqa: E402
+
+SIDEREAL_DEG_PER_SEC = 360.0 / 86164.0905
+
+
+def pick_frames(night, n):
+    """Frames spread evenly across the night's hour dirs."""
+    files = sorted(p for h in sorted(night.iterdir()) if h.is_dir()
+                   for p in sorted(h.glob("*.fits.fz")))
+    if len(files) <= n:
+        return files
+    idx = np.linspace(0, len(files) - 1, n).round().astype(int)
+    return [files[i] for i in sorted(set(idx))]
+
+
+def star_position(path, cx, cy, box, binning):
+    """Brightest source within `box` of (cx, cy), to sub-pixel, plus its time."""
+    with fits.open(path) as h:
+        data = h[-1].data.astype(np.float32)
+        hdr = h[-1].header
+    if binning == 2:
+        data = (data[0::2, 0::2] + data[0::2, 1::2]
+                + data[1::2, 0::2] + data[1::2, 1::2])
+    x0, y0 = int(cx) - box, int(cy) - box
+    sub = data[y0:y0 + 2 * box, x0:x0 + 2 * box]
+    if sub.size == 0:
+        return None
+    peak = ndimage.gaussian_filter(sub, 1.0)
+    by, bx = np.unravel_index(np.argmax(peak), peak.shape)
+    w = 4
+    if not (w <= by < sub.shape[0] - w and w <= bx < sub.shape[1] - w):
+        return None
+    yy, xx = np.mgrid[by - w:by + w + 1, bx - w:bx + w + 1]
+    patch = np.clip(sub[by - w:by + w + 1, bx - w:bx + w + 1] - np.median(sub), 0, None)
+    if patch.sum() <= 0:
+        return None
+    return (datetime.datetime.fromisoformat(hdr["DATE-OBS"]),
+            float((patch * xx).sum() / patch.sum()) + x0,
+            float((patch * yy).sum() / patch.sum()) + y0,
+            float(peak.max()))
+
+
+def fit(t, X, Y, sign):
+    """Least-squares pole for rotation angles fixed by the clock."""
+    th = np.radians(sign * SIDEREAL_DEG_PER_SEC * t)
+    A = np.zeros((2 * len(t), 4))
+    b = np.empty(2 * len(t))
+    A[0::2, 0] = 1; A[0::2, 2] = np.cos(th); A[0::2, 3] = -np.sin(th); b[0::2] = X
+    A[1::2, 1] = 1; A[1::2, 2] = np.sin(th); A[1::2, 3] = np.cos(th); b[1::2] = Y
+    sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+    res = np.hypot(*(A @ sol - b).reshape(-1, 2).T)
+    return sol, res, float(np.hypot(sol[2], sol[3]))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--night", required=True, type=pathlib.Path)
+    ap.add_argument("--pole-x", type=float, required=True, help="prior, in binned px")
+    ap.add_argument("--pole-y", type=float, required=True)
+    ap.add_argument("--box", type=int, default=70, help="search half-width, binned px")
+    ap.add_argument("--n-frames", type=int, default=15)
+    ap.add_argument("--bin", type=int, default=2, choices=(1, 2))
+    ap.add_argument("--epoch", type=float, default=None)
+    ap.add_argument("--reject", type=float, default=3.0,
+                    help="drop points beyond this many times the median residual")
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+
+    obs = [o for o in (star_position(p, a.pole_x, a.pole_y, a.box, a.bin)
+                       for p in pick_frames(a.night, a.n_frames)) if o]
+    if len(obs) < 5:
+        print(f"fit-pole-track: only {len(obs)} usable frames", file=sys.stderr)
+        return 2
+    obs.sort()
+    t0 = obs[0][0]
+    t = np.array([(o[0] - t0).total_seconds() for o in obs])
+    X = np.array([o[1] for o in obs])
+    Y = np.array([o[2] for o in obs])
+
+    # The image may be flipped or rotated in capture, so the apparent sense of
+    # rotation is not known a priori — take whichever fits.
+    sign = min((+1, -1), key=lambda s: np.sqrt((fit(t, X, Y, s)[1] ** 2).mean()))
+
+    keep = np.ones(len(t), bool)
+    while True:
+        sol, res, R = fit(t[keep], X[keep], Y[keep], sign)
+        worst = res.argmax()
+        if res[worst] < a.reject * np.median(res) or keep.sum() <= 8:
+            break
+        keep[np.nonzero(keep)[0][worst]] = False
+
+    epoch = current_epoch() if a.epoch is None else a.epoch
+    pd = polaris_pole_distance(epoch)
+    scale = pd / R
+    tk = t[keep]
+    allowed = SIDEREAL_DEG_PER_SEC * (tk[-1] - tk[0])
+    ang = np.unwrap(np.arctan2(Y[keep] - sol[1], X[keep] - sol[0]))
+    # The end points carry centroid noise, which inflates the APPARENT sweep by
+    # roughly one angular sigma at each end. Allow for that before calling a
+    # sweep impossible, or the check cries wolf on every good fit.
+    rms = float(np.sqrt((res ** 2).mean()))
+    slack = 3.0 * np.degrees(rms / R)
+    out = {
+        "pole_x": sol[0], "pole_y": sol[1], "radius_px": R,
+        "plate_scale_deg_px": scale, "plate_scale_full_res": scale / a.bin,
+        "rms_px": rms,
+        "n_used": int(keep.sum()), "n_frames": len(t),
+        "rotation_sign": sign, "span_hours": (tk[-1] - tk[0]) / 3600.0,
+        "sweep_deg": float(np.degrees(np.ptp(ang))), "sweep_allowed_deg": allowed,
+        "sweep_slack_deg": float(slack),
+        "epoch": epoch, "polaris_pole_dist_deg": pd,
+    }
+    if a.json:
+        print(json.dumps(out, indent=1))
+    else:
+        print(f"pole ({out['pole_x']:.2f}, {out['pole_y']:.2f})  radius {R:.2f} px  "
+              f"rms {out['rms_px']:.2f} px  {out['n_used']}/{out['n_frames']} frames")
+        print(f"  plate scale {scale:.5f} deg/px at bin {a.bin} "
+              f"= {scale / a.bin:.5f} full-res")
+        print(f"  sweep {out['sweep_deg']:.1f} deg over {out['span_hours']:.2f} h; "
+              f"clock allows {allowed:.1f} deg"
+              + f" (+{slack:.1f} noise)"
+              + ("" if out["sweep_deg"] <= allowed + slack else "   <-- INCONSISTENT"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
