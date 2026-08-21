@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""gdrive-sync — quality-gated file-by-file backup to Google Drive.
+
+Pulls copy counts from DynamoDB, joins against astro-science's quality DB,
+and uses rclone to push the darkest single-copy frames to Google Drive.
+Tracks successful uploads in a persistent SQLite ledger snapshotted to S3.
+"""
+import os
+import sys
+import sqlite3
+import tempfile
+import subprocess
+import argparse
+from datetime import datetime, timezone
+
+try:
+    import boto3
+except ImportError:
+    boto3 = None
+
+DB_PATH = "/mnt/bigstore/astro-data/astro-storage.db"
+SCIENCE_DB = "/mnt/bigstore/astro-data/archive_quality.db"
+S3_BACKUP = "s3://astro-berrylands-eu-west-1/state/astro-storage.db"
+RCLONE_REMOTE = "gdrive:astro-backup"
+RCLONE_ROOT = "/mnt/bigstore/astro-data"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS frame_copies (
+            filename TEXT PRIMARY KEY,
+            gdrive_sync_date TEXT
+        );
+        CREATE TABLE IF NOT EXISTS night_copies (
+            night TEXT,
+            camera TEXT,
+            copies INTEGER,
+            PRIMARY KEY (night, camera)
+        );
+    """)
+    return conn
+
+def update_night_copies(conn):
+    if not boto3:
+        print("Warning: boto3 not installed, skipping DynamoDB copy counts.")
+        return
+    print("Fetching inventory from DynamoDB...")
+    try:
+        table = boto3.resource("dynamodb", region_name="eu-west-1").Table("astro-storage-inventory")
+        resp = table.scan()
+        items = resp.get("Items", [])
+    except Exception as e:
+        print(f"Warning: Failed to fetch DynamoDB inventory ({e}). Using existing copy counts.")
+        return
+
+    counts = {}
+    for item in items:
+        k = (item.get("night"), item.get("camera"))
+        counts[k] = counts.get(k, 0) + 1
+
+    conn.execute("DELETE FROM night_copies")
+    conn.executemany(
+        "INSERT INTO night_copies (night, camera, copies) VALUES (?, ?, ?)",
+        [(night, cam, c) for ((night, cam), c) in counts.items()]
+    )
+    conn.commit()
+
+def find_frames_to_sync(conn, limit):
+    if not os.path.exists(SCIENCE_DB):
+        print(f"Error: {SCIENCE_DB} not found. Has astro-science built it?")
+        sys.exit(1)
+
+    print(f"Querying best frames (limit {limit})...")
+    conn.execute(f"ATTACH DATABASE '{SCIENCE_DB}' AS science")
+    
+    cur = conn.execute(f"""
+        SELECT s.filename 
+        FROM science.frames s 
+        LEFT JOIN frame_copies c ON s.filename = c.filename 
+        LEFT JOIN night_copies n ON s.night = n.night AND s.camera = n.camera
+        WHERE s.flags = '' 
+          AND c.gdrive_sync_date IS NULL
+        ORDER BY 
+          COALESCE(n.copies, 1) ASC,
+          s.mean_adu ASC,
+          s.epoch_ms DESC
+        LIMIT {limit}
+    """)
+    return [r[0] for r in cur.fetchall()]
+
+def main():
+    parser = argparse.ArgumentParser()
+    # 4500 frames * ~4.6MB/frame is ~20GB.
+    parser.add_argument("--limit", type=int, default=4500, help="Max frames to query/sync")
+    args = parser.parse_args()
+
+    if not os.path.exists("/usr/bin/rclone") and not os.path.exists("/usr/local/bin/rclone") and subprocess.run(["which", "rclone"], capture_output=True).returncode != 0:
+        print("Error: rclone is not installed or not in PATH.")
+        sys.exit(1)
+
+    conn = init_db()
+    update_night_copies(conn)
+    frames = find_frames_to_sync(conn, args.limit)
+
+    if not frames:
+        print("No eligible frames found to sync.")
+        return
+
+    print(f"Found {len(frames)} frames to sync.")
+    
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+        for fname in frames:
+            rel_fname = fname
+            if rel_fname.startswith(RCLONE_ROOT + "/"):
+                rel_fname = rel_fname[len(RCLONE_ROOT) + 1:]
+            elif rel_fname.startswith(RCLONE_ROOT):
+                rel_fname = rel_fname[len(RCLONE_ROOT):]
+            f.write(f"{rel_fname}\n")
+        list_path = f.name
+
+    print(f"Starting rclone sync from {list_path}...")
+    cmd = [
+        "rclone", "copy", RCLONE_ROOT, RCLONE_REMOTE,
+        "--files-from", list_path,
+        "--checksum",
+        "--transfers=2",
+        "--bwlimit=2M",
+        "--fast-list",
+        "-v",
+        "--stats", "1m"
+    ]
+    
+    try:
+        # Popen to stream stdout/stderr in real time to journal
+        with subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr) as p:
+            p.wait()
+            if p.returncode == 0:
+                now = datetime.now(timezone.utc).isoformat()
+                print("Upload finished. Updating ledger...")
+                conn.executemany(
+                    "INSERT INTO frame_copies (filename, gdrive_sync_date) VALUES (?, ?)",
+                    [(f, now) for f in frames]
+                )
+                conn.commit()
+            else:
+                print(f"rclone failed with exit code {p.returncode}. Ledger not updated.")
+                print("Note: run rclone again, or check logs. No frames were marked as synced.")
+    finally:
+        os.remove(list_path)
+
+    print(f"Snapshotting ledger to {S3_BACKUP}...")
+    subprocess.run(["aws", "s3", "cp", DB_PATH, S3_BACKUP], stdout=sys.stdout, stderr=sys.stderr)
+    print("Done.")
+
+if __name__ == "__main__":
+    main()
