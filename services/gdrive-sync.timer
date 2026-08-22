@@ -1,9 +1,14 @@
 [Unit]
-Description=astro: Timer for gdrive-sync (runs every 8 hours)
+Description=astro: Timer for gdrive-sync (hourly)
 
 [Timer]
-OnCalendar=*-*-* 02,10,18:00:00
-RandomizedDelaySec=600
+# Hourly, not 3x/day: the 249 GB v3 seed is uplink-bound for days, and
+# a oneshot that is still running simply absorbs the next trigger, so
+# hourly makes the seed effectively continuous without ever overlapping.
+# In steady state a night's frames are a few hundred, so runs with
+# nothing to do exit in seconds.
+OnCalendar=hourly
+RandomizedDelaySec=300
 Persistent=true
 
 [Install]

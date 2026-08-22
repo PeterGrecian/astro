@@ -6,6 +6,13 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=peter
-ExecStart=/home/peter/astro/bin/gdrive-sync
+# --limit keeps each run's ledger commit frequent: a run records nothing
+# until its whole batch verifies, so a big batch means a lot of re-upload
+# after an interrupt. 400 frames is ~5.6 GB, ~1h at the uplink's real rate.
+# --bwlimit is a TIMETABLE, not a rate: puppy's uplink measures 2.26 MiB/s
+# uncapped (2026-08-22), so the old flat 2M cap was already line rate and
+# capping bought nothing. The lever that matters is WHEN, not how fast --
+# throttled while Peter is using the line, uncapped overnight.
+ExecStart=/home/peter/astro/bin/gdrive-sync --limit 400 --bwlimit '08:00,1M 23:00,off'
 StandardOutput=journal
 StandardError=journal
