@@ -192,6 +192,10 @@ def main():
                         help="Include the pre-v3 archive (imx219 astrocam, starcam)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Select and report frames; upload nothing, record no copies")
+    # The cap exists so a seed cannot saturate the uplink the cameras also use.
+    # "off" removes it — for measuring the real ceiling, not for routine runs.
+    parser.add_argument("--bwlimit", default="2M",
+                        help="rclone --bwlimit value, or 'off' for uncapped (default: 2M)")
     args = parser.parse_args()
 
     if subprocess.run(["which", "rclone"], capture_output=True).returncode != 0:
@@ -226,9 +230,11 @@ def main():
         cmd = [
             "rclone", "copy", root, RCLONE_REMOTE,
             "--files-from", list_path,
-            "--checksum", "--transfers=2", "--bwlimit=2M",
+            "--checksum", "--transfers=2",
             "--fast-list", "-v", "--stats", "1m",
         ]
+        if args.bwlimit != "off":
+            cmd.append(f"--bwlimit={args.bwlimit}")
         # `copy --files-from` lists the destination root and fails outright if
         # it does not exist yet — it will not create it. Harmless if present.
         subprocess.run(["rclone", "mkdir", RCLONE_REMOTE], check=False)
