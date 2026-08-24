@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""all-time-brightness — every night a camera has recorded, on one scale.
+
+`combined-brightness` answers "how was last night" for a handful of recent
+nights, in raw stops above pedestal. That axis is only honest while the
+instrument is constant, so it cannot reach back across a sensor swap: on it
+the imx219 era reads ~3.7 stops brighter than the imx708 era, which is
+instrument, not sky. (Four factors compound to ~200x in raw ADU: 8x co-add,
+6.2x exposure, 4x gain, 1.56x pixel area.)
+
+This tool answers the other question — "what has the whole run looked like"
+— and it needs a scale that survives the epochs:
+
+    cloud_index = (mean - floor) / (median_dark - floor)
+
+0 = the clearest sky that capture mode ever saw, 1 = its typical dark frame,
+>1 = cloud. Dimensionless, so it sidesteps the etendue problem that makes raw
+ADU incomparable between sensors. Anchors are MEASURED per mode from the
+archive, never taken from config — the config values are per-sensor
+calibrations for a different purpose and were wrong for this one.
+
+TWO INDEPENDENT NOTIONS OF "EPOCH", and the tool needs both:
+
+  CAPTURE MODE, read from each frame's own saturation ceiling. This is the
+  photometrically meaningful split (it is what the anchors are measured per)
+  and it is self-describing, which matters because POSINDEX is absent from
+  76% of the archive. A 10-bit sensor co-added Nx reads a ceiling of 1023*N
+  and a black level of 64*N, so both fall out of the ceiling alone.
+
+  POSITION EPOCH, from camera.json's position_registry. Some boundaries are
+  invisible in the pixels: astrocam epoch 3 is the SAME imx708 at the SAME
+  exposure as epoch 2, and differs only by a tempered-glass window worth
+  ~8% transmission (~0.12 stops). The ceiling cannot see that; the registry
+  can. Drawn as annotated boundaries so a step in the series can be read
+  against the known hardware change rather than mistaken for a bug.
+
+FLOOR-LIMITED NIGHTS ARE MARKED, NOT HIDDEN. The imx219 era has almost no
+dark-end dynamic range: its darkest nights sit 0.1-2 ADU above black in the
+co-add, against 20-24 ADU for imx708. Those troughs are censored data — the
+sensor could not resolve how dark the night got — and a few score a NEGATIVE
+cloud index, below the clearest sky the mode ever recorded. Plotting them
+unmarked would read as "exceptionally clear June nights" when it means the
+opposite: the measurement ran out of sensor.
+
+NOT CORRECTED FOR SEASON, deliberately. Per-night minimum solar altitude runs
+monotonically from -15.2 (solstice) to -25.8 (mid-August), and the sensor swap
+sits on that ramp with ZERO overlap between the eras. At 51.4N the June nights
+contain no astronomical darkness at all. So an early-vs-late comparison on this
+chart is part sky, part season, part instrument; the epoch bands and the
+headroom panel are there so the instrument part is visible rather than implied.
+
+Usage:
+    all-time-brightness --camera astrocam [--out PATH] [--publish]
+"""
+import argparse
+import csv
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.process.brightness import darkest_anchor, find_night_csvs
+
+LONDON = ZoneInfo("Europe/London")
+
+# A night whose trough sits closer than this to the electronic black level
+# was not measured so much as clipped. 2 ADU is generous for a 10-bit-derived
+# scale: the imx219 co-add's whole clear-sky range is under 10 ADU.
+FLOOR_LIMIT_ADU = 2.0
+
+MODE_COLOURS = ["#FF9500", "#007AFF", "#34C759", "#AF52DE", "#FF3B30"]
+
+
+def observing_rows(csv_path):
+    """(utc_datetime, mean, max) for frames inside the observing window.
+
+    Same 21:00-05:00 BST restriction combined-brightness uses: day captures
+    land in the same noon-to-noon CSV and read as saturated.
+    """
+    out = []
+    with open(csv_path, newline="") as f:
+        for row in csv.DictReader(f):
+            try:
+                t = datetime.fromisoformat(row["iso_utc"])
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                local = t.astimezone(LONDON)
+                if not (local.hour >= 21 or local.hour < 5):
+                    continue
+                out.append((t, float(row["mean"]), float(row["max"])))
+            except (KeyError, ValueError):
+                continue
+    out.sort()
+    return out
+
+
+def capture_mode(rows):
+    """(coadd, black_level) inferred from the frames' saturation ceiling.
+
+    A 10-bit sensor co-added Nx saturates at 1023*N and reads black at 64*N,
+    so the co-add factor is all that is needed and both fall out of it.
+
+    Keyed on the CO-ADD FACTOR, not the raw observed maximum. The observed
+    maximum is only a LOWER BOUND on the ceiling — a night where nothing
+    saturates reads below it (astrocam 2026-08-18 tops out at 1021, not
+    1023), and keying on the raw value split that night into a mode of its
+    own, whose anchors were then measured from one night against itself.
+
+    Returns None when a night mixes modes — astrocam 2026-06-09 runs single
+    1.2s subs alongside 8x co-adds in one night, and a single set of anchors
+    cannot describe both.
+    """
+    tops = sorted(c for c in {round(r[2]) for r in rows} if c >= 1000)
+    if not tops:
+        return None
+    coadds = {max(1, round((c + 1) / 1024)) for c in tops}
+    if len(coadds) > 1:
+        return None
+    coadd = coadds.pop()
+    return (coadd, 64.0 * coadd)
+
+
+def registry_epochs(cfg):
+    """[(start_date, label, note_is_photometric)] from position_registry.
+
+    The registry records boundaries the pixels cannot show — a remount, or a
+    glass element added in front of the lens.
+    """
+    reg = cfg.get("position_registry") or {}
+    out = []
+    for idx, entry in sorted(reg.items(), key=lambda kv: int(kv[0])):
+        dates = (entry.get("dates") or "").strip()
+        start = dates.split("..")[0].strip()
+        try:
+            out.append((date.fromisoformat(start), entry.get("label", idx)))
+        except ValueError:
+            continue          # open-ended "..YYYY-MM-DD" first epoch
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="output PNG (default: <frames-root>/"
+                         "brightness-all-time.png)")
+    ap.add_argument("--publish", action="store_true",
+                    help="upload to S3 as <camera>/brightness-all-time.png")
+    ap.add_argument("--window", type=float, default=600.0,
+                    help="dark-trough window in seconds (default 600, the "
+                         "same anchor nightly-cam uses for its verdict)")
+    args = ap.parse_args()
+
+    cfg = CameraConfig.load(args.camera)
+    out_path = args.out or (cfg.frames_root / "brightness-all-time.png")
+
+    # Pass 1 — per-night trough and capture mode.
+    nights, skipped = [], []
+    for night_str, csv_p in find_night_csvs(cfg):
+        rows = observing_rows(csv_p)
+        if len(rows) < 20:
+            skipped.append((night_str, f"only {len(rows)} frames in window"))
+            continue
+        mode = capture_mode(rows)
+        if mode is None:
+            skipped.append((night_str, "mixed capture modes in one night"))
+            continue
+        anchor = darkest_anchor([(t, m) for t, m, _ in rows],
+                                window_s=args.window)
+        if anchor is None:
+            skipped.append((night_str, "no dark-trough window"))
+            continue
+        try:
+            nd = date.fromisoformat(night_str)
+        except ValueError:
+            skipped.append((night_str, "unparseable night"))
+            continue
+        nights.append(dict(night=nd, trough=anchor[0], mode=mode,
+                           n=len(rows),
+                           ceiling_seen=round(max(x for _, _, x in rows)),
+                           frame_min=min(m for _, m, _ in rows)))
+    if not nights:
+        print(f"no usable nights under {cfg.frames_root}", file=sys.stderr)
+        return 1
+    nights.sort(key=lambda d: d["night"])
+
+    # Pass 2 — anchors MEASURED per capture mode, from this archive.
+    #   floor       = the darkest single frame the mode ever recorded
+    #   median_dark = the typical night's dark trough for that mode
+    modes = {}
+    # Ordered by first appearance, so the earliest era gets the first colour
+    # and the legend reads in the order the run actually happened.
+    seen = []
+    for n in nights:
+        if n["mode"] not in seen:
+            seen.append(n["mode"])
+    for m in seen:
+        same = [n for n in nights if n["mode"] == m]
+        modes[m] = dict(
+            floor=min(n["frame_min"] for n in same),
+            median_dark=float(np.median([n["trough"] for n in same])),
+            ceiling_seen=max(n["ceiling_seen"] for n in same),
+            n_nights=len(same))
+
+    for n in nights:
+        a = modes[n["mode"]]
+        span = a["median_dark"] - a["floor"]
+        n["ci"] = (n["trough"] - a["floor"]) / span if span > 0 else float("nan")
+        n["headroom"] = n["trough"] - n["mode"][1]     # ADU above black
+        n["floor_limited"] = n["headroom"] < FLOOR_LIMIT_ADU
+
+    print(f"{len(nights)} nights, {len(modes)} capture modes")
+    for m, a in modes.items():
+        coadd, black = m
+        print(f"  co-add {coadd}x  black {black:6.1f}  ceiling seen "
+              f"{a['ceiling_seen']:5d}  "
+              f"floor {a['floor']:8.2f}  median_dark {a['median_dark']:8.2f}  "
+              f"{a['n_nights']:3d} nights")
+    for night_str, why in skipped:
+        print(f"  skipped {night_str}: {why}")
+
+    # ---- plot -------------------------------------------------------------
+    fig, (ax, ax2) = plt.subplots(
+        2, 1, figsize=(14.5, 8), sharex=True,
+        gridspec_kw=dict(height_ratios=[3, 1.4], hspace=0.12))
+
+    for i, (m, a) in enumerate(modes.items()):
+        coadd, black = m
+        sel = [n for n in nights if n["mode"] == m]
+        colour = MODE_COLOURS[i % len(MODE_COLOURS)]
+        label = (f"{coadd}x co-add" if coadd > 1 else "single sub") + \
+                f" (ceiling {a['ceiling_seen']})"
+        # Clip only for display: a negative index means floor-limited, which
+        # the crosses already call out.
+        ax.plot([n["night"] for n in sel],
+                [max(n["ci"], 0.02) for n in sel],
+                "o-", color=colour, ms=5, lw=1.2, label=label)
+        ax2.plot([n["night"] for n in sel], [n["headroom"] for n in sel],
+                 "o-", color=colour, ms=4, lw=1.2)
+
+    fl = [n for n in nights if n["floor_limited"]]
+    if fl:
+        ax.plot([n["night"] for n in fl], [max(n["ci"], 0.02) for n in fl],
+                "x", color="#FF3B30", ms=11, mew=2.2, ls="none", zorder=5,
+                label=f"floor-limited (<{FLOOR_LIMIT_ADU:g} ADU above black)")
+        ax2.plot([n["night"] for n in fl], [n["headroom"] for n in fl],
+                 "x", color="#FF3B30", ms=10, mew=2.0, ls="none", zorder=5)
+
+    ax.axhline(1.0, color="#8E8E93", ls=":", lw=1)
+    ax.set_yscale("log")
+    ax.set_ylabel("cloud index at the night's dark trough")
+    ax.set_title(
+        f"{cfg.name} — all {len(nights)} nights on one photometric scale\n"
+        "cloud_index = (mean - floor) / (median_dark - floor), "
+        "anchors measured per capture mode; season NOT corrected")
+
+    # Registry boundaries: hardware changes the pixels may not reveal.
+    span_lo, span_hi = nights[0]["night"], nights[-1]["night"]
+    for start, label in registry_epochs(cfg):
+        if not (span_lo <= start <= span_hi):
+            continue
+        for a_ in (ax, ax2):
+            a_.axvline(start, color="#2C2C2E", ls="--", lw=1.2, alpha=0.8)
+        ax.annotate(f" {label}", xy=(start, ax.get_ylim()[1]),
+                    ha="left", va="top", fontsize=9, color="#2C2C2E")
+
+    ax2.set_yscale("log")
+    ax2.set_ylabel("ADU above black\n(dark-end range)")
+    ax2.set_xlabel("night")
+    ax2.axhline(FLOOR_LIMIT_ADU, color="#FF3B30", ls=":", lw=1)
+    for a_ in (ax, ax2):
+        a_.grid(alpha=0.3)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9,
+              borderaxespad=0.0, title="capture mode", title_fontsize=8)
+    fig.autofmt_xdate()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    # bbox_inches="tight" rather than tight_layout(): the legend is anchored
+    # outside the axes, which tight_layout cannot account for.
+    fig.savefig(out_path, dpi=110, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"wrote {out_path}")
+
+    if args.publish:
+        from astro.present import privacy as P
+        # Plot carries no camera pixels — privacy-safe by construction,
+        # same argument as combined-brightness.
+        if getattr(cfg, "privacy", None):
+            P.mark_ok(out_path)
+        import boto3
+        bucket = cfg.s3["bucket"]
+        cam_prefix = cfg.s3["prefix"].removesuffix("/nights")
+        key = f"{cam_prefix}/brightness-all-time.png"
+        boto3.client("s3").upload_file(
+            str(out_path), bucket, key,
+            ExtraArgs={"ContentType": "image/png"})
+        print(f"uploaded s3://{bucket}/{key}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

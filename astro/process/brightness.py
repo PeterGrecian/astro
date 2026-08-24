@@ -125,6 +125,47 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     plt.close(fig)
 
 
+def find_night_csvs(cfg):
+    """Yield (night_str, csv_path) for every per-night brightness CSV.
+
+    Three layouts are live at once, so this is the single place that
+    knows them. Lifted out of bin/combined-brightness 2026-08-24 when
+    bin/all-time-brightness needed the same walk — the edge cases below
+    are the kind that rot if copied.
+    """
+    name = "brightness.csv"
+    # Canonical layout: <root>/YYYY/MM/DD/<camera>/brightness.csv
+    if cfg.night_layout == "canonical":
+        root = cfg.frames_root
+        if root.exists():
+            for y in sorted(p for p in root.iterdir() if p.name.isdigit()):
+                for m in sorted(p for p in y.iterdir() if p.name.isdigit()):
+                    for d in sorted(p for p in m.iterdir() if p.name.isdigit()):
+                        csv_p = d / cfg.name / name
+                        if csv_p.exists():
+                            yield f"{y.name}-{m.name}-{d.name}", csv_p
+        return
+    nights_root = cfg.frames_root / "night"
+    if not nights_root.exists():
+        # astrocam-style flat layout: look directly under frames_root
+        for d in sorted(cfg.frames_root.iterdir()):
+            csv_p = d / name
+            if csv_p.exists() and d.name[:4].isdigit():
+                yield d.name, csv_p
+        return
+    # percam legacy tree: brightness.csv lives at the night level. Naming
+    # changed mid-migration — newer nights use plain "brightness.csv",
+    # older ones the subcam-prefixed "<subcam>_brightness.csv" (e.g.
+    # v3w_brightness.csv). Accept both so pre-migration reference nights
+    # (e.g. the dark 2026-06-10) still plot.
+    subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
+    for d in sorted(nights_root.iterdir()):
+        for cand in (d / name, d / f"{subcam}_{name}"):
+            if cand.exists():
+                yield d.name, cand
+                break
+
+
 def darkest_anchor(times_per_s, window_s: float = 600.0):
     """The median brightness over the darkest contiguous `window_s`
     of the night — the "typical dark frame" anchor. Returns

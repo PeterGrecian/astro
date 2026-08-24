@@ -6,6 +6,13 @@ Reads every per-night brightness CSV for a camera under the camera's
 frames_root, computes stops above the per-night pedestal, and plots
 one line per night onto a single PNG.
 
+Each night's legend entry carries its dark-trough index: the stops above
+pedestal of its darkest 10-minute window, via the same darkest_anchor that
+nightly-cam uses for the clear/cloudy verdict. Lower means a darker sky.
+It replaced a single clear/cloudy threshold line (2026-08-24) — the line
+drew the cut, the index reports the measurement the cut is made on, per
+night and graded rather than binary.
+
 Designed to be called once per `publish-night-cam` run so the combined
 view is always current. Lands as a single fixed-key S3 object — no per-
 night keys, no presigning lifetime concerns for the website.
@@ -31,43 +38,9 @@ from matplotlib.ticker import FuncFormatter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
+from astro.process.brightness import darkest_anchor, find_night_csvs
 
 LONDON = ZoneInfo("Europe/London")
-
-
-def find_nights(cfg):
-    """Yield (night_str, csv_path) for every per-night brightness CSV."""
-    name = "brightness.csv"
-    # Canonical layout: <root>/YYYY/MM/DD/<camera>/brightness.csv
-    if cfg.night_layout == "canonical":
-        root = cfg.frames_root
-        if root.exists():
-            for y in sorted(p for p in root.iterdir() if p.name.isdigit()):
-                for m in sorted(p for p in y.iterdir() if p.name.isdigit()):
-                    for d in sorted(p for p in m.iterdir() if p.name.isdigit()):
-                        csv_p = d / cfg.name / name
-                        if csv_p.exists():
-                            yield f"{y.name}-{m.name}-{d.name}", csv_p
-        return
-    nights_root = cfg.frames_root / "night"
-    if not nights_root.exists():
-        # astrocam-style flat layout: look directly under frames_root
-        for d in sorted(cfg.frames_root.iterdir()):
-            csv_p = d / name
-            if csv_p.exists() and d.name[:4].isdigit():
-                yield d.name, csv_p
-        return
-    # percam legacy tree: brightness.csv lives at the night level. Naming
-    # changed mid-migration — newer nights use plain "brightness.csv",
-    # older ones the subcam-prefixed "<subcam>_brightness.csv" (e.g.
-    # v3w_brightness.csv). Accept both so pre-migration reference nights
-    # (e.g. the dark 2026-06-10) still plot.
-    subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
-    for d in sorted(nights_root.iterdir()):
-        for cand in (d / name, d / f"{subcam}_{name}"):
-            if cand.exists():
-                yield d.name, cand
-                break
 
 
 def load_curve(csv_path: Path):
@@ -109,6 +82,25 @@ def to_anchor_axis(times, night_str: str):
     return out
 
 
+def dark_trough_stops(times_local, signal, window_s: float = 600.0):
+    """Stops above pedestal of the night's darkest `window_s` window.
+
+    The same dark-trough anchor `nightly-cam` uses for the clear/cloudy
+    verdict (astro.process.brightness.darkest_anchor, so the window
+    definition cannot drift apart from it) — reported here as a per-night
+    number instead of a threshold line. Lower means a darker sky.
+
+    Fed pedestal-subtracted mean ADU rather than the per_s that nightly-cam
+    passes. At the fixed exposure and gain a night is captured with, the two
+    are proportional, so the darkest window is the same one; and stops is
+    log2(mean - pedestal) either way, matching nightly-cam's anchor_stops.
+    """
+    best = darkest_anchor(list(zip(times_local, signal)), window_s=window_s)
+    if best is None:
+        return None
+    return math.log2(max(best[0], 0.5))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
@@ -118,11 +110,11 @@ def main():
     ap.add_argument("--publish", action="store_true",
                     help="upload to S3 as <camera>/brightness-combined.png "
                          "(no per-night prefix; one key)")
-    ap.add_argument("--recent", "--limit", type=int, default=3,
+    ap.add_argument("--recent", "--limit", type=int, default=6,
                     dest="recent",
-                    help="plot the N most recent nights (default 3) — "
+                    help="plot the N most recent nights (default 6) — "
                          "plus the camera.json reference_nights baseline, "
-                         "so the chart stays uncluttered (~4 lines)")
+                         "for a total of 7 curves")
     ap.add_argument("--nights", default=None,
                     help="comma-separated YYYY-MM-DD nights to ALWAYS "
                          "include (e.g. a known dark reference night), "
@@ -141,7 +133,7 @@ def main():
             args.nights = ",".join(ref_cfg)
     out_path = args.out or (cfg.frames_root / "brightness-combined.png")
 
-    all_nights = sorted(find_nights(cfg), key=lambda nc: nc[0])
+    all_nights = sorted(find_night_csvs(cfg), key=lambda nc: nc[0])
     if not all_nights:
         print(f"no per-night brightness CSVs under {cfg.frames_root}",
               file=sys.stderr)
@@ -201,25 +193,33 @@ def main():
         # Use small positive floor for the log: signal at or below
         # pedestal becomes ~0 stops, not a -10 clip artefact.
         signal = np.maximum(vals - pedestal, 0.5)
+        # Per-night dark-trough index, shown in the legend. Replaces the
+        # clear/cloudy threshold line that used to be drawn here: the line
+        # was the cut, this is the measurement it was cutting on, graded
+        # rather than binary and readable straight off the y-axis.
+        trough = dark_trough_stops(times, signal)
+        idx = f"  {trough:5.2f}" if trough is not None else "      -"
         xs = to_anchor_axis(times, night_str)
         is_latest = night_str == latest_night
         is_ref = night_str in ref_set
         if is_latest:
             style = dict(linewidth=2.0, linestyle="--", color="black",
-                         zorder=6, label=f"{night_str} (latest)")
+                         zorder=6, label=f"{night_str} (latest){idx}")
         elif is_ref:
             style = dict(linewidth=1.4, linestyle="--", color=cmap(i % 10),
-                         zorder=5, label=f"{night_str} (ref)")
+                         zorder=5, label=f"{night_str} (ref){idx}")
         else:
             style = dict(linewidth=1.0, linestyle="-", color=cmap(i % 10),
-                         zorder=2, label=night_str)
+                         zorder=2, label=f"{night_str}{idx}")
         # Plot as a thin line (1-min cadence is dense enough that points
         # would overlap into a smear). gapcolor=None keeps any frame-
         # less stretches visibly broken rather than interpolated.
         ax.plot(xs, signal, solid_joinstyle="round", **style)
         plotted += 1
         tag = "  [latest]" if is_latest else ("  [ref]" if is_ref else "")
-        print(f"  {night_str}: {len(times)} pts  pedestal={pedestal:.0f}{tag}")
+        t_str = f"{trough:.2f}" if trough is not None else "-"
+        print(f"  {night_str}: {len(times)} pts  pedestal={pedestal:.0f}  "
+              f"dark-trough={t_str} stops{tag}")
 
     if not plotted:
         print("no curves plotted", file=sys.stderr)
@@ -228,24 +228,14 @@ def main():
     ax.set_yscale("log", base=2)
     ax.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
-    # Sky-clear ceiling: nights whose darkest 10-min anchor sits above
-    # this line are flagged "cloudy" (see SKY_CLEAR_MAX_STOPS in
-    # bin/nightly-cam). Curves spending the night below this line are
-    # genuinely dark. Per-sensor: "stops above pedestal" depends on bit
-    # depth/pedestal, so the cloud line differs by camera (astrocam ~4,
-    # v3w ~10). Read from camera.json, fall back to 10.
-    SKY_CLEAR_MAX_STOPS = float(cfg.get("sky_clear_max_stops") or 10.0)
-    ax.axhline(2 ** SKY_CLEAR_MAX_STOPS, color="#888", linestyle="--",
-               linewidth=1.0, alpha=0.7)
-    ax.text(0.99, 0.50, f"clear/cloudy: +{SKY_CLEAR_MAX_STOPS:.0f}",
-            transform=ax.transAxes, ha="right", va="bottom",
-            fontsize=8, color="#666")
     ax.set_xlabel("local time (BST)")
     ax.set_ylabel("stops above pedestal")
     title_cam = cfg.name.split("-", 1)[-1] if "-" in cfg.name else cfg.name
     n_ref = len(ref_set & {n for n, _ in nights})
+    # `plotted` already counts the reference nights, so "+N" would read as
+    # a total of plotted+N. State the split instead.
     title = (f"{title_cam} — {plotted} nights"
-             + (f" (+{n_ref} reference)" if n_ref else ""))
+             + (f", {n_ref} of them reference" if n_ref else ""))
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
@@ -256,7 +246,11 @@ def main():
         datetime.combine(anchor_date, time(22, 0), tzinfo=LONDON),
         datetime.combine(anchor_date + timedelta(days=1),
                          time(5, 0), tzinfo=LONDON))
-    ax.legend(loc="upper right", fontsize=9)
+    # Outside the axes: with 7 entries plus a title the box is tall enough
+    # to sit on top of the dawn rise if left inside the plot.
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9,
+              title="dark trough\n(stops, lower = darker)",
+              title_fontsize=8, borderaxespad=0.0)
     fig.autofmt_xdate()
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
