@@ -39,6 +39,8 @@
       "plate_scale_notes": "Module 3 Wide, 102 deg horizontal / 2304 px at the half-res capture mode in use (native 4608x2592)."
     }
   },
+  "rotate_180": false,
+  "rotate_180_notes": "Camera sensor is physically mounted upside down. In-capture 180° rotation is applied so stored frames are right-side up. No downstream rotation in processing.",
   "processing_host": "eclipticam",
   "s3": {"bucket": "astro-berrylands-eu-west-1", "prefix": "eclipticam/nights"},
   "occlusion_file": null,
