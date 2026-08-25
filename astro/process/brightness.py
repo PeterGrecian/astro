@@ -149,24 +149,28 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     # bin/combined-brightness admits h >= 21 in its observing-window
     # filter, so 21:00 also makes the per-night and multi-night charts
     # agree on where the night starts.
+    # BOTH EDGES ARE DYNAMIC (Peter, 2026-08-25): the whole hour either
+    # side of the data actually present, rather than a fixed window.
+    #
+    # This supersedes both the old hard 22:00->05:00 frame and the fixed
+    # 21:00 that briefly replaced its left edge. A fixed frame is wrong in
+    # both directions at once: 05:00 clipped the dawn rise mid-climb on
+    # nights that ran past it, and any fixed left edge is a midwinter bug
+    # in waiting, because capture tracks the sun and starts hours earlier
+    # in December than in August. Deriving the frame from the data cannot
+    # clip and cannot leave a broad empty margin on a short night.
+    #
+    # Late-August nights land on 21:00 of their own accord (frames start
+    # ~21:12), so this gives the 9pm start that prompted the change while
+    # still being right in every other season.
     start = datetime.combine(night_date, time(21, 0), tzinfo=LONDON)
     end = datetime.combine(night_date + timedelta(days=1),
                            time(5, 0), tzinfo=LONDON)
-    # 21:00/05:00 is the MINIMUM frame, not the whole story: snap out to
-    # the whole hour either side of the actual data so nothing is ever
-    # drawn off-canvas. Two reasons this matters beyond tidiness:
-    #  * the right edge was a hard 05:00 while frames ran past it, so the
-    #    dawn rise was being clipped mid-climb;
-    #  * capture tracks the sun, so in midwinter it starts hours before
-    #    21:00 — a fixed left edge would silently clip the whole evening.
-    # Widening only (min/max) keeps the familiar 21:00-05:00 look on a
-    # normal summer night, where the data sits inside it.
     if times:
         first, last = min(times), max(times)
-        start = min(start, first.replace(minute=0, second=0, microsecond=0))
+        start = first.replace(minute=0, second=0, microsecond=0)
         floor_last = last.replace(minute=0, second=0, microsecond=0)
-        end = max(end, floor_last + timedelta(hours=1)
-                  if floor_last < last else last)
+        end = floor_last + timedelta(hours=1) if floor_last < last else last
     ax.set_xlim(start, end)
     # Mark the time-range of frames that entered max/min/sum stacks.
     # These bounds come from nightly-cam's anchor-band gate; everything

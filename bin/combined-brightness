@@ -184,6 +184,7 @@ def main():
     latest_night = nights[-1][0] if nights else None
 
     plotted = 0
+    x_seen = []          # anchor-axis extent actually drawn, for set_xlim
     for i, (night_str, csv_p) in enumerate(nights):
         times, vals = load_curve(csv_p)
         if times is None:
@@ -222,6 +223,7 @@ def main():
         # would overlap into a smear). gapcolor=None keeps any frame-
         # less stretches visibly broken rather than interpolated.
         ax.plot(xs, signal, solid_joinstyle="round", **style)
+        x_seen.append((min(xs), max(xs)))
         plotted += 1
         tag = "  [latest]" if is_latest else ("  [ref]" if is_ref else "")
         t_str = f"{trough:.2f}" if trough is not None else "-"
@@ -249,17 +251,27 @@ def main():
     ax.xaxis.set_major_formatter(
         mdates.DateFormatter("%H:%M", tz=LONDON))
     anchor_date = datetime(2000, 1, 1).date()
-    # Left edge 21:00 to match in_observing_window()'s `h >= 21` above.
-    # These two disagreed until 2026-08-25: the filter admitted points
-    # from 21:00 but the axis started at 22:00, so an hour of admitted
-    # data was drawn off-canvas — the earliest measurements of every
-    # night, which is exactly where capture starting is visible (frames
-    # begin ~21:12 local in late August). Keep the two in step: if the
-    # window filter changes, this edge changes with it.
-    ax.set_xlim(
-        datetime.combine(anchor_date, time(21, 0), tzinfo=LONDON),
-        datetime.combine(anchor_date + timedelta(days=1),
-                         time(5, 0), tzinfo=LONDON))
+    # Both edges derived from the curves actually drawn, snapped out to
+    # the whole hour — same rule as the per-night chart. Until 2026-08-25
+    # this was a hard 22:00 while _in_observing_window() admitted points
+    # from 21:00, so an hour of admitted data was drawn off-canvas: the
+    # earliest measurements of every night, which is exactly where capture
+    # starting is visible. Deriving the frame from the data means the two
+    # cannot drift apart again.
+    #
+    # NOTE the remaining seasonal limit is now _in_observing_window()'s
+    # `h >= 21 or h < 5`, not this axis. That filter exists to drop
+    # saturated day frames, but it is written in clock hours, so in
+    # midwinter — when capture starts nearer 17:00 — it will discard real
+    # evening data before this axis ever sees it. Excluding by saturation
+    # or sun altitude rather than by hour is the fix; not done here
+    # because it changes what the chart measures, not just its frame.
+    lo = min(a for a, _ in x_seen)
+    hi = max(b for _, b in x_seen)
+    lo = lo.replace(minute=0, second=0, microsecond=0)
+    hi_floor = hi.replace(minute=0, second=0, microsecond=0)
+    hi = hi_floor + timedelta(hours=1) if hi_floor < hi else hi
+    ax.set_xlim(lo, hi)
     # Outside the axes: with 7 entries plus a title the box is tall enough
     # to sit on top of the dawn rise if left inside the plot.
     ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9,
