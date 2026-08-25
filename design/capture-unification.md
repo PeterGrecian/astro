@@ -296,6 +296,23 @@ through use, not through up-front design.
    new one has shown a full week of clean output. Don't refactor in
    place.
 
+## Storage and Buffering Architecture (ramfs / tmpfs vs direct storage)
+
+The historical role of an intermediate RAM buffer (`/var/lib/*-buffer` tmpfs) differs across instruments, but streaming mode fundamentally changes the latency and buffering requirements:
+
+1. **astrocam (NFS mount storage):**
+   - Uses NFS mounts directly to `muppet`'s `bigstore`.
+   - Originally used a local `tmpfs` buffer under the assumption of requiring low-latency writes to decouple capture from network I/O.
+   - **Streaming reality:** In streaming mode, Picamera2/libcamera buffers frame requests internally in memory, and with ~60s exposure cadences, there is ample wall-clock time between frame deliveries (~55s) for synchronous network writes. The separate `tmpfs` buffer is therefore probably not needed for latency.
+
+2. **eclipticam (local fast SSD storage):**
+   - Uses a local fast SSD (`/mnt/ssd`) for night capture, forwarding/shipping the completed night tree to central storage at the end of the night.
+   - Also operates in streaming mode.
+   - **Streaming reality:** Because writes land directly on local SSD flash and streaming mode provides internal driver buffering, eclipticam **definitely does not need ramfs/tmpfs** for capture latency or throughput.
+
+3. **Risk of brittle RAM buffers:**
+   - Staging to a constricted `tmpfs` (e.g. 50 MB) creates a severe point of failure: if an uploader service experiences a startup race (e.g. waiting for USB SSD enumeration) or network stall, the buffer exhausts in ~4 frames, fatally crashing compression worker threads while masking the failure from systemd.
+
 ## Open questions
 
 - Does `host.json` belong in the per-host repo dir (eg `eclipticam/`)

@@ -267,6 +267,7 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         if cfg.position_index is not None:
             h["POSINDEX"] = (cfg.position_index,
                              "camera/lens generation (camera.json position_index)")
+        h["ROWORDER"] = ("TOP-DOWN", "row 0 is sky-top / right-side up")
         h["MEAN"] = mean
         h["PER_S"] = per_s
         if lp_cmd is not None:   # focus-dither run: record the per-frame focus
