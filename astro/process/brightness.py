@@ -99,10 +99,20 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
     ax.xaxis.set_major_formatter(
         mdates.DateFormatter("%H:%M", tz=LONDON))
-    # 22:00 (night N) -> 05:00 next morning, matching bin/plot-brightness:
-    # the 05:00 BST cover-close.service safety close is the rightmost event
-    # we expect to see.
-    start = datetime.combine(night_date, time(22, 0), tzinfo=LONDON)
+    # 21:00 (night N) -> 05:00 next morning. The 05:00 local cover-close
+    # safety close is the rightmost event we expect to see.
+    #
+    # LEFT EDGE IS 21:00, NOT 22:00 (changed 2026-08-25, Peter): capture
+    # starts when the sun reaches the camera's night altitude, which in
+    # late August is ~20:12 UTC = 21:12 local — so a 22:00 left edge
+    # silently CLIPPED the first ~48 min of every night, including the
+    # steep twilight fall-off where the measurements visibly begin.
+    # Verified the same on both published cameras (astrocam and
+    # eclipticam-v3w both first-framed at 20:12:04 UTC on 2026-08-24).
+    # bin/combined-brightness admits h >= 21 in its observing-window
+    # filter, so 21:00 also makes the per-night and multi-night charts
+    # agree on where the night starts.
+    start = datetime.combine(night_date, time(21, 0), tzinfo=LONDON)
     end = datetime.combine(night_date + timedelta(days=1),
                            time(5, 0), tzinfo=LONDON)
     ax.set_xlim(start, end)

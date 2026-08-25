@@ -242,8 +242,15 @@ def main():
     ax.xaxis.set_major_formatter(
         mdates.DateFormatter("%H:%M", tz=LONDON))
     anchor_date = datetime(2000, 1, 1).date()
+    # Left edge 21:00 to match in_observing_window()'s `h >= 21` above.
+    # These two disagreed until 2026-08-25: the filter admitted points
+    # from 21:00 but the axis started at 22:00, so an hour of admitted
+    # data was drawn off-canvas — the earliest measurements of every
+    # night, which is exactly where capture starting is visible (frames
+    # begin ~21:12 local in late August). Keep the two in step: if the
+    # window filter changes, this edge changes with it.
     ax.set_xlim(
-        datetime.combine(anchor_date, time(22, 0), tzinfo=LONDON),
+        datetime.combine(anchor_date, time(21, 0), tzinfo=LONDON),
         datetime.combine(anchor_date + timedelta(days=1),
                          time(5, 0), tzinfo=LONDON))
     # Outside the axes: with 7 entries plus a title the box is tall enough

@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""replot-brightness — re-render per-night brightness.png from archived CSVs.
+
+WHY THIS EXISTS
+---------------
+The per-night brightness chart is the one deliverable that is a pure
+function of `brightness.csv`, which is kept forever. So when the PLOT
+changes — axis range, styling, a new marker — every night in the archive
+can be brought up to date without touching a single frame. Re-running
+`nightly-cam` would re-measure and re-stack hundreds of full-res frames
+per night to arrive at exactly the same CSV; this reads the CSV and
+redraws. Seconds per night instead of minutes.
+
+Built 2026-08-25 when the chart's left edge moved 22:00 -> 21:00 (capture
+starts ~21:12 local in late August, so 22:00 clipped the first ~48 min of
+every night — the part where the measurements visibly begin).
+
+This is the "models improve, so reprocess the archive" pattern applied to
+the cheapest case: the presentation layer. It does NOT recompute anything
+scientific — same CSV in, same numbers out, only the rendering changes.
+
+USAGE
+  replot-brightness --camera eclipticam-v3w                # all nights, local only
+  replot-brightness --camera astrocam --publish            # all nights -> S3
+  replot-brightness --camera astrocam --night 2026-08-24   # one night
+  replot-brightness --camera astrocam --publish --dry-run  # show, don't write
+
+Night selection defaults to every night `find_night_csvs` can see for the
+camera (that helper is the single place that knows the three live
+directory layouts). Run it where the frames are: muppet for astrocam and
+the eclipticam archive, or on eclipticam itself for its local nights.
+"""
+from __future__ import annotations
+
+import argparse
+import csv as csvmod
+import json
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from astro.config import CameraConfig
+from astro.process import brightness
+from astro.present import privacy as P
+from astro.present.publish import publish_night
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", required=True,
+                    help="camera name, e.g. astrocam / eclipticam-v3w")
+    ap.add_argument("--night", action="append", default=None,
+                    help="night YYYY-MM-DD (repeatable). Default: all "
+                         "nights that have a brightness.csv.")
+    ap.add_argument("--publish", action="store_true",
+                    help="upload each re-rendered brightness.png to S3 "
+                         "under <prefix>/<night>/")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="say what would be written/uploaded; change nothing")
+    return ap.parse_args()
+
+
+def read_rows(csv_path: Path):
+    """Rows in astro.process.brightness.measure() order.
+
+    plot_night indexes positionally (r[1] = iso_utc, r[3] = mean), so
+    hand it raw CSV rows rather than the (time, mean) pairs read_csv
+    returns — same file, different shape.
+    """
+    with open(csv_path, newline="") as f:
+        r = csvmod.reader(f)
+        header = next(r, None)
+        if header is None:
+            return []
+        return [row for row in r if len(row) >= 4]
+
+
+def main() -> int:
+    args = parse_args()
+    cfg = CameraConfig.load(args.camera)
+
+    wanted = set(args.night) if args.night else None
+    nights = [(n, p) for n, p in brightness.find_night_csvs(cfg)
+              if wanted is None or n in wanted]
+    if not nights:
+        sys.stderr.write(
+            f"{args.camera}: no brightness CSVs found"
+            + (f" for {sorted(wanted)}" if wanted else "")
+            + f" under {cfg.frames_root}\n")
+        return 2
+    if wanted:
+        missing = wanted - {n for n, _ in nights}
+        for n in sorted(missing):
+            sys.stderr.write(f"  {n}: no brightness.csv, skipping\n")
+
+    pedestal = cfg.get("pedestal")
+    ok = failed = 0
+    for night, csv_path in nights:
+        # Mid-migration nights carry a subcam prefix ("v3w_brightness.csv");
+        # keep the png's name in step with its csv so publish finds it.
+        stem = csv_path.name.removesuffix("brightness.csv")
+        png = csv_path.parent / f"{stem}brightness.png"
+
+        rows = read_rows(csv_path)
+        if not rows:
+            sys.stderr.write(f"  {night}: empty CSV, skipping\n")
+            failed += 1
+            continue
+
+        # Keep the orange stacked-window markers if the night recorded them.
+        window = None
+        summary = csv_path.parent / f"{stem}summary.json"
+        if summary.exists():
+            try:
+                window = json.loads(summary.read_text()).get(
+                    "stacked_window_utc")
+            except (OSError, ValueError):
+                window = None
+
+        if args.dry_run:
+            print(f"  {night}: would replot {len(rows)} pts -> {png}")
+            ok += 1
+            continue
+
+        try:
+            brightness.plot_night(rows, night, cfg.name, png,
+                                  pedestal=pedestal,
+                                  stacked_window_utc=window)
+        except Exception as e:                      # noqa: BLE001
+            sys.stderr.write(f"  {night}: plot failed: {e}\n")
+            failed += 1
+            continue
+        # No camera pixels in a plot — privacy-safe by construction, but
+        # publish_night refuses unmarked images, so mark it.
+        if getattr(cfg, "privacy", None):
+            P.mark_ok(png)
+        print(f"  {night}: {len(rows)} pts -> {png.name}")
+        ok += 1
+
+        if args.publish:
+            try:
+                publish_night(cfg, night, [png])
+            except Exception as e:                  # noqa: BLE001
+                sys.stderr.write(f"  {night}: publish failed: {e}\n")
+                failed += 1
+
+    verb = "would replot" if args.dry_run else "replotted"
+    print(f"{cfg.name}: {verb} {ok} night(s)"
+          + (f", {failed} failed" if failed else "")
+          + (" and published" if args.publish and not args.dry_run else ""))
+    # Loud about partial failure: a backfill that silently skipped nights
+    # looks identical to one that had nothing to do.
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
