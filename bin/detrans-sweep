@@ -244,6 +244,24 @@ def main():
         base = cfg.frames_root / "night" / args.night / "v3w"
         fs = [p for p in glob.glob(str(base / "*" / "*.fits.fz"))
               if Path(p).parent.name.isdigit()]
+    # Drop TORN frames before anything tries to open them. A 0-byte
+    # .fits.fz is never a valid capture — it is a write that was in
+    # flight when the store went away (eclipticam 2026-08-24T23:50:28Z,
+    # 36 s before its USB-SATA link dropped and the SSD re-enumerated;
+    # the page write was lost and the file left empty). astropy raises
+    # OSError("Empty or corrupt FITS file") on such a file, which used
+    # to abort the whole sweep and cost the night its detrans
+    # deliverables — while nightly-cam happily stacked the other 263.
+    # Skip them, but say so: a silently-dropped frame is how a capture
+    # fault gets mistaken for a quiet night.
+    torn = [p for p in fs if os.path.getsize(p) == 0]
+    if torn:
+        fs = [p for p in fs if os.path.getsize(p) > 0]
+        sys.stderr.write(
+            f"skipping {len(torn)} torn (0-byte) frame(s) — "
+            f"incomplete writes, not usable capture:\n")
+        for p in torn:
+            sys.stderr.write(f"  {p}\n")
     if not fs:
         sys.stderr.write("no frames found\n")
         return 2

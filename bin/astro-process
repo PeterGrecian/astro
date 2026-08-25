@@ -7,11 +7,16 @@ the deliverables pipeline (`bin/publish-night-cam --camera <name>
 --night <YYYY-MM-DD>`) and resets the flag.
 
 Production: runs as `astro-process.service` on the CPU host that has
-the frames locally — currently always **puppy** (the Pis write to
-puppy's NFS; a Pi running stage 3 reads frames back over NFS, ~13x
-slower, so the Pis do stage 1 + capture only — they can't do the
-pipeline calculation until they get their own local storage). Which
-cameras a host processes is gated by that host's
+the frames locally. The rule is storage locality, not a fixed host —
+reading frames back over NFS on a weak CPU was ~13x slower (astrocam
+backfill, 2026-06-20), so a camera processes wherever its frames
+already are. As of 2026-08:
+
+    eclipticam-v1 / eclipticam-v3w   ON eclipticam (its own SSD)
+    astrocam                         ON muppet     (bigstore)
+    puppy                            no cameras (service disabled)
+
+Which cameras a host processes is gated by that host's
 `/etc/default/astro-process` `CAMERAS` list, NOT by `processing.host`
 in camera.json — that field is intent/documentation; the dispatcher
 does not read it. So a camera only processes on the host whose env
