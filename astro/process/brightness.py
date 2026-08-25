@@ -27,6 +27,39 @@ HEADER = ["epoch_ms", "iso_utc", "filename",
 
 BRIGHT_PIXEL_THRESHOLD = 500
 
+# --- raw bit-alignment -------------------------------------------------
+# The Pi 5 ISP hands back 10-bit sensor raw left-shifted by 6 bits into a
+# 16-bit container, so a frame reads either LSB-aligned (black ~64-76 ADU)
+# or MSB-aligned (black ~4100-4900 = 64x). Which one you get has varied
+# over the archive: of eclipticam-v3w's 76 nights, 9 are MSB-aligned
+# (2026-06-09..13, 06-22, 08-17..19) and 67 are LSB — scattered, NOT a
+# clean "before date X" boundary, so a date table would be wrong. Detect
+# it from the data instead, the same self-describing trick
+# bin/all-time-brightness uses for capture mode.
+#
+# Verified 2026-08-25: dividing each MSB night's series by 64 lands it
+# squarely inside the LSB population (06-12 min 4574.4 -> 71.5; 08-17
+# 4696.0 -> 73.4; 08-18 6249.1 -> 97.6, a night independently known to be
+# 100% cloud) against an LSB range of 71.8-76. Left unnormalised these
+# nights plot ~7.5 stops high and read as a sky 180x brighter than it was.
+MSB_ALIGN_FACTOR = 64.0
+MSB_ALIGN_MIN_ADU = 1000.0
+
+
+def lsb_align(vals):
+    """Normalise a night's mean-ADU series to LSB alignment.
+
+    Returns (values, was_msb). Decided on the series MINIMUM, not the
+    mean: the darkest frame is the closest thing to the sensor floor and
+    is the least sensitive to how bright the night actually was. The two
+    populations are three orders of magnitude apart, so the 1000 ADU cut
+    is nowhere near either of them.
+    """
+    vals = np.asarray(vals, dtype=float)
+    if vals.size == 0 or float(vals.min()) <= MSB_ALIGN_MIN_ADU:
+        return vals, False
+    return vals / MSB_ALIGN_FACTOR, True
+
 
 def measure(arr, t_utc: datetime, path: Path):
     """One CSV row for a frame already in memory."""
@@ -78,6 +111,10 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     gridline is one stop of real signal."""
     times = [datetime.fromisoformat(r[1]).astimezone(LONDON) for r in rows]
     vals = np.array([float(r[3]) for r in rows])
+    # Put MSB-aligned nights on the same ADU scale as everything else, so
+    # the fixed pedestal from camera.json means the same thing on every
+    # chart (see lsb_align).
+    vals, _was_msb = lsb_align(vals)
     if pedestal is None:
         pedestal = float(np.percentile(vals, 1))
     pedestal = float(pedestal)
@@ -115,6 +152,21 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     start = datetime.combine(night_date, time(21, 0), tzinfo=LONDON)
     end = datetime.combine(night_date + timedelta(days=1),
                            time(5, 0), tzinfo=LONDON)
+    # 21:00/05:00 is the MINIMUM frame, not the whole story: snap out to
+    # the whole hour either side of the actual data so nothing is ever
+    # drawn off-canvas. Two reasons this matters beyond tidiness:
+    #  * the right edge was a hard 05:00 while frames ran past it, so the
+    #    dawn rise was being clipped mid-climb;
+    #  * capture tracks the sun, so in midwinter it starts hours before
+    #    21:00 — a fixed left edge would silently clip the whole evening.
+    # Widening only (min/max) keeps the familiar 21:00-05:00 look on a
+    # normal summer night, where the data sits inside it.
+    if times:
+        first, last = min(times), max(times)
+        start = min(start, first.replace(minute=0, second=0, microsecond=0))
+        floor_last = last.replace(minute=0, second=0, microsecond=0)
+        end = max(end, floor_last + timedelta(hours=1)
+                  if floor_last < last else last)
     ax.set_xlim(start, end)
     # Mark the time-range of frames that entered max/min/sum stacks.
     # These bounds come from nightly-cam's anchor-band gate; everything

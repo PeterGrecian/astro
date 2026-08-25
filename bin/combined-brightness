@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """combined-brightness — overlay per-night brightness curves on a
-shared 22:00 BST → 05:00 BST axis.
+shared 21:00 → 05:00 local axis.
 
 Reads every per-night brightness CSV for a camera under the camera's
 frames_root, computes stops above the per-night pedestal, and plots
@@ -38,7 +38,8 @@ from matplotlib.ticker import FuncFormatter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
-from astro.process.brightness import darkest_anchor, find_night_csvs
+from astro.process.brightness import (darkest_anchor, find_night_csvs,
+                                      lsb_align)
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -60,11 +61,17 @@ def load_curve(csv_path: Path):
     rows.sort()
     if not rows:
         return None, None
-    return np.array([r[0] for r in rows]), np.array([r[1] for r in rows])
+    # A handful of nights are stored MSB-aligned (64x); normalise so every
+    # curve shares one ADU scale and the fixed pedestal means the same
+    # thing on all of them. Without this, 9 of eclipticam's 76 nights plot
+    # ~7.5 stops above the rest — two disjoint bands that read as a sky
+    # change but are a bit-alignment change. See brightness.lsb_align.
+    vals, _was_msb = lsb_align(np.array([r[1] for r in rows]))
+    return np.array([r[0] for r in rows]), vals
 
 
 def to_anchor_axis(times, night_str: str):
-    """Map real datetimes to a shared 22:00 → 05:00 axis anchored at
+    """Map real datetimes to a shared 21:00 → 05:00 axis anchored at
     a single reference date. A time of 23:00 on night N becomes the
     anchor date 23:00; 02:00 on night N+1 becomes anchor+1 day 02:00."""
     anchor_date = datetime(2000, 1, 1).date()
