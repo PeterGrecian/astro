@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""area-gain-sweep — render a night's max stack at several area-gain strengths.
+
+Area-adjusted gain divides the frame by a smooth map of its own local
+background before the asinh stretch, so faint stars over dark sky come up
+without the bright areas (house windows, the light-pollution dome) blowing
+out. strength=0 is exactly today's card; 1.0 is a full flat-field.
+
+Usage:
+    area-gain-sweep --camera eclipticam --night 2026-08-25
+    area-gain-sweep --fits path/to/max.fits.fz --out ~/tmp/gain
+    area-gain-sweep --camera eclipticam --night 2026-08-25 \
+        --strengths 0,0.3,0.6,1.0 --blocks 24 --pct 30
+"""
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+from astropy.io import fits
+from PIL import Image
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig
+from astro.frames import night_output_dir, list_night_frames
+from astro.present.render import (render_asinh_jpeg, render_asinh_jpeg_rgb,
+                                  local_background)
+
+
+def colour_stack(camera, night, cache):
+    """Rebuild the colour max_rgb stack from the night's raw frames.
+
+    max.fits.fz is mono, and max_rgb — the Frame-Average Normalised Max
+    the card is actually built from — is never written to disk, so a
+    colour comparison has to restack. Cached as .npy next to the JPEGs;
+    nothing is written into the night directory.
+    """
+    if cache.exists():
+        print(f"colour stack: cached {cache}")
+        return np.load(cache)
+
+    # nightly-cam pulls in derot -> cv2, which isn't installed everywhere
+    # (and isn't needed to stack). Stub it out so we can reuse the real
+    # stacking code rather than keeping a second copy of it here.
+    import importlib.util
+    try:
+        import cv2  # noqa: F401
+    except ModuleNotFoundError:
+        import types
+        sys.modules["cv2"] = types.ModuleType("cv2")
+    from importlib.machinery import SourceFileLoader
+    nc_path = Path(__file__).resolve().parent / "nightly-cam"
+    # Explicit loader: the file has no .py suffix, so spec_from_file_location
+    # can't infer one and returns None.
+    spec = importlib.util.spec_from_file_location(
+        "nightly_cam", nc_path, loader=SourceFileLoader("nightly_cam", str(nc_path)))
+    nc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nc)
+
+    cfg = CameraConfig.load(camera)
+    bayer_pat = cfg.get("bayer")
+    if not bayer_pat:
+        raise SystemExit(f"{camera} has no bayer pattern — it is a mono "
+                         f"camera; use the default (mono) sweep")
+    frames = list_night_frames(cfg, night)
+    if not frames:
+        raise SystemExit(f"no raw frames on disk for {camera} {night}")
+    print(f"colour stack: {len(frames)} raw frames, {bayer_pat}")
+    *_, max_rgb = nc.stack_and_measure(
+        frames,
+        pedestal=cfg.get("pedestal"),
+        sky_clear_max_stops=cfg.get("sky_clear_max_stops")
+            or nc.SKY_CLEAR_MAX_STOPS,
+        brightness_roi=cfg.get("brightness_roi"),
+        bayer_pattern=bayer_pat)
+    np.save(cache, max_rgb)
+    return max_rgb
+
+
+def contact_sheet(paths, labels, dst, width=900):
+    """Stack the variants vertically, each labelled, one JPEG to flick through."""
+    imgs = []
+    for p in paths:
+        im = Image.open(p).convert("RGB")
+        h = int(im.height * width / im.width)
+        imgs.append(im.resize((width, h), Image.LANCZOS))
+    from PIL import ImageDraw
+    sheet = Image.new("RGB", (width, sum(i.height for i in imgs)), "black")
+    y = 0
+    d = ImageDraw.Draw(sheet)
+    for im, lab in zip(imgs, labels):
+        sheet.paste(im, (0, y))
+        d.text((8, y + 6), lab, fill=(255, 200, 0))
+        y += im.height
+    sheet.save(dst, quality=90)
+    return dst
+
+
+def crop_sheet(variants, labels, bg, dst, size=340):
+    """1:1 crops from the darkest and the brightest part of the frame,
+    one row per variant — where you actually see whether the stars came
+    up and whether the windows held."""
+    from PIL import ImageDraw
+    H, W = bg.shape
+    m = 200
+    # Top-centre is sky on both cameras (picking the *darkest* tile just
+    # finds foliage, which tells you nothing about stars); the brightest
+    # tile anywhere is where the lamps and windows are.
+    spots = [("sky (top centre)", H // 6, W // 2)]
+    inner = bg[m:H - m, m:W - m]
+    y, x = np.unravel_index(np.argmax(inner), inner.shape)
+    spots.append(("brightest", y + m, x + m))
+    half = size // 2
+    sheet = Image.new("RGB", (size * len(spots), size * len(variants) + 18), "black")
+    d = ImageDraw.Draw(sheet)
+    for r, (im_path, lab) in enumerate(zip(variants, labels)):
+        full = Image.open(im_path).convert("RGB")
+        for c, (slab, y, x) in enumerate(spots):
+            box = (max(0, x - half), max(0, y - half),
+                   max(0, x - half) + size, max(0, y - half) + size)
+            sheet.paste(full.crop(box), (c * size, r * size + 18))
+            if r == 0:
+                d.text((c * size + 6, 4), slab, fill=(255, 200, 0))
+        d.text((6, r * size + 22), lab, fill=(255, 200, 0))
+    sheet.save(dst, quality=92)
+    return dst
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    ap.add_argument("--camera")
+    ap.add_argument("--night")
+    ap.add_argument("--fits", help="max.fits.fz directly, instead of camera+night")
+    ap.add_argument("--colour", action="store_true",
+                    help="restack max_rgb from the night's raw frames and "
+                         "sweep in colour (the card's real path). Needs the "
+                         "raws still on disk and a camera with a bayer "
+                         "pattern, e.g. eclipticam-v3w, not eclipticam.")
+    ap.add_argument("--out", default=None, help="output dir (default ~/tmp/area-gain)")
+    ap.add_argument("--strengths", default="0,0.3,0.6,1.0",
+                    help="area-gain strengths to render (with --hi-pct/--sky-frac "
+                         "held at their defaults)")
+    ap.add_argument("--sky-frac", type=float, default=0.0,
+                    help="take the stretch percentiles over the N darkest-"
+                         "background fraction of the frame (0 = whole frame)")
+    ap.add_argument("--hi-pct", type=float, default=99.9,
+                    help="upper stretch percentile (default 99.9)")
+    ap.add_argument("--combos", default=None, metavar="G:S:H,...",
+                    help="explicit gain:sky_frac:hi_pct triples, rendered "
+                         "instead of --strengths. e.g. 0:0:99.9,1:0.8:99")
+    ap.add_argument("--blocks", type=int, default=24)
+    ap.add_argument("--pct", type=float, default=30.0)
+    args = ap.parse_args()
+
+    if args.fits:
+        src = Path(args.fits)
+        tag = f"{src.parent.name}"
+    else:
+        if not (args.camera and args.night):
+            ap.error("give --fits, or both --camera and --night")
+        cfg = CameraConfig.load(args.camera)
+        src = night_output_dir(cfg, args.night) / "max.fits.fz"
+        tag = f"{args.camera}-{args.night}"
+    # --colour restacks from the raw frames and never opens max.fits.fz,
+    # so only require the stack when we are actually going to read it.
+    if not args.colour and not src.exists():
+        print(f"no such stack: {src}", file=sys.stderr)
+        return 1
+
+    out_dir = Path(args.out).expanduser() if args.out \
+        else Path.home() / "tmp" / "area-gain"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.colour:
+        img = colour_stack(args.camera, args.night,
+                           out_dir / f"{tag}-maxrgb.npy").astype(np.float32)
+        tag += "-colour"
+    else:
+        with fits.open(src) as hdul:
+            img = hdul[1].data.astype(np.float32)
+    print(f"{src}  {img.shape}  min={img.min():.0f} max={img.max():.0f}")
+
+    lum = img.sum(axis=-1) if img.ndim == 3 else img
+    bg = local_background(lum, blocks=args.blocks, pct=args.pct)
+    print(f"background map: {bg.min():.0f} .. {bg.max():.0f}  "
+          f"({bg.max() / max(bg.min(), 1):.1f}x across the frame)")
+    render_asinh_jpeg(bg, out_dir / f"{tag}-background.jpg")
+    draw = render_asinh_jpeg_rgb if img.ndim == 3 else render_asinh_jpeg
+
+    if args.combos:
+        combos = []
+        for t in args.combos.split(","):
+            g, sf, hp = (t.split(":") + ["0", "99.9"])[:3]
+            combos.append((float(g), float(sf), float(hp)))
+    else:
+        combos = [(float(x), args.sky_frac, args.hi_pct)
+                  for x in args.strengths.split(",")]
+
+    paths, labels = [], []
+    for n, (g, sf, hp) in enumerate(combos):
+        dst = out_dir / f"{tag}-{n:02d}-gain{g:g}-sky{sf:g}-hi{hp:g}.jpg"
+        draw(img, dst, area_gain_strength=g, sky_frac=sf, hi_pct=hp)
+        lab = f"gain {g:g}  sky {sf:g}  hi {hp:g}"
+        if (g, sf, hp) == (0.0, 0.0, 99.9):
+            lab += "   (today's card)"
+        print(f"  {lab} -> {dst}")
+        paths.append(dst)
+        labels.append(lab)
+    sheet = contact_sheet(paths, labels, out_dir / f"{tag}-sheet.jpg")
+    print(f"contact sheet: {sheet}")
+    crops = crop_sheet(paths, labels, bg, out_dir / f"{tag}-crops.jpg")
+    print(f"1:1 crops:     {crops}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

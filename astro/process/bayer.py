@@ -27,6 +27,19 @@ def pattern(raw_format: str) -> str:
     return s
 
 
+def as_pattern(s: str) -> str:
+    """Accept either form and return the 4-letter pattern.
+
+    camera.json is inconsistent about this: eclipticam-v3w carries the raw
+    *format* ("SRGGB10"), canon and astrocam carry the bare pattern
+    ("GBRG"). Callers that take `cfg.bayer` must normalise through here —
+    plane_offsets() used to walk "SRGGB10" character by character and
+    silently return junk offsets (B at row 2, R in the wrong column).
+    """
+    s = s.strip().upper()
+    return s if len(s) == 4 and not set(s) - set("RGB") else pattern(s)
+
+
 def for_sensor(sensor: str) -> str:
     """4-letter Bayer pattern for a sensor name."""
     return pattern(SENSOR_RAW_FORMAT[sensor.upper()])
@@ -59,7 +72,7 @@ def bin2x2_rgb(arr, pattern: str):
     import numpy as np
     H, W = arr.shape
     a = arr[:H - H % 2, :W - W % 2]
-    off = plane_offsets(pattern)
+    off = plane_offsets(as_pattern(pattern))
     def _plane(rc):
         r, c = rc
         return a[r::2, c::2]
@@ -75,8 +88,15 @@ def bin2x2_rgb(arr, pattern: str):
 
 def plane_offsets(pat: str) -> dict:
     """Map plane name -> (row_offset, col_offset) for a 4-letter pattern.
-    Green planes are named G1 (first in reading order) and G2."""
+    Green planes are named G1 (first in reading order) and G2.
+
+    Strict: anything but four RGB letters raises. Pass raw format names
+    through as_pattern() first.
+    """
     pat = pat.upper()
+    if len(pat) != 4 or set(pat) - set("RGB"):
+        raise ValueError(f"not a 4-letter Bayer pattern: {pat!r} "
+                         f"(raw formats go through as_pattern())")
     out = {}
     g_seen = 0
     for i, ch in enumerate(pat):

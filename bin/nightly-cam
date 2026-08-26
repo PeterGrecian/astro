@@ -33,7 +33,7 @@ from astro.process import bayer
 from astro.process import brightness
 from astro.process.badpix import compute_bad_pixel_mask, write_bad_mask
 from astro.process.derot import derot_stack, write_derot_fits
-from astro.present.render import render_asinh_jpeg
+from astro.present.render import render_asinh_jpeg, render_asinh_jpeg_rgb
 from astro.present import privacy as privacy_mod
 from astro.present import summary as summary_mod
 from astro.present import publish as publish_mod
@@ -67,7 +67,10 @@ def make_render(cfg):
     def render(img, dst_path, **kw):
         out = privacy_mod.crop_for_publication(img, spec)
         kw.setdefault("rotate_180", rotate_180)
-        result = render_asinh_jpeg(out, dst_path, **kw)
+        if out.ndim == 3:
+            result = render_asinh_jpeg_rgb(out, dst_path, **kw)
+        else:
+            result = render_asinh_jpeg(out, dst_path, **kw)
         if has_policy:
             privacy_mod.mark_ok(dst_path)
         return result
@@ -107,7 +110,7 @@ SKY_CLEAR_MAX_STOPS = 10.0
 def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
                       band_tol=BAND_TOL, pedestal=None,
                       sky_clear_max_stops=SKY_CLEAR_MAX_STOPS,
-                      brightness_roi=None):
+                      brightness_roi=None, bayer_pattern=None):
     """Two passes over (t, path):
       pass 1 — measure brightness on the RAW Bayer frame, compute
         per_s = mean / (EXPTIME * GAIN), tag saturated frames
@@ -123,7 +126,7 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
     mosaic (starcam pipeline convention; stacking the mosaic leaves a
     Bayer checkerboard).
 
-    Returns (max_img, min_img, sum_img, rows, stacked_set, anchor_info).
+    Returns (max_img, min_img, sum_img, rows, stacked_set, anchor_info, max_rgb).
     anchor_info: {"per_s", "lo", "hi", "window_utc": [start, end]} or
     None if the night was too short / had no usable frames.
     """
@@ -196,17 +199,21 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
             anchor_stops = _math.log2(max(anchor_mean - pedestal, 0.5))
             verdict = "cloudy" if anchor_stops > sky_clear_max_stops \
                 else "clear"
+        else:
+            anchor_stops = None
+            verdict = "clear"
 
         anchor_info = {
             "per_s": anchor_per_s, "lo": lo, "hi": hi,
             "window_utc": [a_start.isoformat(), a_end.isoformat()],
             "window_s": anchor_window_s, "tol": band_tol,
             "sky_clear_max_stops": sky_clear_max_stops,
+            "stops": round(anchor_stops, 2) if anchor_stops is not None else None,
             "verdict": verdict,
         }
         print(f"  anchor: per_s={anchor_per_s:.1f} over "
               f"{a_start.isoformat()} .. {a_end.isoformat()}  "
-              f"band [{lo:.1f}, {hi:.1f}]  verdict={verdict}")
+              f"band [{lo:.1f}, {hi:.1f}]  stops={anchor_stops:.2f}  verdict={verdict}")
 
     # 2x2 sum of uint16 raws needs 18 bits — uint32 is the right type
     # for max/min; otherwise np.maximum(out=uint16, ...) silently
@@ -214,6 +221,8 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
     max_img = np.zeros((H, W), dtype=np.uint32)
     min_img = np.full((H, W), np.iinfo(np.uint32).max, dtype=np.uint32)
     sum_img = np.zeros((H, W), dtype=np.float64)
+    max_contrast = np.zeros((H, W), dtype=np.float32)
+    max_rgb = np.zeros((H, W, 3), dtype=np.uint32) if bayer_pattern else None
 
     stacked = set()
     n_skipped_band = 0
@@ -232,6 +241,13 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         np.maximum(max_img, b, out=max_img)
         np.minimum(min_img, b, out=min_img)
         sum_img += b
+        if max_rgb is not None:
+            b_rgb = bayer.bin2x2_rgb(d, bayer_pattern)
+            f_mean = float(np.mean(b))
+            contrast = b.astype(np.float32) / max(f_mean, 1.0)
+            m = contrast > max_contrast
+            max_contrast[m] = contrast[m]
+            max_rgb[m] = b_rgb[m]
         stacked.add(f)
         if i % 200 == 0:
             print(f"  stack {i}/{len(frames)}", flush=True)
@@ -239,7 +255,7 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
     print(f"  stacked {len(stacked)}/{len(frames)}  "
           f"(skipped: {n_skipped_sat} saturated, "
           f"{n_skipped_band} out of band)")
-    return max_img, min_img, sum_img, rows, stacked, anchor_info
+    return max_img, min_img, sum_img, rows, stacked, anchor_info, max_rgb
 
 
 def write_fits(arr, path, dtype):
@@ -266,6 +282,21 @@ def main() -> int:
     ap.add_argument("--window-end", default=None, metavar="HH:MM",
                     help="restrict stacks + derot to frames before this UTC "
                          "time (e.g. 23:30).")
+    ap.add_argument("--area-gain", type=float, default=None, metavar="0..1",
+                    help="area-adjusted gain for max.jpg: divide by a smooth "
+                         "map of the frame's own local background before the "
+                         "stretch, so stars over dark sky come up without the "
+                         "house windows blowing out. 0 = off (one global "
+                         "gain), 1 = full flat-field. Default: the camera's "
+                         "`area_gain`, or 0.")
+    ap.add_argument("--sky-frac", type=float, default=None, metavar="0..1",
+                    help="take max.jpg's stretch percentiles over the N "
+                         "darkest-background fraction of the frame, so the "
+                         "streetlamps stop setting the ceiling (they clip to "
+                         "white). Default: the camera's `sky_frac`, or 0.")
+    ap.add_argument("--hi-pct", type=float, default=None,
+                    help="upper stretch percentile for max.jpg. Default: the "
+                         "camera's `max_hi_pct`, or the render default (99.9).")
     ap.add_argument("--no-derot", action="store_true")
     ap.add_argument("--publish", action="store_true",
                     help="upload web assets to S3 after generation")
@@ -318,18 +349,25 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = ""
 
+    pat_raw = cfg.get("bayer") or ("SRGGB10" if "v3w" in cfg.name else ("SBGGR10" if "astrocam" in cfg.name else "GBRG"))
+    try:
+        bayer_pat = bayer.pattern(pat_raw)
+    except Exception:
+        bayer_pat = "RGGB"
+
     t0 = time.monotonic()
     # Explicit window means the user has chosen the frames; skip the
     # anchor-band gate so everything in the window enters the stack.
     explicit_window = bool(args.window_start or args.window_end)
-    max_img, min_img, sum_img, rows, stacked, anchor_info = \
+    max_img, min_img, sum_img, rows, stacked, anchor_info, max_rgb = \
         stack_and_measure(
             frames,
             band_tol=float("inf") if explicit_window else BAND_TOL,
             pedestal=cfg.get("pedestal"),
             sky_clear_max_stops=cfg.get("sky_clear_max_stops")
                 or SKY_CLEAR_MAX_STOPS,
-            brightness_roi=cfg.get("brightness_roi"))
+            brightness_roi=cfg.get("brightness_roi"),
+            bayer_pattern=bayer_pat)
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:
         # Cloudy / no-usable-sky night: clear out any stale stack
@@ -389,7 +427,19 @@ def main() -> int:
     print(f"badpix: hot={badpix_info['n_hot']} cold={badpix_info['n_cold']}")
 
     render = make_render(cfg)
-    render(max_img, out_dir / f"{stem}max.jpg")
+    area_gain_strength = args.area_gain if args.area_gain is not None \
+        else float(cfg.get("area_gain") or 0.0)
+    sky_frac = args.sky_frac if args.sky_frac is not None \
+        else float(cfg.get("sky_frac") or 0.0)
+    hi_pct = args.hi_pct if args.hi_pct is not None else cfg.get("max_hi_pct")
+    max_kw = {"area_gain_strength": area_gain_strength, "sky_frac": sky_frac}
+    if hi_pct is not None:
+        max_kw["hi_pct"] = float(hi_pct)
+    if area_gain_strength or sky_frac or hi_pct is not None:
+        print(f"max.jpg: area gain {area_gain_strength:g}, sky_frac "
+              f"{sky_frac:g}, hi_pct {hi_pct if hi_pct is not None else 'default'}")
+    render(max_rgb if max_rgb is not None else max_img,
+           out_dir / f"{stem}max.jpg", **max_kw)
 
     brightness.write_csv(rows, out_dir / f"{stem}brightness.csv")
     brightness.plot_night(rows, night, cfg.name,

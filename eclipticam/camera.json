@@ -3,6 +3,8 @@
   "host": "eclipticam",
   "sensor": null,
   "bayer": null,
+  "max_hi_pct": 99,
+  "max_jpg_notes": "max.jpg presentation only. Peter picked the loosened stretch ALONE here (2026-08-26) — no area_gain, no sky_frac: on eclipticam the light dome reads as sky rather than as pollution, and flattening it made the picture worse. Opposite call to astrocam, which is why these are per-camera knobs.",
   "resolution": null,
   "frames_root": "~/eclipticam-frames",
   "frames_root_by_host": {"pip": "/mnt/muppet/bigstore/eclipticam-frames"},

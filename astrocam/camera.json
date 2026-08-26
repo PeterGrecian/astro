@@ -10,6 +10,10 @@
   },
   "sensor": "imx708",
   "bayer": "RGGB",
+  "area_gain": 0.6,
+  "sky_frac": 0.8,
+  "max_hi_pct": 99.5,
+  "max_jpg_notes": "max.jpg presentation only — no effect on the FITS stacks. area_gain divides by a smooth map of the frame's own local background (astro.present.render.area_gain) so trails come through the bright cloud banks; sky_frac takes the stretch percentiles over the darkest-background 80% so the lamps stop setting the ceiling; max_hi_pct loosens the upper clip from 99.9. Chosen by Peter 2026-08-26 off the astrocam 2026-08-22 sweep: strongest trail structure at a floor matching the old render (75.7 vs 78.3). The per-channel auto-WB stretch then walks the hue ~22% off the old bronze — that false colour is DELIBERATE, not a bug, and is why a neutral-stretch mode was not added.",
   "resolution": [4608, 2592],
   "capture": {
     "night_exposure_us": 59900000,
