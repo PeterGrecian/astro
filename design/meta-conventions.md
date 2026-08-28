@@ -177,3 +177,50 @@ If a schema needs an incompatible change:
 
 Trivial additions (new optional keys) don't need a bump — consumers
 should already tolerate unknown keys.
+
+## transients/ — the curated collection (schema 1)
+
+A flat, cross-camera prefix, deliberately NOT under `<camera>/`: the
+point of the `/astro/transients` gallery is to mix cameras and mix
+kinds — meteors, lightning, aircraft, satellites, screen grabs of
+something odd caught mid-inspection, and the daytime frames from the
+Canon focus work.
+
+```
+s3://astro-berrylands-eu-west-1/
+└── transients/
+    ├── index.json          # manifest, newest first
+    ├── items/<id>.jpg      # full image (re-encoded, max 2560 wide)
+    └── thumbs/<id>.jpg     # 640px card thumbnail
+```
+
+`<id>` is `<date>-<category>-<slug>`; re-publishing an id REPLACES that
+entry, so a caption or crop can be fixed without growing the manifest.
+
+```jsonc
+{
+  "schema": 1,
+  "generated_utc": "2026-08-28T13:00:00+00:00",
+  "items": [{
+    "id": "2026-08-12-meteor-perseid-fireball",
+    "title": "Perseid fireball",
+    "category": "meteor",        // meteor|lightning|plane|satellite|
+                                 // screen-grab|daytime|other, extensible
+    "date": "2026-08-12",        // when it happened
+    "time": "23:41 BST",         // human clock time, or null
+    "camera": "canon",           // or null
+    "night": "2026-08-12",       // links back to the night page, or null
+    "caption": "...",
+    "image_key": "transients/items/....jpg",
+    "thumb_key": "transients/thumbs/....jpg",
+    "width": 2304, "height": 1296,
+    "source": "<local path it came from>",
+    "added_utc": "..."
+  }]
+}
+```
+
+Published by hand with `bin/add-transient` (there is no nightly job — the
+collection is curated, not detected). The website reads the one manifest
+and presigns only the items it renders. Unknown categories are allowed:
+the gallery titlecases them and appends a filter chip.

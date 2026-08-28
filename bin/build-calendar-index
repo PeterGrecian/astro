@@ -92,6 +92,36 @@ def list_nights(s3, bucket, src_prefix):
     return nights
 
 
+def extract_stops(summary, cfg=None):
+    if not summary:
+        return None
+    anchor = summary.get("anchor") or {}
+    if "stops" in anchor and anchor["stops"] is not None:
+        return anchor["stops"]
+    per_s = anchor.get("per_s")
+    if per_s is not None:
+        import math
+        cam_name = getattr(cfg, "name", "")
+        pedestal = 2048.0 if cam_name == "canon" else float(getattr(cfg, "pedestal", None) or 50.0)
+        exp_gain = 480.0 if cam_name == "canon" else 59.9
+        hours = summary.get("hours") or []
+        min_hr = min((h.get("mean_brightness", 9999) for h in hours), default=None)
+        if min_hr is not None:
+            norm_min = min_hr / 64.0 if min_hr > 1000 else min_hr
+            if per_s < 10:
+                mean_adu = per_s * exp_gain
+            elif per_s > 1000:
+                mean_adu = per_s / 64.0
+            else:
+                if abs(per_s * exp_gain - norm_min) < abs(per_s - norm_min):
+                    mean_adu = per_s * exp_gain
+                else:
+                    mean_adu = per_s
+            val = math.log2(max(mean_adu - pedestal, 0.5))
+            return round(val, 2)
+    return None
+
+
 def read_summary(s3, bucket, key):
     try:
         obj = s3.get_object(Bucket=bucket, Key=key)
@@ -136,6 +166,7 @@ def build(cfg):
             "thumb_key": thumb_key,
             "n_frames": s.get("n_frames"),
             "n_stacked": s.get("n_stacked"),
+            "stops": extract_stops(s, cfg),
             "verdict": s.get("verdict"),
         })
 
