@@ -1,0 +1,47 @@
+{
+  "$schema": "https://frontmatter.codes/frontmatter.schema.json",
+  "frontMatter.framework.id": "other",
+  "frontMatter.content.pageFolders": [
+    { "title": "Transients", "path": "[[workspace]]/transients" }
+  ],
+  "frontMatter.content.publicFolder": "transients/_render",
+  "frontMatter.content.defaultFileType": "md",
+  "frontMatter.taxonomy.contentTypes": [
+    {
+      "name": "transient",
+      "pageBundle": false,
+      "fields": [
+        { "title": "Title", "name": "title", "type": "string", "single": true },
+        { "title": "Id (changing this creates a SECOND gallery entry)", "name": "id", "type": "string" },
+        { "title": "Category", "name": "category", "type": "choice",
+          "choices": ["meteor", "lightning", "plane", "satellite", "screen-grab", "daytime", "other"] },
+        { "title": "Confidence", "name": "confidence", "type": "choice",
+          "choices": ["confirmed", "likely", "possible", "unknown"] },
+        { "title": "Date", "name": "date", "type": "datetime" },
+        { "title": "Time (local, e.g. 04:14 BST)", "name": "time", "type": "string" },
+        { "title": "Camera", "name": "camera", "type": "string" },
+        { "title": "Night", "name": "night", "type": "string" },
+        { "title": "Source recipe", "name": "source", "type": "fields", "fields": [
+          { "title": "Frames", "name": "frames", "type": "list" },
+          { "title": "Combine", "name": "combine", "type": "choice", "choices": ["single", "max"] },
+          { "title": "Crop x0,y0,x1,y1", "name": "crop", "type": "list" },
+          { "title": "Scale", "name": "scale", "type": "number" }
+        ] }
+      ]
+    }
+  ],
+  "frontMatter.custom.scripts": [
+    {
+      "title": "Render preview",
+      "script": "transients/fm-render.sh",
+      "command": "bash",
+      "type": "content"
+    },
+    {
+      "title": "Publish to gallery",
+      "script": "transients/fm-publish.sh",
+      "command": "bash",
+      "type": "content"
+    }
+  ]
+}

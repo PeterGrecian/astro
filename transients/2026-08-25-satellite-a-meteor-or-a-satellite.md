@@ -4,7 +4,7 @@ title: A meteor or a satellite, at dawn
 category: satellite
 confidence: possible
 date: 2026-08-25
-time: 04:48 BST
+time: "04:48 BST"
 camera: eclipticam
 night: 2026-08-24
 source:

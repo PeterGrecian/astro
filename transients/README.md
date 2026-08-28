@@ -59,3 +59,34 @@ publish. That closes the loop and makes the git copy the thing you edit rather
 than a transcript of what was published. Until then, edits here must be
 mirrored by hand, and the id in the front matter is what makes a re-publish
 replace the entry instead of adding a new one.
+
+## Editing in VS Code — Front Matter CMS
+
+`frontmatter.json` at the repo root configures [Front Matter
+CMS](https://frontmatter.codes) as the curation surface: a dashboard of the
+cards with previews, and `category` and `confidence` as **dropdowns** so the
+vocabularies in `bin/add-transient` are chosen rather than retyped.
+
+Two buttons appear on each card:
+
+| action | what it does |
+|---|---|
+| **Render preview** | rebuilds the picture into `transients/_render/` (gitignored) so the dashboard has a thumbnail |
+| **Publish to gallery** | renders, then publishes to S3 via `publish.py` → `bin/add-transient` |
+
+Three things make this work rather than fight:
+
+- **`render.py` parses with PyYAML, not by hand.** Front Matter rewrites front
+  matter when you edit a field in its UI — reordering keys, normalising inline
+  maps, dropping comments. A tolerant parser is what lets the dashboard and the
+  scripts share one file.
+- **`time` is quoted.** Unquoted `04:14` is sexagesimal in YAML 1.1 and would
+  load as the integer 254. It survives today only because of the trailing
+  ` BST`; quoting removes the trap for the next person who edits it.
+- **The media folder points at `_render/`, which is gitignored.** Front Matter
+  wants a public image directory; ours are build artefacts, so it gets a
+  regenerable one and git stays text-only.
+
+The `id` is what makes a re-publish replace an entry instead of adding a
+second, so retitling a card is safe and re-iding one is not. The field label in
+the dashboard says so.

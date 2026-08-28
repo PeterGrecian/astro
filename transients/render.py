@@ -29,38 +29,21 @@ import numpy as np
 
 
 def parse_card(path: Path) -> dict:
-    """Front-matter of a card file. Deliberately a tiny hand parser: the
-    schema is fixed and shallow, and a YAML dependency for six keys and one
-    nested block is not worth carrying into the capture hosts."""
+    """Front matter of a card file, as a dict.
+
+    Real YAML, not a hand parser, because Front Matter CMS (VS Code) rewrites
+    these files when a field is edited in its UI — reordering keys, normalising
+    inline maps, dropping comments. A tolerant parser here is what lets the
+    dashboard and this script share one file without fighting.
+    """
+    import yaml
     text = path.read_text()
     m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
     if not m:
         raise SystemExit(f"{path}: no front matter")
-    meta, src = {}, {}
-    frames, in_src, in_frames = [], False, False
-    for line in m.group(1).splitlines():
-        if not line.strip():
-            continue
-        if line.startswith("source:"):
-            in_src = True
-            continue
-        if in_src and line.startswith("  "):
-            s = line.strip()
-            if s == "frames:":
-                in_frames = True
-                continue
-            if in_frames and s.startswith("- "):
-                frames.append(s[2:].strip())
-                continue
-            in_frames = False
-            k, _, v = s.partition(":")
-            src[k.strip()] = v.split("#")[0].strip()
-            continue
-        in_src = False
-        k, _, v = line.partition(":")
-        meta[k.strip()] = v.strip()
-    src["frames"] = frames
-    meta["source"] = src
+    meta = yaml.safe_load(m.group(1)) or {}
+    if "source" not in meta:
+        raise SystemExit(f"{path}: no source: block — nothing to render from")
     return meta
 
 
@@ -78,8 +61,8 @@ def load(frames, root: Path):
 def render(card: dict, root: Path):
     from PIL import Image
     src = card["source"]
-    x0, y0, x1, y1 = (int(v) for v in re.findall(r"-?\d+", src["crop"]))
-    stretch = dict(re.findall(r"(\w+):\s*([\w.]+)", src["stretch"]))
+    x0, y0, x1, y1 = (int(v) for v in src["crop"])
+    stretch = src.get("stretch") or {}
     gain = float(stretch.get("gain", 6.0))
     hi = float(stretch.get("hi_pct", 99.9))
     scale = int(src.get("scale", 1))

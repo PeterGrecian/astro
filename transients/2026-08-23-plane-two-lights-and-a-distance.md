@@ -4,7 +4,7 @@ title: A plane, and how far away it was
 category: plane
 confidence: confirmed
 date: 2026-08-23
-time: 04:37 BST
+time: "04:37 BST"
 camera: eclipticam
 night: 2026-08-22
 source:

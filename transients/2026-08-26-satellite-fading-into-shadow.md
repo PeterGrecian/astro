@@ -4,7 +4,7 @@ title: A satellite, switching on and fading out
 category: satellite
 confidence: confirmed
 date: 2026-08-26
-time: 04:14 BST
+time: "04:14 BST"
 camera: eclipticam
 night: 2026-08-25
 source:
