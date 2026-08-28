@@ -41,9 +41,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 
-# Card thumbnail preference: the colour-sweep mid-frame stack, else the
-# all-night max (legacy nights without a sweep). Mirrors the Lambda.
-THUMB_NAMES = ("thumb.jpg", "max.jpg")
+# Card thumbnail preference: the all-night max stack, else the colour-sweep
+# mid-frame (legacy nights with no max). Mirrors the Lambda's slow fallback
+# path, which has preferred max.jpg for a while — this brings the manifest
+# path into line so BOTH agree.
+#
+# Why max first (Peter, 2026-08-28): the max stack is the night's own picture —
+# every star trail it drew, over the whole session. A sweep mid-frame is one
+# arbitrary 10-minute window, so a card could show a dull stretch of an
+# otherwise spectacular night. The max also needs no clear/cloudy judgement to
+# be worth looking at.
+THUMB_NAMES = ("max.jpg", "thumb.jpg")
 
 
 def source_prefixes(cfg):
