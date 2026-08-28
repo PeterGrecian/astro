@@ -1,0 +1,298 @@
+#!/usr/bin/env python3
+"""add-showcase — publish one item into the /astro/photos showcase collection.
+
+The Astro Showcase is a curated gallery of astrophotography captures, deep-sky
+stacks, widefield Milky Way shots, polar derotations, star trails, and solar
+system images with complete equipment and exposure metadata.
+
+S3 layout:
+    showcase/index.json          manifest (schema 1), newest first
+    showcase/items/<id>.jpg      full image (max 3840px wide for 4K viewing)
+    showcase/thumbs/<id>.jpg     800px-wide card thumbnail
+
+<id> is <date>-<slug>, derived from --title unless --id is given.
+Re-publishing the same id REPLACES that entry (fix a caption, crop, or metadata
+without duplicating entries).
+
+Usage:
+    add-showcase IMAGE --title "Cygnus Star Cloud" --category deep-sky \
+        [--target "NGC 7000 / Deneb"] [--constellation Cygnus] \
+        [--date 2026-08-20] [--time "23:15 BST"] [--camera canon] \
+        [--night 2026-08-20] [--optics "EF 50mm f/1.8 STM"] \
+        [--focal-length "50mm"] [--f-ratio "f/2.8"] \
+        [--sensor "Canon EOS 2000D"] [--mount "Fixed Tripod"] \
+        [--filter "Stock UV/IR Cut"] [--subs 40] [--sub-time "30s"] \
+        [--total-integration "20m"] [--iso-gain "ISO 1600"] \
+        [--bortle "Class 6"] [--featured] [--caption "..."] \
+        [--processing "..."] [--highlight "..."] [--publish]
+
+    add-showcase --list                 # show current manifest
+    add-showcase --remove <id> --publish
+"""
+import argparse
+import io
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+BUCKET = "astro-berrylands-eu-west-1"
+INDEX_KEY = "showcase/index.json"
+PREFIX = "showcase"
+THUMB_WIDTH = 800
+FULL_MAX_WIDTH = 3840
+
+CATEGORIES = (
+    "deep-sky",
+    "milky-way",
+    "star-trails",
+    "derotated",
+    "widefield",
+    "solar-system",
+    "lunar",
+    "meteors",
+    "other",
+)
+
+
+def slugify(title):
+    s = title.lower().strip()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[\s_-]+", "-", s)
+    return s.strip("-") or "photo"
+
+
+def s3_client():
+    import boto3
+    return boto3.client("s3")
+
+
+def load_index(s3):
+    """Current manifest from S3, or an empty one if not published yet."""
+    try:
+        obj = s3.get_object(Bucket=BUCKET, Key=INDEX_KEY)
+        return json.loads(obj["Body"].read())
+    except Exception:
+        return {"schema": 1, "generated_utc": None, "items": []}
+
+
+def write_index(s3, index):
+    index["generated_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    index["items"].sort(
+        key=lambda e: (1 if e.get("featured") else 0, e.get("date") or "", e.get("id") or ""),
+        reverse=True,
+    )
+    body = json.dumps(index, indent=2).encode("utf-8")
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=INDEX_KEY,
+        Body=body,
+        ContentType="application/json",
+    )
+    return len(body)
+
+
+def make_thumb(img):
+    """800px-wide RGB JPEG bytes for retina cards."""
+    from PIL import Image
+    t = img.convert("RGB")
+    if t.width > THUMB_WIDTH:
+        h = round(t.height * THUMB_WIDTH / t.width)
+        t = t.resize((THUMB_WIDTH, h), Image.LANCZOS)
+    buf = io.BytesIO()
+    t.save(buf, "JPEG", quality=85, optimize=True)
+    return buf.getvalue()
+
+
+def encode_full(img):
+    """Full-size bytes to upload (up to 3840px for deep zoom)."""
+    from PIL import Image
+    full = img.convert("RGB")
+    if full.width > FULL_MAX_WIDTH:
+        h = round(full.height * FULL_MAX_WIDTH / full.width)
+        full = full.resize((FULL_MAX_WIDTH, h), Image.LANCZOS)
+    buf = io.BytesIO()
+    full.save(buf, "JPEG", quality=92, optimize=True)
+    return buf.getvalue()
+
+
+def cmd_list(s3):
+    index = load_index(s3)
+    items = index.get("items", [])
+    print(f"{len(items)} item(s) in s3://{BUCKET}/{INDEX_KEY} (generated {index.get('generated_utc')})")
+    for e in items:
+        feat = "★ " if e.get("featured") else "  "
+        cam = e.get("camera") or "-"
+        print(f"  {feat}{e.get('date','?')}  {e.get('category','?'):<12} {cam:<12} {e.get('id')}")
+        if e.get("title"):
+            print(f"       {e['title']}")
+            if e.get("target"):
+                print(f"       Target: {e['target']}")
+    return 0
+
+
+def cmd_remove(s3, item_id, publish):
+    index = load_index(s3)
+    before = len(index["items"])
+    victim = next((e for e in index["items"] if e.get("id") == item_id), None)
+    if victim is None:
+        print(f"no item with id '{item_id}'", file=sys.stderr)
+        return 1
+    index["items"] = [e for e in index["items"] if e.get("id") != item_id]
+    print(f"removing {item_id} ({before} -> {len(index['items'])} items)")
+    if not publish:
+        print("dry run — pass --publish to apply")
+        return 0
+    write_index(s3, index)
+    for key in (victim.get("image_key"), victim.get("thumb_key")):
+        if key:
+            s3.delete_object(Bucket=BUCKET, Key=key)
+            print(f"deleted s3://{BUCKET}/{key}")
+    print(f"updated s3://{BUCKET}/{INDEX_KEY}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__.split("\n", 1)[0] if __doc__ else "",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("image", nargs="?", type=Path, help="image file to publish (jpg/png/any PIL format)")
+    ap.add_argument("--title", help="headline shown on the card")
+    ap.add_argument("--category", default="deep-sky", help=f"one of {', '.join(CATEGORIES)} (or a new one)")
+    ap.add_argument("--target", default="", help="celestial target name (e.g. M31, North America Nebula)")
+    ap.add_argument("--constellation", default="", help="constellation name (e.g. Cygnus, Ursa Major)")
+    ap.add_argument("--date", help="YYYY-MM-DD the photo was acquired (default: today UTC)")
+    ap.add_argument("--time", dest="tod", help="human clock time, e.g. '23:15 BST' (optional)")
+    ap.add_argument("--camera", help="camera identifier (canon, astrocam, eclipticam, etc.)")
+    ap.add_argument("--night", help="night date string YYYY-MM-DD for linking to camera archives")
+    ap.add_argument("--optics", default="", help="lens or telescope (e.g. EF 50mm f/1.8 STM)")
+    ap.add_argument("--focal-length", default="", help="focal length (e.g. 50mm, 200mm)")
+    ap.add_argument("--f-ratio", default="", help="f-ratio (e.g. f/2.8, f/4)")
+    ap.add_argument("--sensor", default="", help="sensor or camera body model")
+    ap.add_argument("--mount", default="", help="mount or tracker (e.g. Fixed Tripod, Star Adventurer)")
+    ap.add_argument("--filter", default="", dest="filter_opt", help="filters used")
+    ap.add_argument("--subs", type=int, default=None, help="number of sub-exposures")
+    ap.add_argument("--sub-time", default="", help="exposure per sub (e.g. 30s, 60s)")
+    ap.add_argument("--total-integration", default="", help="total integration time (e.g. 20m, 2h 15m)")
+    ap.add_argument("--iso-gain", default="", help="ISO or gain setting (e.g. ISO 1600, Gain 120)")
+    ap.add_argument("--bortle", default="", help="Bortle class or SQM measurement")
+    ap.add_argument("--featured", action="store_true", help="feature prominently at the top of the gallery")
+    ap.add_argument("--caption", default="", help="paragraph describing what you are looking at")
+    ap.add_argument("--processing", default="", help="notes on observation and post-processing recipe")
+    ap.add_argument("--highlight", action="append", default=[], metavar="BULLET", help="technical bullet point")
+    ap.add_argument("--id", dest="item_id", help="explicit id; reuse to replace existing entry")
+    ap.add_argument("--publish", action="store_true", help="upload to S3; without this it is a dry run")
+    ap.add_argument("--list", action="store_true", help="list current manifest")
+    ap.add_argument("--remove", metavar="ID", help="remove an item by id")
+    args = ap.parse_args()
+
+    s3 = s3_client()
+
+    if args.list:
+        return cmd_list(s3)
+    if args.remove:
+        return cmd_remove(s3, args.remove, args.publish)
+
+    if not args.image:
+        ap.error("an IMAGE is required (or use --list / --remove)")
+    if not args.image.exists():
+        print(f"no such file: {args.image}", file=sys.stderr)
+        return 1
+    if not args.title:
+        ap.error("--title is required")
+
+    date = args.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        ap.error(f"--date must be YYYY-MM-DD, got '{date}'")
+    category = args.category.lower()
+    item_id = args.item_id or f"{date}-{category}-{slugify(args.title)}"
+
+    from PIL import Image
+    img = Image.open(args.image)
+    width, height = img.size
+    full_bytes = encode_full(img)
+    thumb_bytes = make_thumb(img)
+
+    equipment = {}
+    if args.optics:
+        equipment["optics"] = args.optics
+    if args.focal_length:
+        equipment["focal_length"] = args.focal_length
+    if args.f_ratio:
+        equipment["f_ratio"] = args.f_ratio
+    if args.sensor:
+        equipment["sensor"] = args.sensor
+    if args.mount:
+        equipment["mount"] = args.mount
+    if args.filter_opt:
+        equipment["filter"] = args.filter_opt
+
+    exposure = {}
+    if args.subs is not None:
+        exposure["subs"] = args.subs
+    if args.sub_time:
+        exposure["sub_time"] = args.sub_time
+    if args.total_integration:
+        exposure["total_integration"] = args.total_integration
+    if args.iso_gain:
+        exposure["iso_gain"] = args.iso_gain
+    if args.bortle:
+        exposure["bortle"] = args.bortle
+
+    entry = {
+        "id": item_id,
+        "title": args.title,
+        "category": category,
+        "target": args.target,
+        "constellation": args.constellation,
+        "featured": bool(args.featured),
+        "date": date,
+        "time": args.tod,
+        "camera": args.camera,
+        "night": args.night,
+        "equipment": equipment,
+        "exposure": exposure,
+        "caption": args.caption,
+        "processing": args.processing,
+        "highlights": args.highlight,
+        "image_key": f"{PREFIX}/items/{item_id}.jpg",
+        "thumb_key": f"{PREFIX}/thumbs/{item_id}.jpg",
+        "width": width,
+        "height": height,
+        "source": str(args.image),
+        "added_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+    print(json.dumps(entry, indent=2))
+    print(f"source {width}x{height}  full {len(full_bytes)/1024:.0f}KB  thumb {len(thumb_bytes)/1024:.0f}KB")
+
+    if not args.publish:
+        print("dry run — pass --publish to upload")
+        return 0
+
+    index = load_index(s3)
+    replaced = any(e.get("id") == item_id for e in index["items"])
+    index["items"] = [e for e in index["items"] if e.get("id") != item_id]
+    index["items"].append(entry)
+
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=entry["image_key"],
+        Body=full_bytes,
+        ContentType="image/jpeg",
+    )
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=entry["thumb_key"],
+        Body=thumb_bytes,
+        ContentType="image/jpeg",
+    )
+    write_index(s3, index)
+    print(f"{'replaced' if replaced else 'added'} {item_id} — {len(index['items'])} item(s) in showcase")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

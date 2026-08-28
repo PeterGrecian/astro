@@ -15,6 +15,12 @@ live cameras now share the streaming engine:
 | eclipticam v1 | ✘ hand-rolled, does not import the shared module |
 | `uploader.py` / `modes.py` / `host.py` / `__main__.py` | ✘ not written; `astro/capture/` holds only `__init__.py` + `streaming.py` |
 
+**Buffering correction (2026-08-28):** "Storage and Buffering
+Architecture" below previously argued the tmpfs buffer was unnecessary.
+It is not — it is a containment fuse, not a latency device, and
+eclipticam lost the whole night of 2026-08-27 proving it. Read that
+section's corrected header before touching any buffer.
+
 **Direction correction — share the conventions, not the code path**
 (Peter, 2026-08-11). "Target shape" and "Migration order" below are
 written bottom-up-by-absorption: one generic engine that each camera is
@@ -298,6 +304,122 @@ through use, not through up-front design.
 
 ## Storage and Buffering Architecture (ramfs / tmpfs vs direct storage)
 
+> **CORRECTED 2026-08-28.** This section previously concluded, on latency
+> grounds, that the tmpfs buffer was probably unnecessary on astrocam and
+> "definitely not needed" on eclipticam. **That conclusion was wrong, and it
+> was wrong because it asked the wrong question.** The buffer is not a latency
+> device. It is a *containment* device, and on the evidence below it is
+> load-bearing on both cameras. The latency analysis itself still stands — it
+> is simply not the reason the buffer exists. Kept in full below, because the
+> mistake is instructive.
+
+### What the buffer is actually for
+
+**Capture must never write to a path that can silently fall back to the root
+filesystem.** Both cameras' destination mounts carry `nofail`:
+
+- eclipticam: `/mnt/ssd` is `defaults,nofail,noatime,x-systemd.device-timeout=10s`,
+  and `~/eclipticam-frames` is a `bind,nofail` onto it.
+- astrocam: `~/astrocam-frames` is `noauto,x-systemd.automount,soft` NFS to
+  muppet's bigstore.
+
+`nofail` means that when the destination is absent the mount is **silently
+skipped** and the path reverts to a plain directory on root. Capture writing
+directly at `frames_root` would then pour ~12 MB/frame onto the root device for
+as long as the outage lasted. On astrocam that root is a 6.8 G SD card already
+at 94 % — a few hours to a wedged, unbootable Pi and a trip up a ladder.
+
+The tmpfs makes that impossible. It is a **fuse**: capture can only ever write
+into a bounded RAM region, so a destination outage blows the fuse instead of
+destroying the host. Losing a few frames of headroom is the *designed*
+behaviour of a fuse, not a defect in it.
+
+Note the choice of **tmpfs, not ramfs** is essential and not incidental:
+`ramfs` is unbounded and would consume all RAM and OOM the Pi — the exact
+catastrophe being prevented. Only a `size=`-capped tmpfs is a fuse.
+
+### Evidence: eclipticam, night of 2026-08-27 (lost entirely)
+
+The strongest case is the camera the old text called the clearest exception.
+
+- 2026-08-27 05:32:30 — `/mnt/ssd` dropped (flaky USB SSD cable, the known
+  fault). `eclipticam-v3w-uploader` has `Requires=mnt-ssd.mount`, so systemd
+  stopped it as a dependent. It caught SIGTERM, made its clean final pass, and
+  exited **0/SUCCESS**.
+- The SSD came back. The uploader **did not** — `Requires=` propagates *stop*
+  but never *start*, and a clean exit is not a restart condition, so
+  `Restart=always` never fired. It stayed dead for 1 day 6 h.
+- 2026-08-27 21:05 — night capture started into a 50 M buffer with no drainer.
+  Four frames at ~12 MB, then a truncated `.tmp` at 21:09. **Dead in four
+  minutes; 0 frames for the night, against 476 the night before.**
+
+Read correctly, this vindicates the buffer rather than indicting it. Root
+stayed at 56 % of 15 G, the Pi stayed up and reachable, and the four completed
+frames were still intact in RAM and were recovered by hand. Had capture been
+writing straight at `~/eclipticam-frames`, the same cable blip would have
+spent the night filling root.
+
+**The real defect is that the fuse blew silently.** `alert-on-failure@` was
+wired to the uploader but never fired, because this was a clean *stop*, not a
+failure. Nothing told anyone; the night daemon cheerfully started into a full
+buffer and died. A blown fuse must wake someone.
+
+### Consequences
+
+1. **Keep the tmpfs on both cameras.** 50 M is not "constricted", it is the
+   fuse rating. Do not enlarge it to paper over a drain failure — that only
+   buys minutes and blunts the signal.
+2. **Keep `Requires=<store>.mount` on the uploaders.** It is containment, not
+   an accident: with the store gone, the drainer *must* stop rather than move
+   frames onto an unmounted path. **Fixed 2026-08-28** by adding
+   `Upholds=eclipticam-v3w-uploader.service` to `mnt-ssd.mount` (systemd 257),
+   which restores the drainer when the mount returns without weakening the
+   stop propagation. Verified by stopping and restarting `mnt-ssd.mount`:
+   uploader goes `inactive` on drop, returns `active` on remount.
+3. **Alert on a filling buffer, not only on unit failure.** A watchdog on
+   buffer occupancy (say >50 % at night start) catches the whole class,
+   including clean-exit drainers. Keep it *outside* the capture path so it
+   can never affect capture.
+4. **The tiering is the unified convention.** eclipticam already runs
+   `tmpfs fuse (seconds) -> /mnt/ssd (nights) -> bigstore`. astrocam runs
+   `tmpfs fuse -> NFS bigstore` with no middle tier, purely because it has no
+   local store — a hardware fact, not a design difference. Giving astrocam a
+   partitioned card (below) makes the two structurally identical, and the
+   "astrocam is NFS, eclipticam is SSD" split stops existing.
+
+### astrocam local storage (decided 2026-08-28, Peter)
+
+astrocam is a Pi 4B, root `/dev/mmcblk0p2` 6.8 G at **94 %, 413 M free** —
+drifting up and close to trouble on its own account. The framestore stays
+muppet's 5.5 T `/bigstore`; local storage here is **ride-through** (how many
+nights of NFS/muppet outage to survive), not archive.
+
+**Decision: one SanDisk High Endurance microSD, partitioned — root plus a
+separate spool filesystem.** Rationale:
+
+- Containment is a **filesystem** boundary, not a device boundary. A separate
+  spool partition means a stalled shipper fills the spool and stops; root is
+  untouched. That is the entire requirement.
+- A second device would add only independent-failure isolation, which is worth
+  little on a card-booted Pi — an SD failure takes root either way. (Small USB
+  SSDs are also hard to source.)
+- High Endurance is the *correct* part for this once partitioned: the spool
+  carries continuous large sequential writes, exactly its design duty. It
+  would have been a mismatch as pure root, which is nearly read-only here.
+- **Caveat: partitioning gives space isolation, not wear isolation.** SD
+  wear-levelling is device-wide — the FTL spans the whole card, so spool writes
+  consume endurance that root's blocks also draw from. That is *why* the card
+  class matters rather than being optional.
+- Sizing: root 16 G against today's 6.0 G used; spool takes the rest. At
+  ~11 GB/night a 64 G card gives ~4 nights of ride-through, a 128 G card ~8.
+  Prefer 128 G — the cost delta is trivial against a lost week of nights.
+- **The ansible role must own the partition layout**, not the flashing step:
+  `cloud-init-init` builds the image, so a hand-partitioned card silently
+  reverts to single-partition on the next rebuild and the containment quietly
+  disappears.
+
+### Original latency analysis (superseded as a rationale, still true as physics)
+
 The historical role of an intermediate RAM buffer (`/var/lib/*-buffer` tmpfs) differs across instruments, but streaming mode fundamentally changes the latency and buffering requirements:
 
 1. **astrocam (NFS mount storage):**
@@ -312,6 +434,11 @@ The historical role of an intermediate RAM buffer (`/var/lib/*-buffer` tmpfs) di
 
 3. **Risk of brittle RAM buffers:**
    - Staging to a constricted `tmpfs` (e.g. 50 MB) creates a severe point of failure: if an uploader service experiences a startup race (e.g. waiting for USB SSD enumeration) or network stall, the buffer exhausts in ~4 frames, fatally crashing compression worker threads while masking the failure from systemd.
+   - *2026-08-28: the mechanism described here is exactly right and was observed
+     in full on 08-27 — the "~4 frames" estimate was precisely correct. What is
+     wrong is calling it a risk **of** the buffer. It is the buffer working:
+     the alternative to blowing the fuse is filling root. The genuine defects
+     are the missing restart path (fixed) and the missing alert (open).*
 
 ## Open questions
 

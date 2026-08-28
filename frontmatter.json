@@ -2,31 +2,246 @@
   "$schema": "https://frontmatter.codes/frontmatter.schema.json",
   "frontMatter.framework.id": "other",
   "frontMatter.content.pageFolders": [
-    { "title": "Transients", "path": "[[workspace]]/transients" }
+    {
+      "title": "Transients",
+      "path": "[[workspace]]/transients"
+    },
+    {
+      "title": "Showcase",
+      "path": "[[workspace]]/showcase"
+    }
   ],
-  "frontMatter.content.publicFolder": "transients/_render",
+  "frontMatter.content.publicFolder": "showcase/_render",
   "frontMatter.content.defaultFileType": "md",
   "frontMatter.taxonomy.contentTypes": [
     {
       "name": "transient",
       "pageBundle": false,
       "fields": [
-        { "title": "Title", "name": "title", "type": "string", "single": true },
-        { "title": "Id (changing this creates a SECOND gallery entry)", "name": "id", "type": "string" },
-        { "title": "Category", "name": "category", "type": "choice",
-          "choices": ["meteor", "lightning", "plane", "satellite", "screen-grab", "daytime", "other"] },
-        { "title": "Confidence", "name": "confidence", "type": "choice",
-          "choices": ["confirmed", "likely", "possible", "unknown"] },
-        { "title": "Date", "name": "date", "type": "datetime" },
-        { "title": "Time (local, e.g. 04:14 BST)", "name": "time", "type": "string" },
-        { "title": "Camera", "name": "camera", "type": "string" },
-        { "title": "Night", "name": "night", "type": "string" },
-        { "title": "Source recipe", "name": "source", "type": "fields", "fields": [
-          { "title": "Frames", "name": "frames", "type": "list" },
-          { "title": "Combine", "name": "combine", "type": "choice", "choices": ["single", "max"] },
-          { "title": "Crop x0,y0,x1,y1", "name": "crop", "type": "list" },
-          { "title": "Scale", "name": "scale", "type": "number" }
-        ] }
+        {
+          "title": "Title",
+          "name": "title",
+          "type": "string",
+          "single": true
+        },
+        {
+          "title": "Id (changing this creates a SECOND gallery entry)",
+          "name": "id",
+          "type": "string"
+        },
+        {
+          "title": "Category",
+          "name": "category",
+          "type": "choice",
+          "choices": [
+            "meteor",
+            "lightning",
+            "plane",
+            "satellite",
+            "screen-grab",
+            "daytime",
+            "other"
+          ]
+        },
+        {
+          "title": "Confidence",
+          "name": "confidence",
+          "type": "choice",
+          "choices": [
+            "confirmed",
+            "likely",
+            "possible",
+            "unknown"
+          ]
+        },
+        {
+          "title": "Date",
+          "name": "date",
+          "type": "datetime"
+        },
+        {
+          "title": "Time (local, e.g. 04:14 BST)",
+          "name": "time",
+          "type": "string"
+        },
+        {
+          "title": "Camera",
+          "name": "camera",
+          "type": "string"
+        },
+        {
+          "title": "Night",
+          "name": "night",
+          "type": "string"
+        },
+        {
+          "title": "Source recipe",
+          "name": "source",
+          "type": "fields",
+          "fields": [
+            {
+              "title": "Frames",
+              "name": "frames",
+              "type": "list"
+            },
+            {
+              "title": "Combine",
+              "name": "combine",
+              "type": "choice",
+              "choices": [
+                "single",
+                "max"
+              ]
+            },
+            {
+              "title": "Crop x0,y0,x1,y1",
+              "name": "crop",
+              "type": "list"
+            },
+            {
+              "title": "Scale",
+              "name": "scale",
+              "type": "number"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "showcase",
+      "pageBundle": false,
+      "fields": [
+        {
+          "title": "Title",
+          "name": "title",
+          "type": "string",
+          "single": true
+        },
+        {
+          "title": "Id",
+          "name": "id",
+          "type": "string"
+        },
+        {
+          "title": "Category",
+          "name": "category",
+          "type": "choice",
+          "choices": [
+            "deep-sky",
+            "milky-way",
+            "star-trails",
+            "derotated",
+            "widefield",
+            "solar-system",
+            "lunar",
+            "meteors",
+            "other"
+          ]
+        },
+        {
+          "title": "Target",
+          "name": "target",
+          "type": "string"
+        },
+        {
+          "title": "Constellation",
+          "name": "constellation",
+          "type": "string"
+        },
+        {
+          "title": "Featured",
+          "name": "featured",
+          "type": "boolean"
+        },
+        {
+          "title": "Date",
+          "name": "date",
+          "type": "datetime"
+        },
+        {
+          "title": "Time",
+          "name": "time",
+          "type": "string"
+        },
+        {
+          "title": "Camera",
+          "name": "camera",
+          "type": "string"
+        },
+        {
+          "title": "Night",
+          "name": "night",
+          "type": "string"
+        },
+        {
+          "title": "Equipment",
+          "name": "equipment",
+          "type": "fields",
+          "fields": [
+            {
+              "title": "Optics",
+              "name": "optics",
+              "type": "string"
+            },
+            {
+              "title": "Focal length",
+              "name": "focal_length",
+              "type": "string"
+            },
+            {
+              "title": "F-ratio",
+              "name": "f_ratio",
+              "type": "string"
+            },
+            {
+              "title": "Sensor",
+              "name": "sensor",
+              "type": "string"
+            },
+            {
+              "title": "Mount",
+              "name": "mount",
+              "type": "string"
+            },
+            {
+              "title": "Filter",
+              "name": "filter",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "title": "Exposure",
+          "name": "exposure",
+          "type": "fields",
+          "fields": [
+            {
+              "title": "Subs",
+              "name": "subs",
+              "type": "number"
+            },
+            {
+              "title": "Sub time",
+              "name": "sub_time",
+              "type": "string"
+            },
+            {
+              "title": "Total integration",
+              "name": "total_integration",
+              "type": "string"
+            },
+            {
+              "title": "ISO / Gain",
+              "name": "iso_gain",
+              "type": "string"
+            },
+            {
+              "title": "Bortle class",
+              "name": "bortle",
+              "type": "string"
+            }
+          ]
+        }
       ]
     }
   ],
@@ -38,8 +253,20 @@
       "type": "content"
     },
     {
-      "title": "Publish to gallery",
+      "title": "Publish to transients",
       "script": "transients/fm-publish.sh",
+      "command": "bash",
+      "type": "content"
+    },
+    {
+      "title": "Render showcase preview",
+      "script": "showcase/fm-render.sh",
+      "command": "bash",
+      "type": "content"
+    },
+    {
+      "title": "Publish to showcase",
+      "script": "showcase/fm-publish.sh",
       "command": "bash",
       "type": "content"
     }
