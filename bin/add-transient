@@ -23,10 +23,28 @@ The manifest is read-modify-write against S3, so it is the single source
 of truth and no local state is needed — but two concurrent publishes race,
 which is fine for a hand-curated gallery of one operator.
 
+WHY THERE IS A RATIONALE FIELD
+-----------------------------
+A streak in a frame does not explain itself: the same bright line is a
+meteor, a satellite, an aircraft or a star trail depending on evidence the
+picture alone does not carry (did both ends stop inside the frame? was it
+in one sub or twenty? where was the sun?). A gallery that just captions it
+"meteor" is asserting the interesting part instead of showing it. So each
+item carries `caption` (what you are looking at), `rationale` (why we say
+it is that), and `evidence` (the short discriminator points, one per
+--evidence), and the website prints all three.
+
+The discriminator itself lives in bin/find-transients — keep the evidence
+points you write here in its language (ends interior / touches border,
+single-sub vs persistent, non-sidereal angle, solar altitude) so a reader
+can go from the card to the code.
+
 Usage:
     add-transient IMAGE --title "Perseid fireball" --category meteor \
         [--date 2026-08-12] [--time "23:41 BST"] [--camera canon] \
-        [--night 2026-08-12] [--caption "..."] [--id ...] [--publish]
+        [--night 2026-08-12] [--caption "..."] [--rationale "..."] \
+        [--evidence "..." --evidence "..."] [--confidence likely] \
+        [--id ...] [--publish]
 
     add-transient --list                 # show the current manifest
     add-transient --remove <id> --publish
@@ -53,6 +71,12 @@ THUMB_WIDTH = 640
 # category the day something new turns up in a frame.
 CATEGORIES = ("meteor", "lightning", "plane", "satellite",
               "screen-grab", "daytime", "other")
+
+# How sure we are of the classification. Free text is accepted too, but
+# these four are what the website styles; "unknown" is the honest default
+# for anything published without a --confidence, and is preferable to
+# leaving the reader to assume the label was established.
+CONFIDENCE = ("confirmed", "likely", "possible", "unknown")
 
 
 def slugify(text, maxlen=40):
@@ -126,7 +150,9 @@ def cmd_list(s3):
         print(f"  {e.get('date','?')}  {e.get('category','?'):<11} "
               f"{cam:<14} {e.get('id')}")
         if e.get("title"):
-            print(f"      {e['title']}")
+            why = ("" if e.get("rationale") or e.get("evidence")
+                   else "   [no rationale]")
+            print(f"      {e['title']}{why}")
     return 0
 
 
@@ -168,7 +194,17 @@ def main():
     ap.add_argument("--camera", help="astrocam / eclipticam / canon / ...")
     ap.add_argument("--night", help="night page to link back to (YYYY-MM-DD)")
     ap.add_argument("--caption", default="",
-                    help="a sentence or two of context")
+                    help="a sentence or two on WHAT you are looking at")
+    ap.add_argument("--rationale", default="",
+                    help="WHY it is classified this way — the reasoning, in "
+                         "prose, in find-transients' language")
+    ap.add_argument("--evidence", action="append", default=[],
+                    metavar="POINT",
+                    help="one short discriminator point; repeat per point "
+                         "(e.g. --evidence 'both ends interior to the frame' "
+                         "--evidence 'present in exactly one sub')")
+    ap.add_argument("--confidence", default="unknown",
+                    help=f"one of {', '.join(CONFIDENCE)} (default unknown)")
     ap.add_argument("--id", dest="item_id",
                     help="explicit id (default <date>-<category>-<slug>); "
                          "reuse an id to replace that entry")
@@ -214,6 +250,9 @@ def main():
         "camera": args.camera,
         "night": args.night,
         "caption": args.caption,
+        "rationale": args.rationale,
+        "evidence": args.evidence,
+        "confidence": args.confidence.lower(),
         "image_key": f"{PREFIX}/items/{item_id}.jpg",
         "thumb_key": f"{PREFIX}/thumbs/{item_id}.jpg",
         "width": width,

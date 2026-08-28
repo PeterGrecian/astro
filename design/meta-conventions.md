@@ -210,7 +210,11 @@ entry, so a caption or crop can be fixed without growing the manifest.
     "time": "23:41 BST",         // human clock time, or null
     "camera": "canon",           // or null
     "night": "2026-08-12",       // links back to the night page, or null
-    "caption": "...",
+    "caption": "...",          // WHAT you are looking at
+    "rationale": "...",        // WHY it is classified this way, in prose
+    "evidence": ["both ends interior to the frame",
+                 "present in exactly one sub"],   // discriminator points
+    "confidence": "likely",    // confirmed|likely|possible|unknown
     "image_key": "transients/items/....jpg",
     "thumb_key": "transients/thumbs/....jpg",
     "width": 2304, "height": 1296,
@@ -219,6 +223,18 @@ entry, so a caption or crop can be fixed without growing the manifest.
   }]
 }
 ```
+
+A streak does not explain itself — the same bright line is a meteor, a
+satellite, an aircraft or a star trail depending on evidence the picture
+does not carry — so `rationale` + `evidence` are part of the schema rather
+than something folded into the caption, and the gallery prints them under
+every card. Write the evidence points in `bin/find-transients`' language
+(ends interior / touches border, single-sub vs persistent, non-sidereal
+angle, solar altitude) so a reader can go from the card to the code. A
+missing `confidence` is rendered as "unclassified": an unhedged category
+label claims the call is settled, which is what an entry without one has
+not established. The page-level explainer of the discriminator lives in the
+Lambda renderer (`render_astro_transients`).
 
 Published by hand with `bin/add-transient` (there is no nightly job — the
 collection is curated, not detected). The website reads the one manifest
