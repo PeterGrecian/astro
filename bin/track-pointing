@@ -12,15 +12,20 @@ camera's own motion with no astrometry, works through cloud, and runs at capture
 cadence. Measured floor on eclipticam-v3w night 2026-07-25: dx sd 0.13 px,
 dy sd 0.33 px in superpixel units (0.25 / 0.66 full-res) = about 0.02 deg.
 
-SCOPE — within-night only, deliberately. Cross-night foreground registration was
-tried and does not survive changing streetlights, moonlight, wind and parked
-cars: single-frame phase correlation put two nights 553 px apart that the
-roofline registration had measured at 72, and a least-squares affine on
-per-patch shifts gave 15-57 px residuals with implausible 5 deg rotations
-(gross outliers dominate; it would need RANSAC and a curated static mask).
-For CROSS-night use a plate solve instead - pointing in degrees is the right
-currency between nights, roofline pixels the right currency within one. See
-`solve-detections` and the astrometry block in camera.json.
+SCOPE — within-night only, but that is a conservative starting point, not a
+hard limit. Cross-night registration DOES work within one camera-location era:
+per-patch medians on edge images, ref 2026-07-25, gave 08-04 5.75 px (scatter
+0.73), 08-14 4.77 (1.74), 08-22 4.23 (1.34). It fails across a RELOCATION -
+eclipticam moved from the "rosebush" position to upstairs between 08-22 and
+08-26 - because there is then no shared foreground to correlate at all. Bridge
+a relocation with a plate solve instead (`solve-detections`, or the astrometry
+block in camera.json); degrees are the right currency across a move, roofline
+pixels within an era.
+
+STILL UNRESOLVED: extracting ROTATION as well as translation. A least-squares
+affine on per-patch shifts gives 15-57 px residuals and implausible 5 deg
+rotations even within an era - gross outliers (cars, wind, lights) dominate and
+it needs RANSAC plus a curated static mask. Only translation is trustworthy.
 
 Output: a CSV time series and detected steps. A flat run is a stable pointing;
 a step is a nudge, timestamped to the frame.
