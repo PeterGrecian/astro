@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""make-frame-graticule — per-frame RA/Dec .reg overlay for an AXIS-gnomonic camera.
+
+Companion to make-epoch-graticule, for cameras whose celestial pole is OFF the
+sensor (eclipticam-v3w looks south; pole is 95 deg off-axis, BEHIND the camera).
+There the sky's motion is a translation+shear, not a rotation about a pole pixel,
+so the _epoch.reg + rotate-about-pole scheme cannot apply -- measured error is
+1064 px after 10 min. Instead this emits an exact .reg PER FRAME.
+
+Model: gnomonic about the optical AXIS -- (az0, alt0, roll, f), no distortion.
+Fitted 2026-08-29 from 15 star probes (Altair/Tarazed/Alshain/Enif/Skat) over
+5 epochs, rho 0.18-0.60: rms 1.6 px. A radial k1 term fits to -0.0049, i.e. nil.
+"""
+import argparse, math, sys
+from pathlib import Path
+import numpy as np, ephem
+
+STARS = {  # name -> (RA, Dec) strings, ICRS
+ "Altair":("19:50:47","+08:52:06"), "Tarazed":("19:46:16","+10:36:48"),
+ "Alshain":("19:55:19","+06:24:29"), "Enif":("21:44:11","+09:52:30"),
+ "Skat":("22:54:39","-15:49:15"),   "Sadalmelik":("22:05:47","-00:19:11"),
+ "Sadalsuud":("21:31:33","-05:34:16"), "Kitalpha":("21:15:49","+05:14:52"),
+ "beta Del":("20:37:33","+14:35:42"), "gamma Del":("20:46:39","+16:07:27"),
+ "alpha Del":("20:39:38","+15:54:43"), "delta Del":("20:43:28","+15:04:28"),
+ "beta Cap":("20:21:00","-14:46:53"), "alpha2 Cap":("20:18:03","-12:32:41"),
+ "theta Peg":("22:10:12","+06:11:52"), "zeta Peg":("22:41:28","+10:49:53"),
+ "Markab":("23:04:46","+15:12:19"), "Rasalhague":("17:34:56","+12:33:36"),
+ "Sabik":("17:10:23","-15:43:30"), "Nunki":("18:55:16","-26:17:48"),
+ "Albireo":("19:30:43","+27:57:35"), "Fomalhaut":("22:57:39","-29:37:20"),
+}
+
+def build(az0, alt0, roll, f, W, H, lat, lon, elev, when, margin):
+    o = ephem.Observer(); o.lat, o.lon, o.elevation = lat, lon, elev; o.date = when
+    cx, cy = W/2.0, H/2.0
+    def unit(a, e):
+        a, e = math.radians(a), math.radians(e)
+        return np.array([math.cos(e)*math.sin(a), math.cos(e)*math.cos(a), math.sin(e)])
+    b = unit(az0, alt0); up = np.array([0,0,1.0])
+    r = np.cross(b, up); r /= np.linalg.norm(r); u = np.cross(r, b)
+    cr, sr = math.cos(math.radians(roll)), math.sin(math.radians(roll))
+    r2, u2 = cr*r + sr*u, -sr*r + cr*u
+    def s2p(ra_deg, dec_deg):
+        body = ephem.FixedBody()
+        body._ra, body._dec = math.radians(ra_deg), math.radians(dec_deg)
+        body.compute(o)
+        v = unit(math.degrees(float(body.az)), math.degrees(float(body.alt)))
+        zc = float(b @ v)
+        if zc <= 1e-6: return None
+        return cx + float(r2 @ v)/zc*f, cy - float(u2 @ v)/zc*f
+    def on(p):
+        return p is not None and -margin <= p[0] <= W+margin and -margin <= p[1] <= H+margin
+    out = ["# per-frame RA/Dec graticule (axis-gnomonic); image coords", "image"]
+    def poly(pts, colour, tag):
+        run = []
+        for p in pts:
+            if on(p): run.append(p)
+            else:
+                if len(run) > 1: out.append(_poly(run, colour, tag))
+                run = []
+        if len(run) > 1: out.append(_poly(run, colour, tag))
+    def _poly(run, colour, tag):
+        co = ",".join(f"{x:.1f},{y:.1f}" for x, y in run)
+        return f"polygon({co}) # color={colour} tag={{{tag}}}"
+    for dec in range(-30, 51, 10):                       # parallels
+        poly([s2p(ra, dec) for ra in np.arange(0, 360.5, 1.0)], "blue", "graticule")
+    for h in range(24):                                  # meridians
+        poly([s2p(h*15.0, d) for d in np.arange(-40, 60.5, 1.0)], "cyan", "graticule")
+    for h in range(24):                                  # hour labels
+        for dec in (0, 10):
+            p = s2p(h*15.0, dec)
+            if on(p): out.append(f"point({p[0]:.1f},{p[1]:.1f}) # color=cyan text={{{h}h}} tag={{raticks}}")
+    for nm, (ra, dec) in STARS.items():                  # named stars
+        p = s2p(math.degrees(float(ephem.hours(ra))), math.degrees(float(ephem.degrees(dec))))
+        if on(p) and 0 <= p[0] < W and 0 <= p[1] < H:
+            out.append(f"circle({p[0]:.1f},{p[1]:.1f},25) # color=yellow text={{{nm}}} tag={{starnames}}")
+    return "\n".join(out) + "\n"
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("frames", nargs="+", type=Path)
+    ap.add_argument("--az0", type=float, default=200.721)
+    ap.add_argument("--alt0", type=float, default=31.487)
+    ap.add_argument("--roll", type=float, default=-3.729)
+    ap.add_argument("-f", "--focal", type=float, default=1957.8)
+    ap.add_argument("--size", default="4608x2592")
+    ap.add_argument("--lat", default="51.394801"); ap.add_argument("--lon", default="-0.292259")
+    ap.add_argument("--elev", type=float, default=30)
+    ap.add_argument("--exposure", type=float, default=59.9,
+                    help="exposure s; overlay is drawn for mid-exposure")
+    ap.add_argument("--margin", type=float, default=400.0)
+    ap.add_argument("--outdir", type=Path, help="write here instead of beside each frame")
+    a = ap.parse_args()
+    W, H = (int(v) for v in a.size.split("x"))
+    for fr in a.frames:
+        ms = int(fr.name.split(".")[0])
+        when = ephem.Date(ephem.Date("1970/01/01") + (ms/1000.0 + a.exposure/2.0)/86400.0)
+        txt = build(a.az0, a.alt0, a.roll, a.focal, W, H, a.lat, a.lon, a.elev, when, a.margin)
+        dest = (a.outdir / (fr.name.split(".")[0] + ".reg")) if a.outdir else fr.with_suffix("").with_suffix(".reg")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(txt)
+        print(f"{dest}  ({len(txt.splitlines())} shapes)  utc={ephem.Date(when)}")
