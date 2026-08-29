@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""track-pointing — measure camera pointing stability within a night, from the
+static foreground.
+
+WHY: an "epoch" is a run of frames sharing one pointing, and epochs have been
+maintained by hand from *known* camera moves. Nudges go unrecorded. This
+measures them.
+
+The rooflines and trees are FIXED in the camera frame while the sky moves, so
+cross-correlating a foreground band against the night's first frame gives the
+camera's own motion with no astrometry, works through cloud, and runs at capture
+cadence. Measured floor on eclipticam-v3w night 2026-07-25: dx sd 0.13 px,
+dy sd 0.33 px in superpixel units (0.25 / 0.66 full-res) = about 0.02 deg.
+
+SCOPE — within-night only, deliberately. Cross-night foreground registration was
+tried and does not survive changing streetlights, moonlight, wind and parked
+cars: single-frame phase correlation put two nights 553 px apart that the
+roofline registration had measured at 72, and a least-squares affine on
+per-patch shifts gave 15-57 px residuals with implausible 5 deg rotations
+(gross outliers dominate; it would need RANSAC and a curated static mask).
+For CROSS-night use a plate solve instead - pointing in degrees is the right
+currency between nights, roofline pixels the right currency within one. See
+`solve-detections` and the astrometry block in camera.json.
+
+Output: a CSV time series and detected steps. A flat run is a stable pointing;
+a step is a nudge, timestamped to the frame.
+
+    track-pointing ~/eclipticam-frames/night/2026-07-25/v3w/*/*.fits.fz
+    track-pointing --json --stride 1 <frames...>
+"""
+from __future__ import annotations
+import argparse, json, sys, datetime as dt
+from pathlib import Path
+import numpy as np
+
+def superpixel(path):
+    from astropy.io import fits
+    d = fits.getdata(str(path)).astype(np.float32)
+    return d[0::2, 0::2] + d[0::2, 1::2] + d[1::2, 0::2] + d[1::2, 1::2]
+
+def foreground(path, band, blur):
+    import cv2
+    L = superpixel(path)
+    y0, y1, x0, x1 = band
+    y1 = min(y1, L.shape[0]); x1 = min(x1, L.shape[1])
+    r = L[y0:y1, x0:x1]
+    return (r - cv2.GaussianBlur(r, (0, 0), blur)).astype(np.float32)
+
+def frame_utc(path):
+    stem = Path(path).name.split(".")[0]
+    if stem.isdigit() and len(stem) >= 12:                    # epoch ms filename
+        return dt.datetime.fromtimestamp(int(stem) / 1000, dt.timezone.utc)
+    try:
+        from astropy.io import fits
+        with fits.open(str(path)) as h:
+            for hdu in h:
+                if hdu.header.get("DATE-OBS"):
+                    return dt.datetime.fromisoformat(hdu.header["DATE-OBS"].replace("Z", "+00:00"))
+    except Exception:
+        pass
+    return dt.datetime.fromtimestamp(Path(path).stat().st_mtime, dt.timezone.utc)
+
+def find_steps(t, xy, min_seg, k, floor_px):
+    """Binary segmentation on the 2-D series. A split is kept when the jump in
+    the median exceeds both `floor_px` and k * noise, noise from the MAD of
+    successive differences (robust to the step itself)."""
+    d = np.diff(xy, axis=0)
+    mad = np.median(np.abs(d - np.median(d, axis=0)), axis=0)
+    noise = float(np.hypot(*(mad / 0.6745))) / np.sqrt(2) or 1e-6
+    steps, todo = [], [(0, len(xy))]
+    while todo:
+        a, b = todo.pop()
+        if b - a < 2 * min_seg:
+            continue
+        best, bi = 0.0, None
+        for i in range(a + min_seg, b - min_seg + 1):
+            jump = float(np.hypot(*(np.median(xy[i:b], axis=0) - np.median(xy[a:i], axis=0))))
+            if jump > best:
+                best, bi = jump, i
+        if bi is not None and best > floor_px and best > k * noise:
+            steps.append((bi, best))
+            todo += [(a, bi), (bi, b)]
+    return sorted(steps), noise
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("frames", nargs="+", type=Path)
+    ap.add_argument("--band", default="860,1240,100,2200",
+                    help="foreground y0,y1,x0,x1 in SUPERPIXEL coords (default: v3w rooflines)")
+    ap.add_argument("--blur", type=float, default=25.0, help="high-pass sigma, kills the sky gradient")
+    ap.add_argument("--stride", type=int, default=1)
+    ap.add_argument("--min-resp", type=float, default=0.05, help="drop frames whose correlation is weaker")
+    ap.add_argument("--min-seg", type=int, default=5, help="shortest run either side of a step")
+    ap.add_argument("--k", type=float, default=6.0, help="step must exceed k * noise")
+    ap.add_argument("--floor", type=float, default=1.0, help="and exceed this many px outright")
+    ap.add_argument("--max-shift", type=float, default=60.0,
+                    help="px; a segment beyond this is flagged SUSPECT, not reported as a move. "
+                         "Large offsets are nearly always registration failure (washed-out "
+                         "foreground, headlights, cloud), not the camera actually moving.")
+    ap.add_argument("--max-gap", type=float, default=1800.0,
+                    help="seconds; a larger gap starts a new run rather than counting as a nudge")
+    ap.add_argument("--csv", type=Path)
+    ap.add_argument("--json", action="store_true")
+    a = ap.parse_args()
+    import cv2
+    band = tuple(int(v) for v in a.band.split(","))
+    # Sort CHRONOLOGICALLY, not by path: a night dir holds hours 00-04 (which
+    # belong to the next calendar day) alongside 20-23, and path order puts 00
+    # first. Sorting by path silently produces a non-monotonic time series.
+    frames = [f for _, f in sorted((frame_utc(f), f) for f in a.frames)][::a.stride]
+    if len(frames) < 3:
+        sys.exit("need at least 3 frames")
+    ref = foreground(frames[0], band, a.blur)
+    rows, kept = [], []
+    for f in frames:
+        try:
+            (dx, dy), resp = cv2.phaseCorrelate(ref, foreground(f, band, a.blur))
+        except Exception as e:
+            print(f"skip {f.name}: {e}", file=sys.stderr); continue
+        u = frame_utc(f)
+        rows.append({"frame": f.name, "utc": u.isoformat(), "dx": dx, "dy": dy, "resp": resp})
+        if resp >= a.min_resp:
+            kept.append((u, dx, dy))
+    if len(kept) < 3:
+        sys.exit(f"only {len(kept)} frames locked (min-resp {a.min_resp}) — check --band")
+    t = [k[0] for k in kept]
+    xy = np.array([[k[1], k[2]] for k in kept])
+    # Split on TIME GAPS first: a night dir holds the pre-dawn hours AND the
+    # following evening, 16 h apart. Those are separate runs, not a nudge.
+    gaps = [i for i in range(1, len(t))
+            if (t[i] - t[i - 1]).total_seconds() > a.max_gap]
+    bounds = [0] + gaps + [len(t)]
+    segs, noise = [], None
+    for gi in range(len(bounds) - 1):
+        g0, g1 = bounds[gi], bounds[gi + 1]
+        if g1 - g0 < 3:
+            continue
+        sub = xy[g0:g1]
+        steps, n = find_steps(t[g0:g1], sub, a.min_seg, a.k, a.floor)
+        noise = n if noise is None else min(noise, n)
+        prev, prev_jump = 0, None
+        for i, jump in steps + [(len(sub), None)]:
+            med = np.median(sub[prev:i], axis=0)
+            segs.append({"from": t[g0 + prev].isoformat(), "to": t[g0 + i - 1].isoformat(),
+                         "n": i - prev, "run": gi,
+                         "dx": round(float(med[0]), 3), "dy": round(float(med[1]), 3),
+                         "suspect": bool(np.hypot(*med) > a.max_shift),
+                         "step_into_px": round(float(prev_jump), 3) if prev_jump is not None else None})
+            prev, prev_jump = i, jump
+    steps = [s for s in segs if s["step_into_px"] is not None]
+    out = {"frames": len(rows), "locked": len(kept), "noise_px": round(noise, 3),
+           "band": band, "runs": len({s["run"] for s in segs}),
+           "steps": len(steps), "segments": segs, "series": rows}
+    if a.csv:
+        import csv
+        with open(a.csv, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=["frame", "utc", "dx", "dy", "resp"]); w.writeheader()
+            w.writerows(rows)
+    if a.json:
+        print(json.dumps(out, indent=2)); return
+    lock = len(kept) / max(len(rows), 1)
+    print(f"{len(rows)} frames, {len(kept)} locked ({lock*100:.0f}%), "
+          f"noise {noise:.3f} px (superpixel; x2 for full-res)")
+    if lock < 0.85:
+        print(f"  WARNING: only {lock*100:.0f}% of frames locked — foreground contrast is poor "
+              f"on this night; treat every number below as provisional.")
+    nruns = len({sg["run"] for sg in segs})
+    print(f"{len(segs)} pointing segment(s) across {nruns} run(s) "
+          f"(runs split by gaps > {a.max_gap:.0f}s, not counted as nudges):")
+    last = None
+    for sg in segs:
+        if sg["run"] != last:
+            print(f"  -- run {sg['run']} --"); last = sg["run"]
+        j = "" if sg["step_into_px"] is None else f"   <- NUDGE {sg['step_into_px']:.2f} px"
+        if sg["suspect"]:
+            j += "   [SUSPECT: beyond --max-shift, almost certainly bad registration]"
+        print(f"  {sg['from'][:19].replace('T',' ')} .. {sg['to'][11:19]}  n={sg['n']:4d}  "
+              f"dx={sg['dx']:+8.3f} dy={sg['dy']:+8.3f}{j}")
+    if not steps:
+        print("no nudges detected — pointing stable within every run")
+
+if __name__ == "__main__":
+    main()
