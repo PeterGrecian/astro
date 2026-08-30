@@ -387,36 +387,28 @@ buffer and died. A blown fuse must wake someone.
    partitioned card (below) makes the two structurally identical, and the
    "astrocam is NFS, eclipticam is SSD" split stops existing.
 
-### astrocam local storage (decided 2026-08-28, Peter)
+### astrocam local storage (decided 2026-08-28, Peter; LANDED 2026-08-30)
 
-astrocam is a Pi 4B, root `/dev/mmcblk0p2` 6.8 G at **94 %, 413 M free** —
-drifting up and close to trouble on its own account. The framestore stays
-muppet's 5.5 T `/bigstore`; local storage here is **ride-through** (how many
-nights of NFS/muppet outage to survive), not archive.
+astrocam was previously on a 6.8 G SD card (94% / 413 M free). On 2026-08-30
+`cloud-init-init` serviced astrocam bare-metal with a 64GB High Endurance card
+partitioned into:
+- 16 GiB ext4 rootfs (`rootfs`, 11G free, 31% used)
+- 43 GiB ext4 dedicated spool (`astrostorage`, mounted at `/var/lib/astrocam-storage`, 40G free)
+- Partitioning and `LABEL=astrostorage` mount codified in `Berrylands/cloud-init-init` (`app-astrocam.conf`, `3e9b48e`).
 
-**Decision: one SanDisk High Endurance microSD, partitioned — root plus a
-separate spool filesystem.** Rationale:
+The framestore stays muppet's 5.5 T `/bigstore`; local storage here is
+**ride-through** (~3-4 nights of NFS/muppet outage at ~11 GB/night), not
+archive.
+
+**Decision & Architecture (proven):**
 
 - Containment is a **filesystem** boundary, not a device boundary. A separate
   spool partition means a stalled shipper fills the spool and stops; root is
   untouched. That is the entire requirement.
-- A second device would add only independent-failure isolation, which is worth
-  little on a card-booted Pi — an SD failure takes root either way. (Small USB
-  SSDs are also hard to source.)
-- High Endurance is the *correct* part for this once partitioned: the spool
-  carries continuous large sequential writes, exactly its design duty. It
-  would have been a mismatch as pure root, which is nearly read-only here.
-- **Caveat: partitioning gives space isolation, not wear isolation.** SD
-  wear-levelling is device-wide — the FTL spans the whole card, so spool writes
-  consume endurance that root's blocks also draw from. That is *why* the card
-  class matters rather than being optional.
-- Sizing: root 16 G against today's 6.0 G used; spool takes the rest. At
-  ~11 GB/night a 64 G card gives ~4 nights of ride-through, a 128 G card ~8.
-  Prefer 128 G — the cost delta is trivial against a lost week of nights.
-- **The ansible role must own the partition layout**, not the flashing step:
-  `cloud-init-init` builds the image, so a hand-partitioned card silently
-  reverts to single-partition on the next rebuild and the containment quietly
-  disappears.
+- High Endurance card provides the endurance for continuous large sequential writes.
+- **Next pipeline task**: Update `astrocam_v3_uploader.py` and implement
+  `astrocam-ship-night` to drain tmpfs -> `/var/lib/astrocam-storage` -> `muppet:/mnt/bigstore`,
+  completing the unified 3-tier storage architecture across both astrocam and eclipticam.
 
 ### Original latency analysis (superseded as a rationale, still true as physics)
 
