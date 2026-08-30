@@ -58,6 +58,30 @@ def load(frames, root: Path):
     return out
 
 
+def demosaic_bayer(sub: np.ndarray, pattern: str = "RGGB") -> np.ndarray:
+    """Demosaic raw Bayer crop to float32 (H, W, 3) RGB array."""
+    try:
+        import cv2
+        p = pattern.upper().strip().lstrip("S")
+        # OpenCV Bayer code names: RGGB -> COLOR_BayerRG2RGB, BGGR -> COLOR_BayerBG2RGB, etc.
+        cv_name = f"COLOR_Bayer{p[:2]}2RGB"
+        code = getattr(cv2, cv_name, cv2.COLOR_BayerRG2RGB)
+        sub_u16 = np.clip(sub, 0, 65535).astype(np.uint16)
+        return cv2.cvtColor(sub_u16, code).astype(np.float32)
+    except Exception:
+        # Fallback if cv2 is not available: 2x2 cell demosaic
+        oy, ox = 0, 0
+        h = (sub.shape[0] // 2) * 2
+        w = (sub.shape[1] // 2) * 2
+        s = sub[:h, :w]
+        r = s[0::2, 0::2]
+        g = 0.5 * (s[0::2, 1::2] + s[1::2, 0::2])
+        b = s[1::2, 1::2]
+        rgb_half = np.stack([r, g, b], axis=-1)
+        from PIL import Image as _Img
+        return np.array(_Img.fromarray(rgb_half.astype(np.uint8)).resize((w, h), _Img.BILINEAR)).astype(np.float32)
+
+
 def render(card: dict, root: Path):
     from PIL import Image
     src = card["source"]
@@ -66,14 +90,27 @@ def render(card: dict, root: Path):
     gain = float(stretch.get("gain", 6.0))
     hi = float(stretch.get("hi_pct", 99.9))
     scale = int(src.get("scale", 1))
+    demosaic = src.get("demosaic", True)  # default to RGB demosaic for raw Bayer
+    pattern = src.get("pattern", "RGGB")
 
     arrs = load(src["frames"], root)
     a = arrs[0] if len(arrs) == 1 else np.maximum.reduce(arrs)
     sub = a[y0:y1, x0:x1]
-    d = np.clip(sub - np.median(sub), 0, None)
-    v = np.arcsinh(d / gain)
-    v = v / np.percentile(v, hi)
-    img = Image.fromarray((np.clip(v, 0, 1) * 255).astype(np.uint8)).convert("RGB")
+
+    if demosaic:
+        rgb = demosaic_bayer(sub, pattern)
+        bg = np.median(rgb, axis=(0, 1))
+        d = np.clip(rgb - bg, 0, None)
+        v = np.arcsinh(d / gain)
+        hi_val = np.percentile(v, hi)
+        v = np.clip(v / max(1e-6, hi_val), 0, 1)
+        img = Image.fromarray((v * 255).astype(np.uint8))
+    else:
+        d = np.clip(sub - np.median(sub), 0, None)
+        v = np.arcsinh(d / gain)
+        v = v / np.percentile(v, hi)
+        img = Image.fromarray((np.clip(v, 0, 1) * 255).astype(np.uint8)).convert("RGB")
+
     if scale != 1:
         img = img.resize((img.width * scale, img.height * scale), Image.LANCZOS)
     return img
