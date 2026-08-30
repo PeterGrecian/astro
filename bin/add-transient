@@ -39,12 +39,60 @@ points you write here in its language (ends interior / touches border,
 single-sub vs persistent, non-sidereal angle, solar altitude) so a reader
 can go from the card to the code.
 
+WHERE THE CARD TEXT LIVES
+-------------------------
+Flags are fine for a one-off, but prose written on a command line is prose
+with nowhere to live: it is not in git, it cannot be re-read, and editing a
+caption means retyping the whole invocation. So the card text has a home —
+one Markdown file per card, with YAML frontmatter for the fields:
+
+    ---
+    title: Perseid meteor grazing Cassiopeia
+    category: meteor
+    confidence: confirmed
+    date: '2026-08-10'
+    time: '22:56 BST'
+    camera: canon
+    night: '2026-08-10'
+    image: /media/meteor-eos-2026-08-10.124.png
+    ---
+
+    Prose before any recognised heading is the caption: WHAT you are
+    looking at.
+
+    ## Reasoning
+
+    WHY it is classified that way.
+
+    ## Evidence
+
+    - both ends interior to the frame
+    - present in exactly one sub
+
+Recognised headings are Caption, Reasoning (or Rationale) and Evidence, at
+any level, case-insensitively; every other heading is just body text and
+stays in whichever section it falls in. A standalone Markdown image line is
+dropped — it is there so the file previews in an editor, not for the card.
+`image:` resolves against the card repo's public/ directory when it starts
+with a slash, otherwise relative to the .md file.
+
+The FILENAME is the id, and so the URL: content/transients/2026-08-10-
+meteor-x.md serves at /astro/transients/2026-08-10-meteor-x. Re-publishing
+an edited card therefore REPLACES it — edit the text, run again, the gallery
+updates in place — and the card behind a page you are looking at is findable
+by name. Rewording a title cannot orphan a URL, which a title-derived slug
+would. Pin `id:` in the frontmatter to override, and rename the file rather
+than the id if you want the URL to change.
+
 Usage:
     add-transient IMAGE --title "Perseid fireball" --category meteor \
         [--date 2026-08-12] [--time "23:41 BST"] [--camera canon] \
         [--night 2026-08-12] [--caption "..."] [--rationale "..."] \
         [--evidence "..." --evidence "..."] [--confidence likely] \
         [--id ...] [--publish]
+
+    add-transient --from-md CARD.md [--from-md OTHER.md] [--publish]
+    add-transient --from-dir content/transients --publish
 
     add-transient --list                 # show the current manifest
     add-transient --remove <id> --publish
@@ -82,6 +130,160 @@ CONFIDENCE = ("confirmed", "likely", "possible", "unknown")
 def slugify(text, maxlen=40):
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
     return s[:maxlen].strip("-") or "item"
+
+
+# Headings that mark a section of a card's body. Anything else is ordinary
+# body text: a card is free to use "### Plate solution" inside its reasoning
+# without that silently becoming a new field.
+SECTIONS = {
+    "caption": "caption",
+    "reasoning": "rationale",
+    "rationale": "rationale",
+    "evidence": "evidence",
+}
+
+_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$")
+# Greedy to the LAST paren: a Markdown image title may itself contain
+# parentheses — ![alt](path.png "Sub 343 (03:14 UTC)") — and a lazy match
+# stops inside the title, leaving the preview line stranded in the caption.
+_IMAGE_LINE = re.compile(r"^!\[[^\]]*\]\(.*\)\s*$")
+
+
+def split_body(body):
+    """Card body -> {'caption': str, 'rationale': str, 'evidence': [str]}.
+
+    Text before the first recognised heading is the caption, so a card that
+    is simply prose needs no headings at all. Paragraphs are preserved as
+    blank-line breaks because that is what the website splits on; newlines
+    inside a paragraph are not, so the .md can be wrapped however you like.
+    """
+    out = {"caption": [], "rationale": [], "evidence": []}
+    current = "caption"
+    for line in body.splitlines():
+        m = _HEADING.match(line)
+        if m:
+            key = SECTIONS.get(m.group(1).strip().lower())
+            if key:
+                current = key
+                continue
+        if _IMAGE_LINE.match(line.strip()):
+            continue
+        out[current].append(line)
+
+    def _paras(lines):
+        paras = (" ".join(p.split()) for p in
+                 re.split(r"\n\s*\n", "\n".join(lines)))
+        return "\n\n".join(p for p in (x.strip() for x in paras) if p)
+
+    evidence = [re.sub(r"^[-*+]\s+", "", ln).strip()
+                for ln in out["evidence"] if ln.strip()]
+    return {"caption": _paras(out["caption"]),
+            "rationale": _paras(out["rationale"]),
+            "evidence": [e for e in evidence if e]}
+
+
+def resolve_image(md_path, value):
+    """Filesystem path for a card's `image:` value, or None.
+
+    A leading slash means the card repo's public/ directory — the convention
+    TinaCMS writes and the one an editor preview follows — so the same value
+    works in the CMS, in a Markdown preview, and here.
+    """
+    if not value:
+        return None
+    raw = str(value)
+    direct = Path(raw).expanduser()
+    if direct.is_absolute() and direct.exists():
+        return direct
+    rel = md_path.parent / raw
+    if rel.exists():
+        return rel
+    if raw.startswith("/"):
+        for parent in md_path.resolve().parents:
+            cand = parent / "public" / raw.lstrip("/")
+            if cand.exists():
+                return cand
+    return None
+
+
+def parse_card(md_path):
+    """One Markdown card -> the fields build_entry needs."""
+    import yaml
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", md_path.read_text(), re.S)
+    if not m:
+        raise ValueError(f"{md_path}: no YAML frontmatter")
+    meta = yaml.safe_load(m.group(1)) or {}
+    body = split_body(m.group(2))
+
+    if not meta.get("title"):
+        raise ValueError(f"{md_path}: frontmatter needs a title")
+    image = resolve_image(md_path, meta.get("image"))
+    if image is None:
+        raise ValueError(f"{md_path}: image {meta.get('image')!r} not found")
+
+    # Frontmatter evidence wins over an Evidence section, so a card can keep
+    # the points as structured data if that reads better in the CMS.
+    evidence = meta.get("evidence") or body["evidence"]
+    if isinstance(evidence, str):
+        evidence = [evidence]
+
+    def _s(key):
+        return str(meta[key]) if meta.get(key) else None
+
+    return {
+        "image": image,
+        "title": str(meta["title"]),
+        "category": str(meta.get("category") or "other").lower(),
+        "date": str(meta.get("date") or ""),
+        "tod": _s("time"),
+        "camera": _s("camera"),
+        "night": _s("night"),
+        "caption": body["caption"],
+        "rationale": body["rationale"],
+        "evidence": list(evidence),
+        "confidence": str(meta.get("confidence") or "unknown").lower(),
+        # The filename IS the id, and so the URL: content/transients/
+        # 2026-08-10-meteor-x.md serves at /astro/transients/2026-08-10-meteor-x.
+        # That way the card you are editing is findable from the page you are
+        # looking at, and rewording a title cannot silently orphan a URL the
+        # way a title-derived slug would. Pin `id:` to override.
+        "item_id": _s("id") or md_path.stem,
+        "source": str(md_path),
+    }
+
+
+def build_entry(card):
+    """(entry, full_bytes, thumb_bytes) for one card, ready to upload."""
+    from PIL import Image
+    date = card["date"] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise ValueError(f"date must be YYYY-MM-DD, got {date!r}")
+
+    category = card["category"]
+    item_id = card["item_id"] or f"{date}-{category}-{slugify(card['title'])}"
+
+    img = Image.open(card["image"])
+    width, height = img.size
+    entry = {
+        "id": item_id,
+        "title": card["title"],
+        "category": category,
+        "date": date,
+        "time": card["tod"],
+        "camera": card["camera"],
+        "night": card["night"],
+        "caption": card["caption"],
+        "rationale": card["rationale"],
+        "evidence": card["evidence"],
+        "confidence": card["confidence"].lower(),
+        "image_key": f"{PREFIX}/items/{item_id}.jpg",
+        "thumb_key": f"{PREFIX}/thumbs/{item_id}.jpg",
+        "width": width,
+        "height": height,
+        "source": card.get("source") or str(card["image"]),
+        "added_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    return entry, encode_full(img), make_thumb(img)
 
 
 def s3_client():
@@ -212,6 +414,12 @@ def main():
                     help="actually upload; without it this is a dry run")
     ap.add_argument("--list", action="store_true", help="list the manifest")
     ap.add_argument("--remove", metavar="ID", help="remove an item by id")
+    ap.add_argument("--from-md", dest="from_md", action="append", default=[],
+                    metavar="CARD.md", type=Path,
+                    help="publish from a Markdown card (repeatable); the "
+                         "card's text lives in the file, not in these flags")
+    ap.add_argument("--from-dir", dest="from_dir", metavar="DIR", type=Path,
+                    help="publish every *.md card in DIR")
     args = ap.parse_args()
 
     s3 = s3_client()
@@ -221,66 +429,89 @@ def main():
     if args.remove:
         return cmd_remove(s3, args.remove, args.publish)
 
-    if not args.image:
-        ap.error("an IMAGE is required (or use --list / --remove)")
-    if not args.image.exists():
-        print(f"no such file: {args.image}", file=sys.stderr)
-        return 1
-    if not args.title:
-        ap.error("--title is required")
+    cards = []
+    if args.from_md or args.from_dir:
+        if args.image:
+            ap.error("give an IMAGE or --from-md/--from-dir, not both")
+        paths = list(args.from_md)
+        if args.from_dir:
+            if not args.from_dir.is_dir():
+                print(f"no such directory: {args.from_dir}", file=sys.stderr)
+                return 1
+            paths += sorted(args.from_dir.glob("*.md"))
+        if not paths:
+            print("no cards to publish", file=sys.stderr)
+            return 1
+        # Parse every card BEFORE touching S3: a directory publish that
+        # half-lands because card seven has a typo is worse than one that
+        # refuses to start.
+        failed = False
+        for md in paths:
+            try:
+                cards.append(parse_card(md))
+            except Exception as exc:
+                print(f"{exc}", file=sys.stderr)
+                failed = True
+        if failed:
+            return 1
+    else:
+        if not args.image:
+            ap.error("an IMAGE is required (or use --from-md / --from-dir "
+                     "/ --list / --remove)")
+        if not args.image.exists():
+            print(f"no such file: {args.image}", file=sys.stderr)
+            return 1
+        if not args.title:
+            ap.error("--title is required")
+        cards.append({
+            "image": args.image,
+            "title": args.title,
+            "category": args.category.lower(),
+            "date": args.date or "",
+            "tod": args.tod,
+            "camera": args.camera,
+            "night": args.night,
+            "caption": args.caption,
+            "rationale": args.rationale,
+            "evidence": args.evidence,
+            "confidence": args.confidence,
+            "item_id": args.item_id,
+            "source": str(args.image),
+        })
 
-    date = args.date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
-        ap.error(f"--date must be YYYY-MM-DD, got '{date}'")
-    category = args.category.lower()
-    item_id = args.item_id or f"{date}-{category}-{slugify(args.title)}"
-
-    from PIL import Image
-    img = Image.open(args.image)
-    width, height = img.size
-    full_bytes = encode_full(img)
-    thumb_bytes = make_thumb(img)
-
-    entry = {
-        "id": item_id,
-        "title": args.title,
-        "category": category,
-        "date": date,
-        "time": args.tod,
-        "camera": args.camera,
-        "night": args.night,
-        "caption": args.caption,
-        "rationale": args.rationale,
-        "evidence": args.evidence,
-        "confidence": args.confidence.lower(),
-        "image_key": f"{PREFIX}/items/{item_id}.jpg",
-        "thumb_key": f"{PREFIX}/thumbs/{item_id}.jpg",
-        "width": width,
-        "height": height,
-        "source": str(args.image),
-        "added_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-    }
-
-    print(json.dumps(entry, indent=2))
-    print(f"source {width}x{height}  full {len(full_bytes)/1024:.0f}KB  "
-          f"thumb {len(thumb_bytes)/1024:.0f}KB")
+    entries = []
+    for card in cards:
+        try:
+            entry, full_bytes, thumb_bytes = build_entry(card)
+        except ValueError as exc:
+            print(f"{card.get('source') or card['image']}: {exc}",
+                  file=sys.stderr)
+            return 1
+        entries.append((entry, full_bytes, thumb_bytes))
+        print(json.dumps(entry, indent=2))
+        print(f"source {entry['width']}x{entry['height']}  "
+              f"full {len(full_bytes)/1024:.0f}KB  "
+              f"thumb {len(thumb_bytes)/1024:.0f}KB")
 
     if not args.publish:
-        print("dry run — pass --publish to upload")
+        print(f"dry run ({len(entries)} card(s)) — pass --publish to upload")
         return 0
 
+    # One read-modify-write for the whole batch: publishing a directory of
+    # cards should leave the manifest rewritten once, not once per card.
     index = load_index(s3)
-    replaced = any(e.get("id") == item_id for e in index["items"])
-    index["items"] = [e for e in index["items"] if e.get("id") != item_id]
-    index["items"].append(entry)
-
-    s3.put_object(Bucket=BUCKET, Key=entry["image_key"], Body=full_bytes,
-                  ContentType="image/jpeg")
-    s3.put_object(Bucket=BUCKET, Key=entry["thumb_key"], Body=thumb_bytes,
-                  ContentType="image/jpeg")
+    for entry, full_bytes, thumb_bytes in entries:
+        item_id = entry["id"]
+        replaced = any(e.get("id") == item_id for e in index["items"])
+        index["items"] = [e for e in index["items"] if e.get("id") != item_id]
+        index["items"].append(entry)
+        s3.put_object(Bucket=BUCKET, Key=entry["image_key"], Body=full_bytes,
+                      ContentType="image/jpeg")
+        s3.put_object(Bucket=BUCKET, Key=entry["thumb_key"], Body=thumb_bytes,
+                      ContentType="image/jpeg")
+        print(f"{'replaced' if replaced else 'added'} {item_id}")
     write_index(s3, index)
-    print(f"{'replaced' if replaced else 'added'} {item_id} — "
-          f"{len(index['items'])} item(s) at "
+    print(f"{len(index['items'])} item(s) at "
           f"https://www.petergrecian.co.uk/astro/transients")
     return 0
 
