@@ -10,7 +10,7 @@ live cameras now share the streaming engine:
 | `astro/capture/streaming.py` | ✔ exists |
 | eclipticam v3w on the shared module | ✔ `eclipticam/v3w_night_daemon.py` |
 | **astrocam on the shared module** (migration step 1) | ✔ **done** — `astrocam/astrocam_v3_night_daemon.py` is a thin wrapper; imx219 `astrocam/capture.py` retired 2026-07-29 |
-| starcam (step 3) | ✘ **moot — camera decommissioned 2026-08-02** |
+| starcam (step 3) | ⚠ **un-mooted 2026-09-08** — the "decommissioned" note was wrong: the host is up and the OV5647 is enumerated. Idle since 2026-06-04, and now being **re-purposed behind a telescope** — see astro-capture STATE.md |
 | skycam (step 4) | ✘ still in `Berrylands/gardencam` |
 | eclipticam v1 | ✘ hand-rolled, does not import the shared module |
 | `uploader.py` / `modes.py` / `host.py` / `__main__.py` | ✘ not written; `astro/capture/` holds only `__init__.py` + `streaming.py` |
@@ -249,8 +249,11 @@ rules, but still a host.json for symmetry.
 ## Migration order — least painful first
 
 > **Superseded in part — see the status table at the top.** Steps 1 and 2
-> are **done**; step 3 (starcam) is **moot**, the camera was
-> decommissioned 2026-08-02. The live remainder is skycam (step 4), the
+> are **done**; step 3 (starcam) was recorded as **moot** on the strength of a
+> 2026-08-02 "decommissioned" note that turned out to be **wrong** (corrected
+> 2026-09-08: host up, camera enumerated, merely idle since 2026-06-04). It is
+> live again in a new optical configuration — behind a telescope — so step 3
+> is back on the ladder, but as a *different* camera in everything but sensor. The live remainder is skycam (step 4), the
 > gardencam move (step 5), and **eclipticam v1**, which this list never
 > mentioned but is now the most interesting migration: it is the
 > multi-camera-per-host case (v3w's mode gates whether v1 captures at
@@ -297,7 +300,9 @@ through use, not through up-front design.
    rpicam-still is fine. The framework should allow both, not force
    streaming everywhere.
 
-4. **Production cameras can't be down.** skycam and starcam are live.
+4. **Production cameras can't be down.** skycam is live. (starcam was
+   listed here too; it has been idle since 2026-06-04, so the rule no longer
+   binds it — which makes it the *safest* place to try a migration.)
    Migrate one at a time, with the old daemon left running until the
    new one has shown a full week of clean output. Don't refactor in
    place.
