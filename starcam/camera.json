@@ -12,7 +12,7 @@
     1944
   ],
   "plate_scale_deg_px": 0.000267381,
-  "plate_scale_notes": "THEORETICAL, not plate-solved: 206.265 * 1.4 um / 300 mm = 0.9626 arcsec/px. Field of view 0.693 x 0.520 deg. Supersedes the stock-lens value 0.0206 deg/px (53.50 deg horizontal, heavy barrel distortion) - that lens is off the camera. Barrel distortion is gone; a 300 mm Newtonian is near-rectilinear across a 3.6 mm chip. REPLACE THIS with a real plate solve once there is a star field to solve on.",
+  "plate_scale_notes": "THEORETICAL, not plate-solved: 206.265 * 1.4 um / 300 mm = 0.9626 arcsec/px. Field of view 0.693 x 0.520 deg. Supersedes the stock-lens value 0.0206 deg/px (53.50 deg horizontal, heavy barrel distortion) - that lens is off the camera. Barrel distortion is gone; a 300 mm Newtonian is near-rectilinear across a 3.6 mm chip. REPLACE THIS from the streaks themselves: trailed stars self-calibrate, since streak length at known exposure gives plate_scale*cos(dec) and streak direction gives orientation - available on every frame, and tracks flexure/focus drift in a way a one-off plate solve does not.",
   "pole_prior_xy": null,
   "pole_prior_notes": "Nulled 2026-09-08. Was [910, 40] for the stock 53.5 deg lens. Meaningless behind a telescope: the celestial pole cannot be in a 0.69 x 0.52 deg field unless deliberately pointed there, and the polar-derotation/star-trail pipeline this fed does not apply.",
   "frames_root": "~/starcam-frames",
@@ -49,8 +49,13 @@
   "drift": {
     "untracked": true,
     "arcsec_per_sec_at_equator": 15.04,
-    "max_exposure_s_1px_trail": 0.064,
-    "field_crossing_s": 165.9,
-    "notes": "Alt-az, undriven. A star crosses one pixel in 0.064 s at the celestial equator, and crosses the whole long axis in 166 s (~2.8 min). Those two numbers set the capture design: exposures of order 0.1 s (2x2 binned, 2 px of trail tolerated), and a re-point roughly every 3 minutes. Both scale as 1/cos(dec) - slower near the pole."
-  }
+    "px_per_sec_at_equator": 15.62,
+    "px_per_sec_binned2x2": 7.81,
+    "smear_is_recoverable": true,
+    "notes": "Alt-az, undriven, and the smear is TREATED AS SIGNAL rather than as a limit (Peter, 2026-09-08). Sidereal drift is a deterministic 1-D box convolution: direction and length are computable from geometry and exposure time and are near-uniform across a 0.69 deg field, so this is KNOWN-PSF deconvolution, not blind. Trailed stars also carry astrometry - streak length at known exposure gives plate_scale*cos(dec), streak direction gives field orientation. There is therefore NO per-sub trailing cap; an earlier version of this file asserted 0.064 s and was wrong.",
+    "sub_length_rationale": "In the read-noise-dominated regime total SNR at fixed integration time is INDEPENDENT of sub length (signal per streak pixel = f/k, independent of t), so sub length is chosen on practical grounds, not photometric ones. On a Pi 1B the practical grounds all favour LONGER subs: fewer frames, less I/O, less NFS traffic. Sub length only begins to cost SNR once sky shot noise catches read noise, ~14 s on assumed RN=3e-/QE=0.4 (UNMEASURED - see read_noise_todo). Working range 1-4 s = 16-64 px streaks, tractable to deconvolve.",
+    "vary_sub_length": "DO alternate sub exposure lengths across a stack. A box kernel's MTF is a sinc with exact nulls at n/L where information is destroyed outright; nulls for L1 do not coincide with nulls for L2, so mixed exposure lengths fill in each other's dead frequencies. Coded exposure in the time domain, for the cost of a config change.",
+    "field_rotation": "Alt-az: negligible within a sub (~1 arcsec at field edge over 14 s) but real across a night. Registration must solve ROTATION as well as translation, and the rotation rate diverges near the zenith."
+  },
+  "read_noise_todo": "UNMEASURED. RN~3e- and QE~0.4 are assumed, and every noise threshold above rests on them. ~7116 frames already exist (see blackest_observed); the frame-difference of two matched darks gives RN directly. Measure before tuning gain."
 }
