@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""mjpeg-view — stream MJPEG from stdin into a low-latency X11 window using pygame.
+
+Usage:
+  ssh host 'rpicam-vid -t 0 --codec mjpeg --width 640 --height 480 --framerate 15 -o -' | mjpeg-view
+"""
+import io
+import os
+import queue
+import sys
+import threading
+import time
+
+os.environ["DISPLAY"] = os.environ.get("DISPLAY", ":0")
+
+try:
+    import pygame
+except ImportError:
+    print("mjpeg-view: pygame required", file=sys.stderr)
+    sys.exit(1)
+
+SOI = b"\xff\xd8"
+EOI = b"\xff\xd9"
+
+def stream_reader(stream, frame_queue, stop_event):
+    buffer = bytearray()
+    while not stop_event.is_set():
+        try:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+
+            while True:
+                soi = buffer.find(SOI)
+                if soi == -1:
+                    buffer.clear()
+                    break
+                if soi > 0:
+                    del buffer[:soi]
+
+                eoi = buffer.find(EOI, 2)
+                if eoi == -1:
+                    break
+
+                jpeg = bytes(buffer[: eoi + 2])
+                del buffer[: eoi + 2]
+
+                try:
+                    frame_queue.put_nowait(jpeg)
+                except queue.Full:
+                    try:
+                        frame_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    frame_queue.put_nowait(jpeg)
+        except Exception:
+            break
+
+def main():
+    pygame.init()
+    width, height = 640, 480
+    screen = pygame.display.set_mode((width, height), pygame.RESIZABLE)
+    pygame.display.set_caption("starcam live video (q to quit)")
+    clock = pygame.time.Clock()
+
+    frame_queue = queue.Queue(maxsize=2)
+    stop_event = threading.Event()
+
+    t = threading.Thread(
+        target=stream_reader,
+        args=(sys.stdin.buffer, frame_queue, stop_event),
+        daemon=True,
+    )
+    t.start()
+
+    font = pygame.font.SysFont("monospace", 14)
+    fps_counter = 0
+    fps_val = 0.0
+    last_fps_time = time.time()
+    current_surf = None
+
+    running = True
+    while running and t.is_alive():
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (
+                event.type == pygame.KEYDOWN and event.key in (pygame.K_q, pygame.K_ESCAPE)
+            ):
+                running = False
+            elif event.type == pygame.VIDEORESIZE:
+                screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
+
+        new_jpeg = None
+        while not frame_queue.empty():
+            try:
+                new_jpeg = frame_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        if new_jpeg:
+            try:
+                current_surf = pygame.image.load(io.BytesIO(new_jpeg))
+                fps_counter += 1
+                now = time.time()
+                if now - last_fps_time >= 1.0:
+                    fps_val = fps_counter / (now - last_fps_time)
+                    fps_counter = 0
+                    last_fps_time = now
+            except Exception:
+                pass
+
+        if current_surf:
+            w, h = screen.get_size()
+            scaled = current_surf
+            if current_surf.get_size() != (w, h):
+                scaled = pygame.transform.scale(current_surf, (w, h))
+            screen.blit(scaled, (0, 0))
+
+            fps_text = font.render(f"{fps_val:.1f} fps", True, (0, 255, 0), (0, 0, 0))
+            screen.blit(fps_text, (8, 8))
+            pygame.display.flip()
+
+        clock.tick(30)
+
+    stop_event.set()
+    pygame.quit()
+
+if __name__ == "__main__":
+    main()

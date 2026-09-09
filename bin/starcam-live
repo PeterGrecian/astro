@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# starcam-live — live low-latency video feed from starcam over X11
+#
+# Usage:
+#   starcam-live [--mpv] [--width 640] [--height 480] [--fps 15]
+
+set -euo pipefail
+
+WIDTH=640
+HEIGHT=480
+FPS=15
+USE_MPV=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mpv) USE_MPV=true; shift ;;
+        --width) WIDTH="$2"; shift 2 ;;
+        --height) HEIGHT="$2"; shift 2 ;;
+        --fps) FPS="$2"; shift 2 ;;
+        -h|--help)
+            echo "Usage: starcam-live [--mpv] [--width W] [--height H] [--fps N]"
+            exit 0
+            ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+export DISPLAY="${DISPLAY:-:0}"
+
+echo "Starting starcam live stream (${WIDTH}x${HEIGHT} @ ${FPS}fps)..."
+
+STREAM_CMD="rpicam-vid -t 0 --width ${WIDTH} --height ${HEIGHT} --framerate ${FPS} --codec mjpeg --nopreview -o -"
+
+if [ "$USE_MPV" = true ]; then
+    ssh -C peter@homepi.local "ssh -C pi@192.168.0.52 \"${STREAM_CMD}\"" \
+        | mpv --fps="${FPS}" --demuxer=lavf --demuxer-lavf-format=mjpeg --no-cache --untimed --title="starcam live" -
+else
+    ssh -C peter@homepi.local "ssh -C pi@192.168.0.52 \"${STREAM_CMD}\"" \
+        | /home/peter/astro/bin/mjpeg-view
+fi
