@@ -1,0 +1,26 @@
+[Unit]
+Description=xoverpi capture (OV5647 at FirstScope prime focus; run-tagged FITS subs)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+Group=peter
+# The video group is granted at the UNIT level, not inherited from login. On
+# 2026-09-14 `peter` was missing from `video` and libcamera reported
+# "Could not open any dmaHeap device / No cameras available" - a healthy camera
+# that looked dead. Setting it here makes the service immune to that class of
+# bug regardless of the login session's group set.
+SupplementaryGroups=video
+WorkingDirectory=/home/peter/astro
+# System python3, not a venv: picamera2 is an apt package (python3-picamera2)
+# and is only importable from the system interpreter.
+ExecStart=/usr/bin/python3 /home/peter/astro/xoverpi/night_daemon.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
