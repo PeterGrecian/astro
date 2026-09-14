@@ -156,12 +156,21 @@ def set_exposure(cam, exp_us):
     """
     cam.set_controls({"ExposureTime": exp_us,
                       "FrameDurationLimits": (exp_us, exp_us)})
-    for _ in range(6):
+    # The FIRST control change after start() takes several frames to land - a
+    # 6-attempt limit let frame 1 of a run be written at the sensor's startup
+    # exposure instead of the requested one (measured 2026-09-14: 1 ms where
+    # 4 ms was asked). The header stays truthful either way because we record
+    # the metadata value, not the request, but a stack wants the exposure it
+    # asked for. Be patient, and say so when it still does not converge.
+    actual = 0
+    for _ in range(20):
         req = cam.capture_request()
         actual = req.get_metadata().get("ExposureTime", 0)
         req.release()
         if abs(actual - exp_us) <= max(200, exp_us * 0.05):
             return actual
+    logging.warning(f"exposure did not converge: asked {exp_us} us, "
+                    f"sensor delivering {actual} us; recording the actual")
     return actual
 
 
