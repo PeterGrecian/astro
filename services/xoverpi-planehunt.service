@@ -1,0 +1,19 @@
+[Unit]
+Description=xoverpi plane hunt (hourly h264 straight to bigstore)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=peter
+Group=peter
+SupplementaryGroups=video
+WorkingDirectory=/home/peter/astro
+ExecStart=/home/peter/astro/xoverpi/plane_hunt.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
