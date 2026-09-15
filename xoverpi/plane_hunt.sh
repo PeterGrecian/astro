@@ -14,6 +14,13 @@ OUT=${XOVER_PLANE_OUT:-/mnt/muppet/bigstore/xoverpi-frames/planehunt}
 FPS=${XOVER_PLANE_FPS:-30}
 W=${XOVER_PLANE_W:-1296}
 H=${XOVER_PLANE_H:-972}
+# Exposure is PINNED, not auto. Left on AE, rpicam-vid chose an exposure that
+# blew the sky to white (measured 2026-09-15), and a plane against a saturated
+# background is invisible. Probed against real overcast: 2000 us gives sky mean
+# 70/255 with max 119, so the sky sits low-mid grey and there is ample headroom
+# above it for a sunlit aircraft. Re-probe if the weather or aim changes.
+SHUTTER=${XOVER_PLANE_SHUTTER:-2000}
+GAIN=${XOVER_PLANE_GAIN:-1.0}
 
 mkdir -p "$OUT"
 while true; do
@@ -23,5 +30,6 @@ while true; do
     echo "$(date -u +%FT%TZ) starting ${secs}s segment -> $OUT/$now.h264"
     rpicam-vid -n -t $((secs * 1000)) \
         --width "$W" --height "$H" --framerate "$FPS" \
+        --shutter "$SHUTTER" --gain "$GAIN" --awbgains 1,1 \
         --codec h264 -o "$OUT/$now.h264" 2>&1 | grep -viE "^\[|INFO" || true
 done
