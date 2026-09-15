@@ -72,9 +72,14 @@
     "field_rotation": "Alt-az: negligible within a sub but real across a night. Registration must solve ROTATION as well as translation, and the rate diverges near the zenith."
   },
   "read_noise_todo": "UNMEASURED. RN~3e- and QE~0.4 are assumed. The frame-difference of two matched darks gives RN directly. Measure before tuning gain.",
+  "state": {
+    "sun_altitude_night_deg": -12.0,
+    "sun_altitude_day_deg": -10.0,
+    "notes": "Sun-altitude gate thresholds, asymmetric for hysteresis so the boundary cannot flap. Deliberately 2 deg darker than astrocam's -10/-8: astrocam is a wide-field camera whose frames are usable through late twilight, whereas this is a 0.69 deg field of faint stars behind a 76 mm aperture, where nautical dark (-12) is the point the sky stops dominating. Gating on sun ALTITUDE rather than frame brightness follows eclipticam-v3w and astrocam: altitude is a hard physical signal, while brightness is confused by headlights, moon, AE wobble and cloud."
+  },
   "occlusion_file": null,
   "quality_file": null,
-  "location_file": null,
+  "location_file": "location.json",
   "privacy_file": null,
   "subcams": null
 }

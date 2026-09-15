@@ -17,7 +17,11 @@ WorkingDirectory=/home/peter/astro
 # System python3, not a venv: picamera2 is an apt package (python3-picamera2)
 # and is only importable from the system interpreter.
 ExecStart=/usr/bin/python3 /home/peter/astro/xoverpi/night_daemon.py
-Restart=always
+# on-failure, NOT always: xoverpi-gate owns starting and stopping this unit.
+# The daemon exits 0 on its own dawn saturation guard, and Restart=always would
+# immediately restart it into daylight, looping against the gate. A crash still
+# gets retried.
+Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal

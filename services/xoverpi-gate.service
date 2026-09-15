@@ -1,0 +1,12 @@
+[Unit]
+Description=xoverpi sun-altitude gate (starts/stops xoverpi-capture)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/peter/astro
+# root, because the tick's whole job is `systemctl start/stop` on a system unit.
+ExecStart=/usr/bin/python3 /home/peter/astro/xoverpi/gate.py
+StandardOutput=journal
+StandardError=journal
