@@ -43,8 +43,8 @@ from astro.config import CameraConfig          # noqa: E402
 from astro.state import sun_altitude_deg       # noqa: E402
 
 CAPTURE_SERVICE = "xoverpi-capture.service"
-DEFAULT_NIGHT_DEG = -12.0
-DEFAULT_DAY_DEG = -10.0
+DEFAULT_NIGHT_DEG = -10.0
+DEFAULT_DAY_DEG = -8.0
 
 
 def _systemctl(*args):
