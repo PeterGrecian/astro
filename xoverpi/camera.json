@@ -14,6 +14,10 @@
   "plate_scale_notes": "THEORETICAL, not plate-solved: 206.265 * 1.4 um / 300 mm = 0.9626 arcsec/px unbinned (1.925 binned 2x2). Field of view 0.693 x 0.520 deg. REPLACE THIS from the streaks themselves: trailed stars self-calibrate, since streak length at known exposure gives plate_scale*cos(dec) and streak direction gives orientation - free on every frame, and it tracks flexure and focus drift in a way a one-off plate solve does not.",
   "pole_prior_xy": null,
   "frames_root": "~/xoverpi-frames",
+  "frames_root_by_host": {
+    "xoverpi": "/mnt/muppet/bigstore/xoverpi-frames"
+  },
+  "frames_root_by_host_notes": "Frames are written STRAIGHT to muppet's bigstore over NFS (Peter, 2026-09-15): xoverpi is on ethernet, so there is bandwidth to ship as we go and no reason to stage on the SD card. The pipeline then runs on muppet where the frames already are. Mounted by hand 2026-09-15 pending the ansible nfs-client change.",
   "frames_root_notes": "Intended to be muppet's bigstore export, automounted by the ansible nfs-client role - requested from the ansible strand 2026-09-14, NOT YET IN PLACE. Until it is, this is a local directory on the SD card and the disk guard in the daemon is the only thing preventing a full card.",
   "night_layout": "fits-hour",
   "night_layout_notes": "night/YYYY-MM-DD/HH/<RUNTAG>-NNNN.fits.fz, Rice-compressed, written directly by the capture daemon. NOT starcam's npy layout: that existed only because the Pi 1B could not compress in-line. xoverpi is a Pi 3B (ARMv7, quad-core, 921 MB) and compresses comfortably at this cadence.",
