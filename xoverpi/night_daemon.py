@@ -77,6 +77,11 @@ MIN_FREE_GB = float(os.environ.get("XOVER_MIN_FREE_GB", 2.0))
 ROTATE180 = os.environ.get("XOVER_ROTATE180", "0") == "1"
 
 PAUSE_FILE = Path.home() / "xoverpi-capture.pause"
+# One line of free text naming the CURRENT focuser setting, stamped into every
+# frame as FOCUSPOS. A focus sweep that changes setting between nights is only
+# analysable if each frame carries the setting it was taken at - otherwise the
+# whole sweep reduces to "some frames, some focus". Set it with xoverpi/focus.py.
+FOCUS_FILE = Path.home() / "xoverpi-focus"
 SAT_LEVEL = 1023              # 10-bit data in a uint16 container
 SAT_FRACTION = 0.9
 
@@ -93,7 +98,8 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
-def write_fits(data, out_path, exp_us, n_coadd, t_start, t_end, mean, run_tag):
+def write_fits(data, out_path, exp_us, n_coadd, t_start, t_end, mean, run_tag,
+               focus):
     hdu = fits.CompImageHDU(data=data, compression_type="RICE_1")
     h = hdu.header
     h["EXPTIME"] = exp_us / 1e6 * n_coadd        # total integration (s)
@@ -106,12 +112,23 @@ def write_fits(data, out_path, exp_us, n_coadd, t_start, t_end, mean, run_tag):
     h["CAMERA"] = "ov5647"
     h["TELESCOP"] = "Celestron FirstScope 76/300"
     h["RUNTAG"] = run_tag
+    h["FOCUSPOS"] = focus
     h["BINNING"] = 2 if BINNED else 1
     h["ROT180"] = ROTATE180
     h["MEAN"] = mean
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp, overwrite=True)
     tmp.rename(out_path)        # atomic: a consumer never sees a partial frame
+
+
+def read_focus() -> str:
+    """Current focuser setting, or 'unset'. Read per frame, not per run, so a
+    mid-night change is recorded on the frames it actually applies to."""
+    try:
+        v = FOCUS_FILE.read_text().strip()
+        return v if v else "unset"
+    except OSError:
+        return "unset"
 
 
 def free_gb(path: Path) -> float:
@@ -214,6 +231,7 @@ def main() -> int:
                               f"{frames_root} (< {MIN_FREE_GB}); stopping")
                 break
 
+            focus = read_focus()
             exp_us = exposures_us[i % len(exposures_us)]
             i += 1
             actual_us = set_exposure(cam, exp_us)
@@ -249,9 +267,10 @@ def main() -> int:
             seq += 1
             out_path = night_dir / f"{run_tag}-{seq:05d}.fits.fz"
             write_fits(out, out_path, actual_us, COADD_N, t_start, now,
-                       mean, run_tag)
+                       mean, run_tag, focus)
             logging.info(f"wrote {out_path.name} exp={actual_us/1e6:.2f}s "
-                         f"mean={mean:.1f} free={free_gb(frames_root):.1f}GB")
+                         f"focus={focus} mean={mean:.1f} "
+                         f"free={free_gb(frames_root):.1f}GB")
     finally:
         try:
             cam.stop(); cam.close()
