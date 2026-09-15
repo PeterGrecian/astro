@@ -1,0 +1,9 @@
+[Unit]
+Description=Build 6s max-hold plane-hunt videos from completed hours
+
+[Service]
+Type=oneshot
+User=peter
+ExecStart=/home/peter/astro/services/xoverpi-planevid-run.sh
+StandardOutput=journal
+StandardError=journal

@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly plane-hunt video build
+
+[Timer]
+OnCalendar=*-*-* *:02:00
+Persistent=true
+Unit=xoverpi-planevid.service
+
+[Install]
+WantedBy=timers.target
