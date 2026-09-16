@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""xoverpi-maxstack — contrast-normalised max/min/sum stack for a plane-hunt day.
+
+The same deliverable the other cameras produce from nightly-cam's
+stack_and_measure(): one image per period holding the brightest thing each
+pixel ever saw. For xoverpi that is every aircraft track of the day in a single
+frame.
+
+Why CONTRAST-normalised and not a raw max. A raw max over daylight picks the
+brightest cloud each pixel ever saw - near-white everywhere, with aircraft
+washed out. nightly-cam's answer is to divide each frame by its own mean before
+taking the max (its max_contrast/max_rgb path), so frames of differing
+brightness compare fairly. Our case is simpler than astrocam's because exposure
+and gain are pinned, so the brightness gate reduces to a plain mean check
+rather than the anchor band.
+
+Periods follow night_of() - the noon-UTC rollover the rest of the estate uses -
+so a plane-hunt day is labelled the same way a camera night is.
+
+    xoverpi-maxstack --night 2026-09-16          # one day's h264 segments
+    xoverpi-maxstack --hour 20260916T060000Z     # one segment -> partial .npy
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+from astro.nightdir import night_of, night_window     # noqa: E402
+
+ROOT = Path("/mnt/bigstore/astro-data/xoverpi-frames/planehunt")
+PARTIAL = ROOT / "partial"
+OUT = ROOT / "stack"
+
+# A frame whose mean is this close to full scale is a sky blowout, not data.
+SAT_MEAN = 230.0
+# ...and one this dark is night or a covered scope.
+DARK_MEAN = 4.0
+
+
+def seg_time(stem: str) -> datetime:
+    return datetime.strptime(stem, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+
+
+def probe_size(src: Path) -> tuple[int, int]:
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=width,height",
+                        "-of", "csv=p=0", str(src)],
+                       capture_output=True, text=True)
+    w, h = r.stdout.strip().split(",")[:2]
+    return int(w), int(h)
+
+
+def stack_segment(src: Path, step: int = 1):
+    """One pass over a segment. Returns (max_contrast, min_img, sum_img, n)."""
+    w, h = probe_size(src)
+    dec = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-i", str(src), "-f", "rawvideo",
+         "-pix_fmt", "gray", "-"], stdout=subprocess.PIPE)
+    fsize = w * h
+    mx = np.zeros((h, w), dtype=np.float32)
+    mn = np.full((h, w), np.inf, dtype=np.float32)
+    sm = np.zeros((h, w), dtype=np.float64)
+    n = skipped = i = 0
+    while True:
+        buf = dec.stdout.read(fsize)
+        if len(buf) < fsize:
+            break
+        i += 1
+        if (i - 1) % step:
+            continue
+        f = np.frombuffer(buf, np.uint8).reshape(h, w).astype(np.float32)
+        m = float(f.mean())
+        if m >= SAT_MEAN or m <= DARK_MEAN:
+            skipped += 1
+            continue
+        c = f / max(m, 1.0)          # contrast-normalise, then max over THAT
+        np.maximum(mx, c, out=mx)
+        np.minimum(mn, f, out=mn)
+        sm += f
+        n += 1
+    dec.stdout.close(); dec.wait()
+    print(f"  {src.name}: stacked {n}, skipped {skipped} of {i}")
+    return mx, mn, sm, n
+
+
+def write_jpg(arr, path, lo_pct=50.0, hi_pct=99.9):
+    """Percentile stretch to 8-bit, the house normalisation."""
+    from PIL import Image
+    a = arr.astype(np.float64)
+    lo = float(np.percentile(a, lo_pct))
+    hi = float(np.percentile(a, hi_pct))
+    if hi <= lo:
+        hi = lo + 1.0
+    out = np.clip((a - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
+    Image.fromarray(out).save(path, quality=92)
+    print(f"  wrote {path.name}  stretch p{lo_pct}={lo:.3f} p{hi_pct}={hi:.3f}")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--night", help="night_of() date, e.g. 2026-09-16")
+    ap.add_argument("--hour", help="one segment stem, e.g. 20260916T060000Z")
+    ap.add_argument("--step", type=int, default=3,
+                    help="use every Nth frame (default 3; a transit is ~300)")
+    a = ap.parse_args()
+    PARTIAL.mkdir(parents=True, exist_ok=True)
+    OUT.mkdir(parents=True, exist_ok=True)
+
+    if a.hour:
+        src = ROOT / f"{a.hour}.h264"
+        mx, mn, sm, n = stack_segment(src, a.step)
+        if n:
+            np.savez_compressed(PARTIAL / f"{a.hour}.npz",
+                                mx=mx, mn=mn, sm=sm, n=n)
+            print(f"  partial -> {a.hour}.npz")
+        return 0
+
+    night = a.night or night_of()
+    start, end = night_window(night)
+    segs = sorted(p for p in ROOT.glob("*.h264")
+                  if start <= seg_time(p.stem) < end)
+    if not segs:
+        print(f"no segments for night {night}")
+        return 1
+    print(f"night {night}: {len(segs)} segments")
+
+    mx = mn = sm = None
+    total = 0
+    for s in segs:
+        p = PARTIAL / f"{s.stem}.npz"
+        if p.exists():
+            z = np.load(p)
+            a_mx, a_mn, a_sm, n = z["mx"], z["mn"], z["sm"], int(z["n"])
+            print(f"  {s.name}: partial ({n} frames)")
+        else:
+            a_mx, a_mn, a_sm, n = stack_segment(s, a.step)
+            if n:
+                np.savez_compressed(p, mx=a_mx, mn=a_mn, sm=a_sm, n=n)
+        if not n:
+            continue
+        mx = a_mx if mx is None else np.maximum(mx, a_mx)
+        mn = a_mn if mn is None else np.minimum(mn, a_mn)
+        sm = a_sm if sm is None else sm + a_sm
+        total += n
+    if not total:
+        print("nothing stacked")
+        return 1
+
+    np.save(OUT / f"{night}-max.npy", mx)
+    np.save(OUT / f"{night}-min.npy", mn)
+    np.save(OUT / f"{night}-sum.npy", sm)
+    write_jpg(mx, OUT / f"{night}-max.jpg")
+    write_jpg(sm / total, OUT / f"{night}-mean.jpg")
+    print(f"night {night}: {total} frames stacked")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
