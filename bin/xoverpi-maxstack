@@ -40,10 +40,18 @@ ROOT = Path("/mnt/bigstore/astro-data/xoverpi-frames/planehunt")
 PARTIAL = ROOT / "partial"
 OUT = ROOT / "stack"
 
-# A frame whose mean is this close to full scale is a sky blowout, not data.
-SAT_MEAN = 230.0
-# ...and one this dark is night or a covered scope.
-DARK_MEAN = 4.0
+# Brightness BAND, not merely a floor. Contrast normalisation divides by the
+# frame mean, so noise contrast goes as 1/mean: a twilight frame at mean 11
+# amplifies read noise ~16x harder than a daylight frame at mean 175. Measured
+# on 2026-09-15, the DARKEST segments produced the HIGHEST max-contrast (3.92 at
+# mean 18.8 vs 1.78 at mean 175.7) - pure noise, and it beat every real aircraft
+# in the day stack. nightly-cam gates to an anchor band for this exact reason;
+# an earlier version of this tool used a bare floor of 4.0 and the day stack came
+# out as vertical column noise.
+SAT_MEAN = 200.0
+DARK_MEAN = 60.0
+# Bump when the gate changes, so cached partials from an older gate regenerate.
+GATE_VERSION = 2
 
 
 def seg_time(stem: str) -> datetime:
@@ -59,7 +67,8 @@ def probe_size(src: Path) -> tuple[int, int]:
     return int(w), int(h)
 
 
-def stack_segment(src: Path, step: int = 1):
+def stack_segment(src: Path, step: int = 1,
+                  dark: float = DARK_MEAN, sat: float = SAT_MEAN):
     """One pass over a segment. Returns (max_contrast, min_img, sum_img, n)."""
     w, h = probe_size(src)
     dec = subprocess.Popen(
@@ -79,7 +88,7 @@ def stack_segment(src: Path, step: int = 1):
             continue
         f = np.frombuffer(buf, np.uint8).reshape(h, w).astype(np.float32)
         m = float(f.mean())
-        if m >= SAT_MEAN or m <= DARK_MEAN:
+        if m >= sat or m <= dark:
             skipped += 1
             continue
         c = f / max(m, 1.0)          # contrast-normalise, then max over THAT
@@ -111,16 +120,20 @@ def main() -> int:
     ap.add_argument("--hour", help="one segment stem, e.g. 20260916T060000Z")
     ap.add_argument("--step", type=int, default=3,
                     help="use every Nth frame (default 3; a transit is ~300)")
+    ap.add_argument("--dark-mean", type=float, default=DARK_MEAN,
+                    help=f"reject frames dimmer than this (default {DARK_MEAN})")
+    ap.add_argument("--sat-mean", type=float, default=SAT_MEAN,
+                    help=f"reject frames brighter than this (default {SAT_MEAN})")
     a = ap.parse_args()
     PARTIAL.mkdir(parents=True, exist_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
 
     if a.hour:
         src = ROOT / f"{a.hour}.h264"
-        mx, mn, sm, n = stack_segment(src, a.step)
+        mx, mn, sm, n = stack_segment(src, a.step, a.dark_mean, a.sat_mean)
         if n:
             np.savez_compressed(PARTIAL / f"{a.hour}.npz",
-                                mx=mx, mn=mn, sm=sm, n=n)
+                                mx=mx, mn=mn, sm=sm, n=n, gate=GATE_VERSION)
             print(f"  partial -> {a.hour}.npz")
         return 0
 
@@ -137,14 +150,16 @@ def main() -> int:
     total = 0
     for s in segs:
         p = PARTIAL / f"{s.stem}.npz"
-        if p.exists():
-            z = np.load(p)
+        z = np.load(p) if p.exists() else None
+        if z is not None and int(z.get("gate", 0)) == GATE_VERSION:
             a_mx, a_mn, a_sm, n = z["mx"], z["mn"], z["sm"], int(z["n"])
             print(f"  {s.name}: partial ({n} frames)")
         else:
-            a_mx, a_mn, a_sm, n = stack_segment(s, a.step)
+            a_mx, a_mn, a_sm, n = stack_segment(s, a.step, a.dark_mean,
+                                                a.sat_mean)
             if n:
-                np.savez_compressed(p, mx=a_mx, mn=a_mn, sm=a_sm, n=n)
+                np.savez_compressed(p, mx=a_mx, mn=a_mn, sm=a_sm, n=n,
+                                    gate=GATE_VERSION)
         if not n:
             continue
         mx = a_mx if mx is None else np.maximum(mx, a_mx)
