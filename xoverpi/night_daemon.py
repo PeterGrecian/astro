@@ -70,7 +70,7 @@ EXPOSURE_MAX_US = 3_066_985
 
 EXPOSURES = [float(x) for x in
              os.environ.get("XOVER_EXPOSURES", "1.0,2.0,3.0").split(",")]
-GAIN = float(os.environ.get("XOVER_GAIN", 8.0))
+GAIN = float(os.environ.get("XOVER_GAIN", 4.0))   # 8 clipped bright stars at 2 s (2026-09-17)
 COADD_N = int(os.environ.get("XOVER_COADD_N", 1))
 BINNED = os.environ.get("XOVER_BINNED", "1") != "0"
 MIN_FREE_GB = float(os.environ.get("XOVER_MIN_FREE_GB", 2.0))
