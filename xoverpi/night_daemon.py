@@ -21,11 +21,16 @@ What this adds over the eclipticam daemon:
     at 1 after an abort and silently overwrote the previous run, destroying ~1000
     frames. A per-run UTC tag makes collision impossible by construction and
     records which run a frame came from.
-  * ALTERNATING sub lengths. A box blur's MTF is a sinc with exact nulls where
-    information is destroyed outright; nulls for one exposure length do not
-    coincide with another's, so cycling lengths fills in each other's dead
-    frequencies. Coded exposure in the time domain, for the price of a config
-    change. (camera.json drift.vary_sub_length)
+  * ALTERNATING sub lengths, OFF BY DEFAULT since 2026-09-18. A box blur's MTF
+    is a sinc with exact nulls where information is destroyed outright; nulls
+    for one exposure length do not coincide with another's, so cycling lengths
+    fills in each other's dead frequencies. But it is NOT "the price of a
+    config change" as first written: every change makes set_exposure() discard
+    5-6 frames while the sensor converges, which measured out at 19 s of dead
+    time per 3 s frame - an 11% duty cycle. The estate's rule is to stream
+    continuously (astro/capture/streaming.py, ">99% duty cycle"); this daemon
+    had quietly reinvented per-tick capture. Set XOVER_EXPOSURES to a list to
+    get cycling back, and it now costs one settle per CHANGE, not per frame.
   * A PAUSE FILE. libcamera grants one process exclusive access to the camera,
     so capture and a focusing live view cannot coexist. Touch the pause file and
     the daemon releases the camera and waits; remove it and capture resumes.
@@ -40,9 +45,11 @@ What this adds over the eclipticam daemon:
 """
 import logging
 import os
+import queue
 import shutil
 import signal
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,8 +75,10 @@ BAYERPAT = "SGBRG"
 # {video,still} x {full,binned}. Video mode does NOT buy a longer exposure.
 EXPOSURE_MAX_US = 3_066_985
 
+# One length by default: collect all the light the sensor will give. See the
+# duty-cycle note above before setting this to a list.
 EXPOSURES = [float(x) for x in
-             os.environ.get("XOVER_EXPOSURES", "1.0,2.0,3.0").split(",")]
+             os.environ.get("XOVER_EXPOSURES", "3.0").split(",")]
 GAIN = float(os.environ.get("XOVER_GAIN", 4.0))   # 8 clipped bright stars at 2 s (2026-09-17)
 COADD_N = int(os.environ.get("XOVER_COADD_N", 1))
 BINNED = os.environ.get("XOVER_BINNED", "1") != "0"
@@ -119,6 +128,30 @@ def write_fits(data, out_path, exp_us, n_coadd, t_start, t_end, mean, run_tag,
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp, overwrite=True)
     tmp.rename(out_path)        # atomic: a consumer never sees a partial frame
+
+
+def writer_thread(q: "queue.Queue", log_every: int = 1):
+    """Compress and write frames off the capture path.
+
+    Rice compression plus the NFS write costs ~1 s on this Pi (measured
+    2026-09-18: 0.5 s local, 0.8-1.3 s to bigstore). Done inline that is a
+    third of a 3 s frame thrown away, so the capture loop hands frames here
+    and goes straight back to capture_request().
+    """
+    while True:
+        item = q.get()
+        try:
+            if item is None:
+                return
+            out, out_path, actual_us, t_start, t_end, mean, run_tag, focus = item
+            write_fits(out, out_path, actual_us, COADD_N, t_start, t_end,
+                       mean, run_tag, focus)
+            logging.info(f"wrote {out_path.name} exp={actual_us/1e6:.2f}s "
+                         f"focus={focus} mean={mean:.1f} qdepth={q.qsize()}")
+        except Exception as e:
+            logging.error(f"writer failed on {item[1] if item else '?'}: {e}")
+        finally:
+            q.task_done()
 
 
 def read_focus() -> str:
@@ -216,8 +249,13 @@ def main() -> int:
                  f"{'binned 2x2' if BINNED else 'full-res'}, root {frames_root}")
 
     cam = open_camera()
+    q: "queue.Queue" = queue.Queue(maxsize=8)   # back-pressure, not unbounded RAM
+    writer = threading.Thread(target=writer_thread, args=(q,), daemon=True)
+    writer.start()
     seq = 0
     i = 0
+    current_us = None
+    actual_us = 0
     try:
         while not _stop:
             if wait_while_paused():
@@ -225,6 +263,7 @@ def main() -> int:
                 if _stop:
                     break
                 cam = open_camera()
+                current_us = None      # a reopened camera is back at defaults
 
             if free_gb(frames_root) < MIN_FREE_GB:
                 logging.error(f"only {free_gb(frames_root):.1f} GB free at "
@@ -234,7 +273,11 @@ def main() -> int:
             focus = read_focus()
             exp_us = exposures_us[i % len(exposures_us)]
             i += 1
-            actual_us = set_exposure(cam, exp_us)
+            if exp_us != current_us:
+                # Only on a CHANGE: each call discards 5-6 frames while the
+                # sensor converges. With a single exposure this runs once.
+                actual_us = set_exposure(cam, exp_us)
+                current_us = exp_us
 
             acc = None
             t_start = None
@@ -266,12 +309,12 @@ def main() -> int:
             night_dir.mkdir(parents=True, exist_ok=True)
             seq += 1
             out_path = night_dir / f"{run_tag}-{seq:05d}.fits.fz"
-            write_fits(out, out_path, actual_us, COADD_N, t_start, now,
-                       mean, run_tag, focus)
-            logging.info(f"wrote {out_path.name} exp={actual_us/1e6:.2f}s "
-                         f"focus={focus} mean={mean:.1f} "
-                         f"free={free_gb(frames_root):.1f}GB")
+            q.put((out, out_path, actual_us, t_start, now, mean, run_tag, focus))
     finally:
+        try:
+            q.put(None); q.join()      # let queued frames reach disk
+        except Exception:
+            pass
         try:
             cam.stop(); cam.close()
         except Exception:
