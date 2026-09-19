@@ -1,4 +1,7 @@
 {
+  "max_neutral": 1.0,
+  "max_saturation": 0.2,
+  "max_colour_notes": "max.jpg colour policy, presentation only — no effect on any FITS or on the brightness series. max_neutral 1.0 white-balances on the linear data and stretches all three channels against ONE shared clip pair, instead of the old per-channel auto-WB stretch that broke the fixed ratio between channels. max_saturation 0.2 then scales the chroma that survives. WHY SO LOW: max.jpg is stretched very hard (lo 25 / hi ~99.5 over a near-black sky), so a single ADU of chroma noise becomes ~50 levels of colour — the vivid green/magenta was amplified noise, not sky. It cannot be balanced away, only scaled down. Chosen by Peter 2026-09-19 off a six-panel sweep on astrocam 2026-09-16 (panel F), the brief being that the bright colours are likeable but make no sense to a visitor. SUPERSEDES the 2026-08-26 position (session #332) that the false colour was deliberate — that sweep varied area_gain/sky_frac/max_hi_pct only and never put a colour axis in front of him to choose from. Paired with the nightly-cam change that stores each winning pixel's CONTRAST-NORMALISED rgb rather than its raw ADU; that is what fixed the blotchy patches and the trails chopped at the patch seams.",
   "name": "eclipticam-v1",
   "host": "eclipticam",
   "sensor": "OV5647",

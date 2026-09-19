@@ -222,7 +222,17 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
     min_img = np.full((H, W), np.iinfo(np.uint32).max, dtype=np.uint32)
     sum_img = np.zeros((H, W), dtype=np.float64)
     max_contrast = np.zeros((H, W), dtype=np.float32)
-    max_rgb = np.zeros((H, W, 3), dtype=np.uint32) if bayer_pattern else None
+    # max_rgb holds the CONTRAST-NORMALISED rgb of each pixel's winning
+    # frame (b_rgb / that frame's mean), not its raw ADU. The winner is
+    # already chosen on contrast, so storing raw made the picture a mosaic
+    # of ~150 moments each at its own absolute level: adjacent patches whose
+    # winners were different frames jumped by the ratio of those frames'
+    # whole-frame brightness, which showed up as blotchy false colour AND
+    # chopped the trails at the patch seams. Normalising puts every pixel
+    # on one scale. Presentation only — max.fits.fz is still the raw
+    # mono max, so no science number moves. Float, since the values are
+    # ratios around 1 rather than integers.
+    max_rgb = np.zeros((H, W, 3), dtype=np.float32) if bayer_pattern else None
 
     stacked = set()
     n_skipped_band = 0
@@ -247,7 +257,7 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
             contrast = b.astype(np.float32) / max(f_mean, 1.0)
             m = contrast > max_contrast
             max_contrast[m] = contrast[m]
-            max_rgb[m] = b_rgb[m]
+            max_rgb[m] = b_rgb[m] / f_mean
         stacked.add(f)
         if i % 200 == 0:
             print(f"  stack {i}/{len(frames)}", flush=True)
@@ -297,6 +307,19 @@ def main() -> int:
     ap.add_argument("--hi-pct", type=float, default=None,
                     help="upper stretch percentile for max.jpg. Default: the "
                          "camera's `max_hi_pct`, or the render default (99.9).")
+    ap.add_argument("--neutral", type=float, default=None, metavar="0..1",
+                    help="max.jpg colour policy: 0 keeps the per-channel "
+                         "auto-WB stretch (vivid false colour), 1 white-"
+                         "balances on linear data and stretches all three "
+                         "channels against one shared clip pair (physical "
+                         "colour). Default: the camera's `max_neutral`, or 0.")
+    ap.add_argument("--saturation", type=float, default=None, metavar="0..1+",
+                    help="max.jpg chroma scale about luminance, applied "
+                         "after the stretch. 1 = untouched, 0 = monochrome. "
+                         "The hard stretch turns a single ADU of chroma "
+                         "noise into ~50 levels of colour, so this is the "
+                         "knob that tones it down. Default: the camera's "
+                         "`max_saturation`, or 1.")
     ap.add_argument("--no-derot", action="store_true")
     ap.add_argument("--publish", action="store_true",
                     help="upload web assets to S3 after generation")
@@ -432,12 +455,22 @@ def main() -> int:
     sky_frac = args.sky_frac if args.sky_frac is not None \
         else float(cfg.get("sky_frac") or 0.0)
     hi_pct = args.hi_pct if args.hi_pct is not None else cfg.get("max_hi_pct")
+    neutral = args.neutral if args.neutral is not None \
+        else float(cfg.get("max_neutral") or 0.0)
+    saturation = args.saturation if args.saturation is not None \
+        else (1.0 if cfg.get("max_saturation") is None
+              else float(cfg.get("max_saturation")))
     max_kw = {"area_gain_strength": area_gain_strength, "sky_frac": sky_frac}
     if hi_pct is not None:
         max_kw["hi_pct"] = float(hi_pct)
+    if max_rgb is not None:
+        max_kw["neutral"] = neutral
+        max_kw["saturation"] = saturation
     if area_gain_strength or sky_frac or hi_pct is not None:
         print(f"max.jpg: area gain {area_gain_strength:g}, sky_frac "
               f"{sky_frac:g}, hi_pct {hi_pct if hi_pct is not None else 'default'}")
+    if max_rgb is not None:
+        print(f"max.jpg colour: neutral {neutral:g}, saturation {saturation:g}")
     render(max_rgb if max_rgb is not None else max_img,
            out_dir / f"{stem}max.jpg", **max_kw)
 

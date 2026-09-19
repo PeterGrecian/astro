@@ -114,33 +114,116 @@ def area_gain(img, strength=1.0, blocks=AREA_GAIN_BLOCKS, pct=AREA_GAIN_PCT,
     return f * (g[..., None] if f.ndim == 3 else g)
 
 
+# --- Colour policy for max.jpg -------------------------------------------
+#
+# The original renderer stretched each channel against ITS OWN percentiles
+# ("auto-WB style"). That is a per-channel, per-region transform: it does
+# not just shift the white point, it breaks the fixed ratio between the
+# channels, so a cloud bank that is merely brighter than the sky comes out
+# a *different hue* from it. The result reads as a psychedelic false-colour
+# plate — acid green sky, magenta corner — which is fine as an instrument
+# view and makes no sense at all to a visitor looking at a night sky.
+#
+# `neutral` blends that behaviour toward the physical alternative:
+#
+#   1. White-balance on the LINEAR data, by per-channel gains taken from
+#      the sky (a Bayer sensor's G channel collects ~2x R/B, which is a
+#      property of the filter array, not of the sky). Doing this before
+#      the stretch is the whole point — after the stretch the per-channel
+#      percentiles have already equalised the means and a grey-world pass
+#      is a no-op.
+#   2. ONE shared lo/hi for all three channels, so what survives is the
+#      real colour: white stars, the orange sodium dome, neutral cloud.
+#
+# `saturation` then scales the chroma that remains about luminance, for
+# taste. 1.0 leaves it alone, 0.0 is monochrome.
+NEUTRAL_WB_PCT = 50.0
+
+
+def _wb_gains(f, mask=None):
+    """Per-channel gains that put the three channels on a common level.
+
+    Taken from a robust percentile (median) rather than the mean, so a
+    streetlamp or a long trail does not set the balance. Normalised to
+    mean 1 so overall level — and therefore the stretch percentiles the
+    caller then picks — stays put.
+    """
+    lev = np.empty(3, dtype=np.float32)
+    for ch in range(3):
+        c = f[..., ch]
+        samp = c[mask] if mask is not None and mask.any() else c
+        lev[ch] = np.percentile(samp, NEUTRAL_WB_PCT)
+    if not np.all(np.isfinite(lev)) or lev.min() <= 0:
+        return np.ones(3, dtype=np.float32)
+    g = lev.mean() / lev
+    return (g / g.mean()).astype(np.float32)
+
+
+def apply_saturation(u8, saturation):
+    """Scale chroma about Rec.709 luminance on an (H, W, 3) uint8 image."""
+    if saturation is None or saturation == 1.0:
+        return u8
+    f = u8.astype(np.float32)
+    lum = (f * np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)).sum(
+        axis=-1, keepdims=True)
+    return np.clip(lum + (f - lum) * float(saturation), 0, 255).astype(np.uint8)
+
+
 def render_asinh_jpeg_rgb(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
                           asinh=JPEG_ASINH, quality=88, rotate_180=False,
-                          area_gain_strength=0.0, sky_frac=0.0):
+                          area_gain_strength=0.0, sky_frac=0.0,
+                          neutral=0.0, saturation=1.0):
     """Asinh-stretched RGB JPEG. img is (H, W, 3) with channel order R,G,B.
-    Each channel stretched against ITS OWN percentiles — auto-WB style,
-    so dawn pinks pop without manual gain ratios.
+
+    neutral (0..1): 0 keeps the historical per-channel auto-WB stretch
+    (each channel against its own percentiles — vivid, false colour).
+    1 white-balances on the linear data and then stretches all three
+    channels against ONE shared lo/hi, giving physical colour. Values
+    between blend the clip points. See the colour-policy note above.
+
+    saturation: final chroma scale about luminance, applied after the
+    stretch. 1.0 = untouched, 0.0 = monochrome.
 
     sky_frac: take the stretch percentiles over only the `sky_frac`
     darkest-background fraction of the frame, so the streetlamps stop
     setting the ceiling and the sky gets the whole range. The lamps then
-    clip to white, which is what they look like anyway. 0 disables."""
+    clip to white, which is what they look like anyway. 0 disables.
+    The same mask also sources the neutral white balance."""
     from PIL import Image as _Image
     f = img.astype(np.float32)
     if area_gain_strength > 0:
         f = area_gain(f, strength=area_gain_strength)
     m = sky_mask(f, sky_frac) if sky_frac > 0 else None
-    out = np.empty(f.shape, dtype=np.uint8)
+    neutral = float(np.clip(neutral, 0.0, 1.0))
+    if neutral > 0:
+        # White balance on the linear data, partially per `neutral`.
+        g = _wb_gains(f, m)
+        f = f * (1.0 + (g - 1.0) * neutral)
+
+    # Per-channel clip points (the historical behaviour) and the shared
+    # pair taken over all three channels pooled (the neutral behaviour).
+    los, his = np.empty(3, dtype=np.float32), np.empty(3, dtype=np.float32)
     for ch in range(3):
         c = f[..., ch]
         samp = c[m] if m is not None and m.any() else c
-        lo = float(np.percentile(samp, lo_pct))
-        hi = float(np.percentile(samp, hi_pct))
+        los[ch] = np.percentile(samp, lo_pct)
+        his[ch] = np.percentile(samp, hi_pct)
+    if neutral > 0:
+        pooled = f[m] if m is not None and m.any() else f
+        lo_all = float(np.percentile(pooled, lo_pct))
+        hi_all = float(np.percentile(pooled, hi_pct))
+        los = los + (lo_all - los) * neutral
+        his = his + (hi_all - his) * neutral
+
+    out = np.empty(f.shape, dtype=np.uint8)
+    for ch in range(3):
+        lo, hi = float(los[ch]), float(his[ch])
         if hi <= lo:
             hi = lo + 1.0
-        s = np.clip((c - lo) / (hi - lo), 0, 1)
+        s = np.clip((f[..., ch] - lo) / (hi - lo), 0, 1)
         s = np.arcsinh(s * asinh) / np.arcsinh(asinh)
         out[..., ch] = (s * 255).astype(np.uint8)
+    out = apply_saturation(out, saturation)
     if rotate_180:
         out = np.rot90(out, 2)
     _Image.fromarray(out, mode="RGB").save(dst_path, quality=quality)

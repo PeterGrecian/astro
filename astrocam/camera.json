@@ -1,4 +1,7 @@
 {
+  "max_neutral": 1.0,
+  "max_saturation": 0.2,
+  "max_colour_notes": "max.jpg colour policy, presentation only — no effect on any FITS or on the brightness series. max_neutral 1.0 white-balances on the linear data and stretches all three channels against ONE shared clip pair, instead of the old per-channel auto-WB stretch that broke the fixed ratio between channels. max_saturation 0.2 then scales the chroma that survives. WHY SO LOW: max.jpg is stretched very hard (lo 25 / hi ~99.5 over a near-black sky), so a single ADU of chroma noise becomes ~50 levels of colour — the vivid green/magenta was amplified noise, not sky. It cannot be balanced away, only scaled down. Chosen by Peter 2026-09-19 off a six-panel sweep on astrocam 2026-09-16 (panel F), the brief being that the bright colours are likeable but make no sense to a visitor. SUPERSEDES the 2026-08-26 position (session #332) that the false colour was deliberate — that sweep varied area_gain/sky_frac/max_hi_pct only and never put a colour axis in front of him to choose from. Paired with the nightly-cam change that stores each winning pixel's CONTRAST-NORMALISED rgb rather than its raw ADU; that is what fixed the blotchy patches and the trails chopped at the patch seams.",
   "name": "astrocam",
   "host": "astrocam",
   "position_index": 3,
@@ -13,7 +16,7 @@
   "area_gain": 0.6,
   "sky_frac": 0.8,
   "max_hi_pct": 99.5,
-  "max_jpg_notes": "max.jpg presentation only — no effect on the FITS stacks. area_gain divides by a smooth map of the frame's own local background (astro.present.render.area_gain) so trails come through the bright cloud banks; sky_frac takes the stretch percentiles over the darkest-background 80% so the lamps stop setting the ceiling; max_hi_pct loosens the upper clip from 99.9. Chosen by Peter 2026-08-26 off the astrocam 2026-08-22 sweep: strongest trail structure at a floor matching the old render (75.7 vs 78.3). The per-channel auto-WB stretch then walks the hue ~22% off the old bronze — that false colour is DELIBERATE, not a bug, and is why a neutral-stretch mode was not added.",
+  "max_jpg_notes": "max.jpg presentation only — no effect on the FITS stacks. area_gain divides by a smooth map of the frame's own local background (astro.present.render.area_gain) so trails come through the bright cloud banks; sky_frac takes the stretch percentiles over the darkest-background 80% so the lamps stop setting the ceiling; max_hi_pct loosens the upper clip from 99.9. Chosen by Peter 2026-08-26 off the astrocam 2026-08-22 sweep: strongest trail structure at a floor matching the old render (75.7 vs 78.3). The per-channel auto-WB stretch used to walk the hue ~22% off the old bronze; that was recorded here as deliberate, and was REVERSED on 2026-09-19 — see max_colour_notes. The #332 sweep had only ever offered structure variants, so the vivid colour was a side effect nobody had been asked about.",
   "resolution": [4608, 2592],
   "capture": {
     "night_exposure_us": 59900000,
