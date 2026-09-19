@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""fit-pole-auto - the celestial pole from a night of frames, no clicking.
+
+Same geometry as fit-pole-track (p_i = c + Rot(w t_i) v, omega FIXED at
+sidereal, so the fit is linear and only c and v are free) but the star
+positions come from tracking rather than from Peter probing in splay.
+
+WHAT MAKES IT WORK. Two things, both learned the hard way on xoverpi:
+
+  * Subtract a hot-pixel master (median of 15 frames from the same hour)
+    FIRST. The brightest specks in a raw xoverpi frame are hot pixels, not
+    stars - a bare peak-finder locks onto them, and they do not move, so
+    every "track" comes back with a 1 px baseline and a meaningless centre.
+  * SEED the velocity. A star drifts ~1 px/s here, so a 60 s step moves it
+    60 px and a naive nearest-peak search loses it on the first step and
+    latches onto fixed pattern instead. Step a few frames at a time and hand
+    in a seed from any known drift; the track then bootstraps its own.
+
+READING THE OUTPUT. Each track is fitted twice, once per rotation sense, and
+the sense only MEANS something when the two rms values are well separated -
+a short arc fits either way. Trust the lines where rms < 3 px and the
+alternative is at least 2x worse; BEST picks the best of those.
+
+Run it on muppet with bigstore-run (it is self-contained for that reason):
+
+  bigstore-run bin/fit-pole-auto 2026-09-18 23 200 3 100 -0.641 -0.866
+
+args: <night> <hour> <start frame> <frame step> <n steps> <seed vx> <seed vy>
+"""
+import sys, glob
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage
+
+W = 15.0410686/3600*np.pi/180          # sidereal, rad/s
+SCALE = 2*0.000267381                  # deg/px, binned 2x2 (THEORETICAL)
+CTR = np.array([648, 486])
+
+night, hour = sys.argv[1], sys.argv[2]
+start, step, n = (int(x) for x in sys.argv[3:6])
+seed = np.array([float(sys.argv[6]), float(sys.argv[7])])
+
+files = sorted(glob.glob(f'/mnt/muppet/bigstore/xoverpi-frames/night/{night}/{hour}/*.fits.fz'))
+sub = [files[start+k*step] for k in range(n) if start+k*step < len(files)]
+med = np.median(np.stack([fits.getdata(files[i]).astype(np.float32)
+                          for i in np.linspace(0, len(files)-1, 15).astype(int)]), axis=0)
+R, T = [], []
+for f in sub:
+    with fits.open(f) as h:
+        d = h[-1].data.astype(np.float32); t = h[-1].header['DATE-OBS']
+    r = d - med; r -= ndimage.gaussian_filter(r, 8)
+    R.append(r); T.append(np.datetime64(t[:26]))
+ts = np.array([(t-T[0])/np.timedelta64(1, 's') for t in T])
+print(f'{night} {hour}  {len(R)} frames  span {ts[-1]:.0f}s')
+
+def cen(r, x, y, half=4):
+    x, y = int(round(x)), int(round(y))
+    if not (half < y < r.shape[0]-half-1 and half < x < r.shape[1]-half-1): return None
+    w = (r[y-half:y+half+1, x-half:x+half+1] - np.median(r)).clip(0)
+    if w.sum() <= 0: return None
+    yy, xx = np.mgrid[y-half:y+half+1, x-half:x+half+1]
+    return np.array([(w*xx).sum()/w.sum(), (w*yy).sum()/w.sum()])
+
+def fit(P, tt, sign):
+    """p_i = c + Rot(sign*W*t_i) v -- linear in (c, v), 4 unknowns."""
+    A = np.zeros((2*len(P), 4)); b = np.zeros(2*len(P))
+    for i, (p, t) in enumerate(zip(P, tt)):
+        f = sign*W*t; cs, sn = np.cos(f), np.sin(f)
+        A[2*i] = [1, 0, cs, sn]; A[2*i+1] = [0, 1, -sn, cs]
+        b[2*i], b[2*i+1] = p
+    sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+    return sol[:2], np.sqrt(np.mean((A@sol-b)**2)*2)
+
+s0 = ndimage.gaussian_filter(R[0], 1.0)
+sig = 1.4826*np.median(np.abs(s0-np.median(s0)))
+pk = (s0 == ndimage.maximum_filter(s0, 7)) & (s0 > 6*sig)
+ys, xs = np.nonzero(pk)
+cands = sorted(((float(s0[y, x]), x, y) for y, x in zip(ys, xs)
+                if 60 < x < 1240 and 60 < y < 910), reverse=True)[:14]
+good = []
+for br, x0, y0 in cands:
+    p = cen(R[0], x0, y0)
+    if p is None: continue
+    P, tt, vel = [p], [0.0], seed.copy()
+    for k in range(1, len(R)):
+        pred = P[-1] + vel*(ts[k]-tt[-1])
+        if not (5 < pred[0] < 1290 and 5 < pred[1] < 966): break
+        q = cen(R[k], pred[0], pred[1], half=4)
+        if q is None or np.hypot(*(q-pred)) > 6: break
+        vel = (q-P[-1])/(ts[k]-tt[-1]) if len(P) < 2 else (q-P[-2])/(ts[k]-tt[-2])
+        P.append(q); tt.append(ts[k])
+    trk = np.hypot(*(P[-1]-P[0]))
+    if len(P) < 8 or trk < 50: continue
+    P, tt = np.array(P), np.array(tt)
+    cands_fit = sorted((fit(P, tt, s)[1], s, fit(P, tt, s)[0]) for s in (+1, -1))
+    rms, sign, c = cands_fit[0]
+    d = c - CTR
+    dist, bear = np.hypot(*d)*SCALE, np.degrees(np.arctan2(-d[0], -d[1]))
+    print(f'  ({x0:4d},{y0:3d}) n={len(P):3d} span={tt[-1]:4.0f}s trk={trk:4.0f}px '
+          f'sign={sign:+d} rms={rms:6.2f} (alt {cands_fit[1][0]:6.2f}) '
+          f'dist={dist:6.3f}deg bear={bear:6.1f} pole=({c[0]:8.0f},{c[1]:8.0f})')
+    # only a well-separated sign test tells you the rotation sense
+    if rms < 3 and cands_fit[1][0] > 2*rms:
+        good.append((rms, dist, bear, c))
+if good:
+    good.sort()
+    rms, dist, bear, c = good[0]
+    print(f'BEST (decisive sign, lowest rms): dist={dist:.3f} deg  bear={bear:.1f} '
+          f'deg left-of-up  pole=({c[0]:.0f},{c[1]:.0f})  rms={rms:.2f} px')
+else:
+    print('no track gave a decisive rotation sense - lengthen the baseline')
