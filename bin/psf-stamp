@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""psf-stamp - reconstruct the PSF at 4x from tracked stars, and say if it is a RING.
+
+Relatives: eos-star-psf / eos-psf-view do this for the EOS focus-cycle nights,
+but they are built round 30 s subs on the linear green Bayer plane and measure
+a streak's CROSS-width. xoverpi is 3 s subs on already-binned frames where the
+trail is 1.8 px, so the geometry is different and the PSF is round enough to
+reconstruct whole.
+
+HOW IT GETS SUB-PIXEL DETAIL. Each star sits at a random sub-pixel phase, and
+the field rotates, so every star is an independent sample of the PSF on a
+different grid offset. Coadding many stars onto a 4x grid is therefore a
+dithered reconstruction, not an interpolation - structure finer than one
+binned pixel survives, which is the whole point when the question is whether
+there is a HOLE in the middle.
+
+WHY THE HOLE MATTERS. A defocused Newtonian does not make a disk, it makes an
+annulus: the secondary shadows the middle of the out-of-focus cone. So a
+central dip is a direct, quantitative focus reading -
+
+    blur diameter at the sensor = defocus / f_number
+    in binned px (2.8 um)       = 90.4 px per mm of defocus at f/3.95
+
+and the ratio of inner to outer radius is the obstruction ratio, which is a
+FIXED property of the scope. If the measured hole implies the known
+obstruction, the blur is defocus and the tool prints how far to rack. If there
+is no hole at all, the width is aberration or seeing and racking will not fix
+it. The SIGN of the defocus is not in a single ring - that needs two frames
+either side of focus.
+
+  bigstore-run bin/psf-stamp 2026-09-20 00 --nstar 60
+"""
+import argparse, glob, os
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage, optimize
+
+SCALE = 2*0.000267381
+PIX_MM = 0.0028                      # binned pixel pitch, mm
+FNUM = 3.95
+UP = 4                               # reconstruction upsampling
+R = 10                               # stamp half-width, binned px
+
+ap = argparse.ArgumentParser()
+ap.add_argument("night"); ap.add_argument("hour")
+ap.add_argument("--nframe", type=int, default=60)
+ap.add_argument("--nstar", type=int, default=60)
+ap.add_argument("--bright", type=int, default=0, help="use only the N brightest tracked stars")
+ap.add_argument("--out", default="/home/peter/tmp/derot")
+a = ap.parse_args()
+
+B = f"/mnt/muppet/bigstore/xoverpi-frames/night/{a.night}/{a.hour}/"
+fs = sorted(glob.glob(B+"*.fits.fz"))
+master = np.median(np.stack([fits.getdata(fs[i]).astype(np.float32)
+         for i in np.linspace(0, len(fs)-1, 11).astype(int)]), axis=0)
+mid = len(fs)//2
+sub = fs[mid:mid+a.nframe]
+R_, T = [], []
+for p in sub:
+    with fits.open(p) as h:
+        d = h[-1].data.astype(np.float64); t = h[-1].header["DATE-OBS"]
+    r = d - master; r -= ndimage.gaussian_filter(r, 16)
+    R_.append(r); T.append(np.datetime64(t[:26]))
+ts = np.array([(t-T[0])/np.timedelta64(1, 's') for t in T])
+
+def drift(r0, r1, dt, maxs=90):
+    w = np.outer(np.hanning(r0.shape[0]), np.hanning(r0.shape[1]))
+    C = np.fft.fftshift(np.fft.ifft2(np.fft.fft2(r0*w)*np.conj(np.fft.fft2(r1*w))).real)
+    cy, cx = np.array(C.shape)//2
+    s = C[cy-maxs:cy+maxs+1, cx-maxs:cx+maxs+1]
+    j, i = np.unravel_index(np.argmax(s), s.shape)
+    return np.array([-(i-maxs), -(j-maxs)])/dt
+
+def cen(r, x, y, half=4):
+    xi, yi = int(round(x)), int(round(y))
+    if not (half < yi < r.shape[0]-half-1 and half < xi < r.shape[1]-half-1): return None
+    b = r[yi-half:yi+half+1, xi-half:xi+half+1]
+    w = np.clip(b-np.median(b), 0, None)
+    if w.sum() <= 0: return None
+    gy, gx = np.mgrid[yi-half:yi+half+1, xi-half:xi+half+1]
+    return np.array([(w*gx).sum()/w.sum(), (w*gy).sum()/w.sum()])
+
+# short baseline: over the whole run the field slides ~100 px, past the
+# correlation search window, and the peak lands on zero shift - which looks
+# like "no drift" and is not.
+kseed = min(8, len(R_)-1)
+v = drift(R_[0], R_[kseed], ts[kseed])
+g = ndimage.gaussian_filter(R_[0], 1.5)
+sig = 1.4826*np.median(np.abs(g-np.median(g)))
+pk = (g == ndimage.maximum_filter(g, 15)) & (g > 4.0*sig)
+ys, xs = np.nonzero(pk)
+ok = (xs > 40) & (xs < R_[0].shape[1]-40) & (ys > 40) & (ys < R_[0].shape[0]-40)
+xs, ys = xs[ok], ys[ok]
+order = np.argsort(g[ys, xs])[::-1][:(a.bright or a.nstar)]
+print(f"{a.night} {a.hour}: {len(sub)} frames, drift {v[0]:+.3f},{v[1]:+.3f} px/s; "
+      f"{len(order)} candidates")
+
+n = 2*R*UP + 1
+gy, gx = np.mgrid[-R:R+1e-9:1.0/UP, -R:R+1e-9:1.0/UP]
+acc = np.zeros((n, n)); ntr = 0
+for i in order:
+    p = cen(R_[0], xs[i], ys[i])
+    if p is None: continue
+    pos, vel = [p], v.copy()
+    for k in range(1, len(R_)):
+        pred = pos[-1] + vel*(ts[k]-ts[k-1])
+        q = cen(R_[k], pred[0], pred[1])
+        if q is None or np.hypot(*(q-pred)) > 4: break
+        if k >= 2: vel = (q-pos[-2])/(ts[k]-ts[k-2])
+        pos.append(q)
+    if len(pos) < len(R_)*0.6 or np.hypot(*(pos[-1]-pos[0])) < 15: continue
+    s = np.zeros((n, n))
+    for k, q in enumerate(pos):
+        s += ndimage.map_coordinates(R_[k], [gy+q[1], gx+q[0]], order=1, mode="constant")
+    s /= len(pos)
+    s -= np.median(s[np.hypot(gx, gy) > R*0.8])
+    pkv = s[np.hypot(gx, gy) < 1.5].max()
+    if pkv <= 0: continue
+    acc += s/pkv; ntr += 1
+if ntr < 3: raise SystemExit(f"only {ntr} tracked stars - nothing to measure")
+psf = acc/ntr
+rr = np.hypot(gx, gy)
+
+# azimuthal profile on the reconstructed grid
+step = 1.0/UP
+prof = np.array([psf[(rr >= k*step-step/2) & (rr < k*step+step/2)].mean()
+                 for k in range(int(R/step))])
+prof = prof/prof.max()
+print(f"tracked {ntr} stars; radial profile at {step:.2f} px steps, normalised:")
+for row in range(0, min(len(prof), 8*UP), UP):
+    print("   r=%4.1f-%4.1f px: " % (row*step, (row+UP-1)*step)
+          + " ".join(f"{v:6.3f}" for v in prof[row:row+UP]))
+
+# is the centre a hole? compare r=0 with the peak of the profile
+kpk = int(np.argmax(prof))
+dip = prof[0]/prof[kpk]
+print(f"\ncentre/peak = {dip:.3f}; profile peaks at r = {kpk*step:.2f} px")
+if kpk*step > 0.5 and dip < 0.9:
+    r_out = np.searchsorted(-prof[kpk:], -0.5)*step + kpk*step
+    ratio = kpk*step/max(r_out, 1e-9)
+    defocus = 2*r_out*PIX_MM*FNUM
+    print(f"RING: inner {kpk*step:.2f} px, outer(half-max) {r_out:.2f} px, "
+          f"ratio {ratio:.2f}")
+    print(f"  implied defocus {defocus*1000:.0f} um "
+          f"(rack by that, sign unknown from one ring)")
+else:
+    half = np.searchsorted(-prof, -0.5)*step
+    print(f"NO CENTRAL HOLE - filled profile, half-max radius {half:.2f} px "
+          f"(FWHM {2*half:.2f} px = {2*half*SCALE*3600:.1f} arcsec).")
+    print(f"  An annulus would need the secondary shadow to be resolvable; at this")
+    print(f"  width the hole would be under a pixel, so this does not rule out")
+    print(f"  defocus - it says the ring is not RESOLVED, not that it is absent.")
+os.makedirs(a.out, exist_ok=True)
+tag = f"psf-{a.night}-{a.hour}"
+fits.PrimaryHDU(psf.astype(np.float32)).writeto(f"{a.out}/{tag}.fits", overwrite=True)
+print(f"wrote {a.out}/{tag}.fits  ({n}x{n}, {UP}x upsampled, 1 px = {UP} cells)")

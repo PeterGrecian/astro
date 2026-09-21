@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""derot-strip - a whole night de-rotated into ONE pole-centred polar mosaic.
+
+THE IDEA. The mount does not track, so over a night the field sweeps an
+annulus about the celestial pole - "a 180 degree strip a few degrees from the
+pole". In cartesian pixels that annulus needs a ~16000x16000 canvas, almost
+all of it empty. In POLAR coordinates about the pole it is a rectangle:
+radius (a ~1600 px band, the field's inner to outer corner) by sky position
+angle (however far the night turned). And in those coordinates de-rotation
+stops being a rotation at all - it is a pure SHIFT along the PA axis, one
+frame one slot, which is why the whole night fits in one array.
+
+    theta_sky = theta_screen + omega*t          (screen PA falls with time)
+
+Each frame contributes a ~9 deg slice of PA, so a star is re-observed for as
+long as the field takes to slide past it: 1296/(omega*r) seconds, 38 min at
+r=7700 px. That dwell is the whole prize of closing on the pole, and this is
+the tool that cashes it in - every frame a star appears in lands on the same
+strip pixel.
+
+WHAT THE THREE PLANES ARE FOR. mean = depth. count = how many frames saw each
+patch (the strip is not uniform; ends are shallow). max = anything transient:
+a satellite crossing leaves a streak in max and nothing in the mean.
+
+  bigstore-run bin/derot-strip 2026-09-20 -5880 -4255 --step 4
+"""
+import argparse, glob, datetime, os, sys
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage
+
+W = 15.0410686/3600*np.pi/180
+SCALE = 2*0.000267381
+
+ap = argparse.ArgumentParser()
+ap.add_argument("night"); ap.add_argument("pole_x", type=float); ap.add_argument("pole_y", type=float)
+ap.add_argument("--hours", default="", help="comma list; default every hour dir")
+ap.add_argument("--step", type=int, default=4, help="use every Nth frame")
+ap.add_argument("--dr", type=float, default=1.0, help="radial sampling, px")
+ap.add_argument("--out", default="/home/peter/tmp/derot")
+a = ap.parse_args()
+
+root = f"/mnt/muppet/bigstore/xoverpi-frames/night/{a.night}/"
+hours = a.hours.split(",") if a.hours else sorted(os.listdir(root))
+files = []
+for h in hours:
+    files += sorted(glob.glob(root+h+"/*.fits.fz"))
+# hour dirs sort as strings, so 20:00->04:00 comes back in the wrong order;
+# the filenames carry the run tag + sequence, so sort on those.
+files.sort(key=lambda p: os.path.basename(p))
+sub = files[::a.step]
+print(f"{a.night}: {len(files)} frames in {len(hours)} hours -> using {len(sub)} (step {a.step})")
+
+# one master per hour: the fixed pattern drifts with temperature over a night
+masters = {}
+for h in hours:
+    fs = sorted(glob.glob(root+h+"/*.fits.fz"))
+    if fs:
+        masters[h] = np.median(np.stack([fits.getdata(fs[i]).astype(np.float32)
+                     for i in np.linspace(0, len(fs)-1, 11).astype(int)]), axis=0)
+print(f"masters for {len(masters)} hours")
+
+P = np.array([a.pole_x, a.pole_y])
+probe = fits.getdata(sub[0]); H, Wd = probe.shape
+cor = np.array([[0,0],[Wd,0],[0,H],[Wd,H]], float) - P
+rr = np.hypot(cor[:,0], cor[:,1])
+RMIN, RMAX = float(rr.min()), float(rr.max())
+# The PA band the frame occupies, from the SAME corners. Getting this wrong is
+# silent and total: the first version centred the grid on PA 0 while the field
+# sat at PA 36 deg, so every sample fell outside the frame and the strip came
+# back empty after a full 11-minute pass over the night (2026-09-21).
+pa = np.unwrap(np.arctan2(cor[:,1], cor[:,0]))
+PA_LO, PA_HI = float(pa.min()), float(pa.max())
+NR = int((RMAX-RMIN)/a.dr)
+RMID = 0.5*(RMIN+RMAX)
+DTH = a.dr/RMID                                   # rad per PA column: square px
+print(f"radial band {RMIN:.0f}-{RMAX:.0f} px ({RMIN*SCALE:.2f}-{RMAX*SCALE:.2f} deg), "
+      f"{NR} rows; one column = {a.dr:.1f} px of arc at mid-radius")
+print(f"field spans PA {np.degrees(PA_LO):.1f} to {np.degrees(PA_HI):.1f} deg "
+      f"({np.degrees(PA_HI-PA_LO):.1f} deg wide)")
+
+def read(p):
+    with fits.open(p) as h:
+        d = h[-1].data.astype(np.float32); t = h[-1].header["DATE-OBS"]
+    hh = os.path.basename(os.path.dirname(p))
+    r = d - masters[hh]
+    r -= ndimage.gaussian_filter(r, 16)
+    return r, datetime.datetime.fromisoformat(t)
+
+_, t0 = read(sub[0])
+_, tz = read(sub[-1])
+SPAN = (tz-t0).total_seconds()
+# PA range: the night's rotation plus the field's own angular width
+TH0 = PA_LO
+NTH = int((W*SPAN + (PA_HI-PA_LO))/DTH) + 2
+print(f"span {SPAN/3600:.2f} h = {np.degrees(W*SPAN):.1f} deg of PA; "
+      f"strip {NR} x {NTH} px ({NR*NTH*4/1e6:.0f} MB per plane)")
+
+acc = np.zeros((NR, NTH), np.float32)
+cnt = np.zeros((NR, NTH), np.uint16)
+mx  = np.zeros((NR, NTH), np.float32)
+
+rad = RMIN + np.arange(NR)*a.dr
+for k, p in enumerate(sub):
+    r, t = read(p)
+    dt = (t-t0).total_seconds()
+    # this frame covers sky PA [c-half, c+half] where c = omega*dt
+    c = W*dt
+    j0 = max(int((c+PA_LO-TH0)/DTH), 0); j1 = min(int((c+PA_HI-TH0)/DTH)+1, NTH)
+    if j1 <= j0: continue
+    th_sky = TH0 + (np.arange(j0, j1))*DTH
+    th_scr = th_sky - c                            # undo the night's rotation
+    sx = P[0] + np.outer(rad, np.cos(th_scr))
+    sy = P[1] + np.outer(rad, np.sin(th_scr))
+    v = ndimage.map_coordinates(r, [sy, sx], order=1, mode="constant", cval=np.nan)
+    m = np.isfinite(v) & (sx > 1) & (sx < Wd-2) & (sy > 1) & (sy < H-2)
+    blk = acc[:, j0:j1]; blk[m] += v[m]
+    cnt[:, j0:j1][m] += 1
+    b = mx[:, j0:j1]; np.maximum(b, np.where(m, v, 0), out=b)
+    if k % 200 == 0:
+        print(f"  {k:5d}/{len(sub)}  dt={dt/3600:5.2f}h  PA={np.degrees(c):6.1f} deg", flush=True)
+
+mean = np.where(cnt > 0, acc/np.maximum(cnt, 1), 0).astype(np.float32)
+os.makedirs(a.out, exist_ok=True)
+tag = f"strip-{a.night}-s{a.step}"
+hdr = fits.Header({"RMIN": RMIN, "DR": a.dr, "TH0": np.degrees(TH0),
+                   "DTH": np.degrees(DTH), "POLEX": P[0], "POLEY": P[1],
+                   "NFRAMES": len(sub), "SPAN_S": SPAN})
+for nm, arr in (("mean", mean), ("cnt", cnt.astype(np.float32)), ("max", mx)):
+    fits.PrimaryHDU(arr, hdr).writeto(f"{a.out}/{tag}-{nm}.fits", overwrite=True)
+
+if not (cnt > 0).any():
+    sys.exit("strip is EMPTY - nothing landed in it. Check the pole and the PA band.")
+deep = cnt > np.percentile(cnt[cnt > 0], 75)
+g = ndimage.gaussian_filter(mean, 1.0)
+sig = 1.4826*np.median(np.abs(g[deep]-np.median(g[deep])))
+pk = (g == ndimage.maximum_filter(g, 7)) & (g > 5*sig) & deep
+print(f"\ndepth: median {int(np.median(cnt[cnt>0]))} frames per strip pixel, max {int(cnt.max())}")
+print(f"stack noise {sig:.3f}; {int(pk.sum())} sources >5sig in the deep part "
+      f"({deep.sum()/1e6:.1f} Mpx, {100*deep.sum()/cnt.size:.0f}% of strip)")
+print(f"wrote {a.out}/{tag}-mean.fits (+ -cnt, -max)")

@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""derot-pole-refine - the pole to a few px, by making the de-rotated stack sharp.
+
+WHY THIS BEATS TRACK-FITTING. fit-pole-auto gets the pole from the CURVATURE of
+one star's arc, and curvature is the weak part of the measurement: a 500 px
+track at radius 7700 px sags only 4 px, so a half-pixel of centroid noise buys
+a large radial uncertainty even when the bearing is nailed. Stacking inverts
+that. A pole wrong by d smears every star by d*dtheta over a run that turns
+dtheta, so 7.5 deg of night turns a 50 px pole error into 6.5 px of trail -
+visible, measurable, and it is exactly the thing that ruins the depth. So do
+not fit the pole; SEARCH for the one that makes the stacked stars sharpest.
+
+The metric is the PEAK of the coadded patch, per star, and nothing else. Not
+peak/flux, which is the obvious choice and is a trap: the patches are
+background-subtracted, so their sum runs through zero and the ratio blows up
+to a few hundred on whichever trial pole happens to divide by nothing (seen
+2026-09-21 - it picked a pole that made the stack WORSE and scored it 219).
+The total flux of a star does not depend on the trial pole - the same photons
+land either way - so the peak alone already measures how tightly they pile up.
+It is scale-free and does not care about the (still uncalibrated) plate scale:
+the whole search lives in pixels.
+
+Cheap by construction: only 80x80 windows around a handful of stars are ever
+read, so a 21x21 grid of trial poles costs one pass over the frames.
+
+  bigstore-run bin/derot-pole-refine 2026-09-20 00 -5880 -4255
+"""
+import argparse, glob, datetime, os
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage
+
+W = 15.0410686/3600*np.pi/180
+SCALE = 2*0.000267381
+
+ap = argparse.ArgumentParser()
+ap.add_argument("night"); ap.add_argument("hour")
+ap.add_argument("pole_x", type=float); ap.add_argument("pole_y", type=float)
+ap.add_argument("--n", type=int, default=120, help="frames used")
+ap.add_argument("--span", type=int, default=1800, help="seconds to spread them over")
+ap.add_argument("--nstar", type=int, default=12)
+ap.add_argument("--half", type=int, default=90, help="search half-width, px")
+ap.add_argument("--coarse", type=int, default=10)
+a = ap.parse_args()
+
+B = f"/mnt/muppet/bigstore/xoverpi-frames/night/{a.night}/{a.hour}/"
+files = sorted(glob.glob(B+"*.fits.fz"))
+master = np.median(np.stack([fits.getdata(files[i]).astype(np.float32)
+         for i in np.linspace(0, len(files)-1, 15).astype(int)]), axis=0)
+
+def read(p):
+    with fits.open(p) as h:
+        d = h[-1].data.astype(np.float32); t = h[-1].header["DATE-OBS"]
+    r = d - master; r -= ndimage.gaussian_filter(r, 16)
+    return r, datetime.datetime.fromisoformat(t)
+
+# frames evenly spread in time over --span: the LEVER is the rotation angle
+r0, t0 = read(files[0])
+cad = (read(files[10])[1] - t0).total_seconds()/10
+idx = np.unique(np.linspace(0, min(int(a.span/cad), len(files)-1), a.n).astype(int))
+print(f"{len(idx)} frames over {idx[-1]*cad:.0f} s = {np.degrees(W*idx[-1]*cad):.2f} deg of rotation")
+
+# Stars are picked from the MIDDLE of the run, not the first frame: a star
+# found at t=0 has left the field by the end, and half the windows fall off
+# the edge. From the middle it is tracked both ways and most of them survive.
+rmid, tmid = read(files[idx[len(idx)//2]])
+g = ndimage.gaussian_filter(rmid, 1.0)
+sig = 1.4826*np.median(np.abs(g-np.median(g)))
+pk = (g == ndimage.maximum_filter(g, 15)) & (g > 8*sig)
+ys, xs = np.nonzero(pk)
+keep = (xs > 120) & (xs < rmid.shape[1]-120) & (ys > 120) & (ys < rmid.shape[0]-120)
+xs, ys = xs[keep], ys[keep]
+order = np.argsort(g[ys, xs])[::-1][:a.nstar]
+stars = np.array([[xs[i], ys[i]] for i in order], float)
+print(f"{len(stars)} stars, brightest {g[ys[order[0]], xs[order[0]]]/sig:.0f} sigma")
+
+P0 = np.array([a.pole_x, a.pole_y])
+HW = 45
+# one pass over the frames: keep only windows around each star's predicted place
+data, angs = [], []
+for i in idx:
+    r, t = read(files[i])
+    dt = (t-tmid).total_seconds()
+    ang = -W*dt
+    c, s = np.cos(ang), np.sin(ang)
+    rel = stars - P0
+    # where the star has moved to by now, under the NOMINAL pole (window centre)
+    fwd = np.stack([P0[0] + np.cos(-ang)*rel[:,0] - np.sin(-ang)*rel[:,1],
+                    P0[1] + np.sin(-ang)*rel[:,0] + np.cos(-ang)*rel[:,1]], 1)
+    wins = []
+    for (cx, cy) in fwd:
+        x0, y0 = int(round(cx))-HW, int(round(cy))-HW
+        if x0 < 0 or y0 < 0 or x0+2*HW+1 > r.shape[1] or y0+2*HW+1 > r.shape[0]:
+            wins.append(None); continue
+        wins.append((r[y0:y0+2*HW+1, x0:x0+2*HW+1].copy(), x0, y0))
+    data.append(wins); angs.append(ang)
+print(f"windows held: {sum(w is not None for ws in data for w in ws)} "
+      f"of {len(data)*len(stars)}")
+
+PH = 15                                   # coadd patch half-width
+oy, ox = np.mgrid[-PH:PH+1, -PH:PH+1]
+
+def sharpness(dp):
+    P = P0 + dp
+    tot = 0.0
+    for si, st in enumerate(stars):
+        acc = np.zeros((2*PH+1, 2*PH+1)); n = 0
+        rel = st - P
+        for wins, ang in zip(data, angs):
+            w = wins[si]
+            if w is None: continue
+            arr, x0, y0 = w
+            c, s = np.cos(-ang), np.sin(-ang)
+            cx = P[0] + c*rel[0] - s*rel[1]
+            cy = P[1] + s*rel[0] + c*rel[1]
+            acc += ndimage.map_coordinates(arr, [cy+oy-y0, cx+ox-x0], order=1,
+                                           mode="constant")
+            n += 1
+        if n < 5: continue
+        acc /= n
+        acc -= np.median(acc)
+        tot += ndimage.gaussian_filter(acc, 0.8).max()/norm[si]
+    return tot
+
+# per-star normalisation, so one bright star does not own the metric
+norm = np.ones(len(stars))
+for si in range(len(stars)):
+    acc = np.zeros((2*PH+1, 2*PH+1)); n = 0
+    rel = stars[si] - P0
+    for wins, ang in zip(data, angs):
+        w = wins[si]
+        if w is None: continue
+        arr, x0, y0 = w
+        c, s_ = np.cos(-ang), np.sin(-ang)
+        acc += ndimage.map_coordinates(arr, [P0[1]+s_*rel[0]+c*rel[1]+oy-y0,
+                                             P0[0]+c*rel[0]-s_*rel[1]+ox-x0],
+                                       order=1, mode="constant"); n += 1
+    if n >= 8:
+        acc = acc/n - np.median(acc/n)
+        norm[si] = max(ndimage.gaussian_filter(acc, 0.8).max(), 1e-6)
+    else:
+        norm[si] = np.inf          # star drops out of the metric
+print("per-star reference peaks:", np.round(norm, 2))
+
+best = None
+for dx in range(-a.half, a.half+1, a.coarse):
+    row = []
+    for dy in range(-a.half, a.half+1, a.coarse):
+        v = sharpness(np.array([dx, dy])); row.append(v)
+        if best is None or v > best[0]: best = (v, dx, dy)
+    print(f"  dx={dx:+4d}  " + " ".join(f"{v:.3f}" for v in row), flush=True)
+print(f"coarse best: dx={best[1]:+d} dy={best[2]:+d}  metric {best[0]:.4f}")
+
+for stepsz in (4, 1):
+    bx, by = best[1], best[2]
+    for dx in range(bx-2*stepsz, bx+2*stepsz+1, stepsz):
+        for dy in range(by-2*stepsz, by+2*stepsz+1, stepsz):
+            v = sharpness(np.array([dx, dy]))
+            if v > best[0]: best = (v, dx, dy)
+    print(f"  refined (step {stepsz}): dx={best[1]:+d} dy={best[2]:+d} metric {best[0]:.4f}")
+
+P = P0 + np.array([best[1], best[2]])
+CTR = np.array([648., 486.])
+d = P - CTR; dist = np.hypot(*d)*SCALE
+print(f"\nPOLE {P[0]:.0f}, {P[1]:.0f}   (moved {np.hypot(best[1],best[2]):.0f} px "
+      f"from the input)")
+print(f"  dist {dist:.3f} deg  bearing {np.degrees(np.arctan2(-d[0],-d[1])):.1f} deg left-of-up"
+      f"  centre dec {90-dist:.2f}")
+# what the sharpening is worth, in FWHM
+for tag, dp in (("input", np.array([0,0])), ("refined", np.array([best[1], best[2]]))):
+    P = P0 + dp
+    prof = []
+    for si, st in enumerate(stars):
+        acc = np.zeros((2*PH+1, 2*PH+1)); n = 0
+        rel = st - P
+        for wins, ang in zip(data, angs):
+            w = wins[si]
+            if w is None: continue
+            arr, x0, y0 = w
+            c, s = np.cos(-ang), np.sin(-ang)
+            acc += ndimage.map_coordinates(arr, [P[1]+s*rel[0]+c*rel[1]+oy-y0,
+                                                 P[0]+c*rel[0]-s*rel[1]+ox-x0],
+                                           order=1, mode="constant"); n += 1
+        if n < 5: continue
+        acc /= n; acc -= np.median(acc)
+        if acc.max() <= 0: continue
+        prof.append(2*np.sqrt((acc > acc.max()/2).sum()/np.pi))
+    print(f"  {tag:8s} stacked FWHM {np.median(prof):.2f} px = {np.median(prof)*SCALE*3600:.1f} arcsec")

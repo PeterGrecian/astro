@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""matched-detect - detect stars by MATCHED FILTER against the measured PSF.
+
+PETER'S POINT, 2026-09-21, and it is the right one: the photons that should be
+at a point are spread over a known shape at a known distance from the centre,
+so putting them back where they came from must recover signal-to-noise. That
+operation is correlation with the PSF - the matched filter - and it is the
+provably optimal detector for a known shape in noise.
+
+WHY IT MATTERS HERE MORE THAN USUAL. A real star in a 3 s xoverpi sub carries
+~13 sigma of total signal spread over 5-6 px, so its brightest pixel is only
+3-4 sigma. Peak-detection on a lightly smoothed frame therefore CANNOT see it,
+and what such a detector does find is single-pixel events - residual hot
+pixels and cosmic rays - because those put all their signal in one pixel. That
+is not a hypothetical: it wrecked four separate attempts to measure the PSF on
+2026-09-21 before tracking was used instead.
+
+The matched filter inverts that bias exactly. A kernel shaped like a 2.5 px
+star responds weakly to a single hot pixel and strongly to a star, so it does
+not merely detect more - it detects BETTER, rejecting the very artefacts that
+the naive filter prefers.
+
+The PSF comes from psf-stamp (4x reconstruction from tracked stars), so the
+kernel is measured, not assumed - which is what makes this the matched filter
+rather than an arbitrary smoothing.
+
+  bigstore-run bin/matched-detect 2026-09-20 00 --psf /home/peter/tmp/derot/psf-2026-09-20-00.fits
+"""
+import argparse, glob
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage, signal
+
+ap = argparse.ArgumentParser()
+ap.add_argument("night"); ap.add_argument("hour")
+ap.add_argument("--psf", required=True, help="psf-stamp output (4x upsampled)")
+ap.add_argument("--up", type=int, default=4)
+ap.add_argument("--nframe", type=int, default=6)
+ap.add_argument("--gap", type=int, default=10, help="frames later to re-test a detection")
+ap.add_argument("--thresh", type=float, default=8.0)
+a = ap.parse_args()
+
+B = f"/mnt/muppet/bigstore/xoverpi-frames/night/{a.night}/{a.hour}/"
+fs = sorted(glob.glob(B+"*.fits.fz"))
+master = np.median(np.stack([fits.getdata(fs[i]).astype(np.float32)
+         for i in np.linspace(0, len(fs)-1, 15).astype(int)]), axis=0)
+
+psf4 = fits.getdata(a.psf).astype(np.float64)
+# REBIN by block-averaging, do not subsample. Taking every 4th cell throws
+# away 15 of every 16 measurements and hands the kernel their noise - the
+# first version did that and the resulting kernel had 0.39 and 0.28 spikes
+# sitting out in the skirt where the PSF is smooth.
+n4 = (psf4.shape[0]//a.up)*a.up
+k = psf4[:n4, :n4].reshape(n4//a.up, a.up, n4//a.up, a.up).mean(axis=(1, 3))
+c = k.shape[0]//2
+k = k[c-5:c+6, c-5:c+6]
+k = np.clip(k, 0, None); k /= k.sum()
+print(f"kernel {k.shape[0]}x{k.shape[1]} from {a.psf}")
+print("  " + "\n  ".join(" ".join(f"{v:5.2f}" for v in row) for row in k/k.max()))
+
+def clean(p):
+    d = fits.getdata(p).astype(np.float64)
+    r = d - master
+    return r - ndimage.gaussian_filter(r, 16)
+
+def peaks(img, thr):
+    sig = 1.4826*np.median(np.abs(img-np.median(img)))
+    pk = (img == ndimage.maximum_filter(img, 9)) & (img > thr*sig)
+    ys, xs = np.nonzero(pk)
+    ok = (xs > 20) & (xs < img.shape[1]-20) & (ys > 20) & (ys < img.shape[0]-20)
+    return xs[ok], ys[ok], sig
+
+# ---------------------------------------------------------------------------
+# THE FAIR TEST. Counting detections above N sigma is not it: a wider kernel
+# has fewer independent resolution elements, so its false-alarm count falls
+# with its true count and every filter looks different for the wrong reason.
+# Instead measure the SNR of the SAME stars - found by tracking, so known to
+# be real - under each filter. The matched filter is whichever maximises it,
+# and the ratio to the raw pixel is exactly the gain Peter is asking about.
+def cen(r, x, y, half=4):
+    xi, yi = int(round(x)), int(round(y))
+    if not (half < yi < r.shape[0]-half-1 and half < xi < r.shape[1]-half-1): return None
+    b = r[yi-half:yi+half+1, xi-half:xi+half+1]
+    w = np.clip(b-np.median(b), 0, None)
+    if w.sum() <= 0: return None
+    gy, gx = np.mgrid[yi-half:yi+half+1, xi-half:xi+half+1]
+    return np.array([(w*gx).sum()/w.sum(), (w*gy).sum()/w.sum()])
+
+NF = 25
+idx0 = len(fs)//2
+R_ = [clean(p) for p in fs[idx0:idx0+NF]]
+g = ndimage.gaussian_filter(R_[0], 1.2)
+sig = 1.4826*np.median(np.abs(g-np.median(g)))
+pk = (g == ndimage.maximum_filter(g, 15)) & (g > 4.0*sig)
+ys, xs = np.nonzero(pk)
+ok = (xs > 30) & (xs < R_[0].shape[1]-30) & (ys > 30) & (ys < R_[0].shape[0]-30)
+xs, ys = xs[ok], ys[ok]
+stars = []
+for x0, y0 in zip(xs[np.argsort(g[ys, xs])[::-1][:40]], ys[np.argsort(g[ys, xs])[::-1][:40]]):
+    p = cen(R_[0], x0, y0)
+    if p is None: continue
+    pos, vel = [p], np.zeros(2)
+    for k2 in range(1, NF):
+        pred = pos[-1] + vel
+        q = cen(R_[k2], pred[0], pred[1])
+        if q is None or np.hypot(*(q-pred)) > 4: break
+        vel = q - pos[-1]; pos.append(q)
+    if len(pos) >= NF*0.8 and np.hypot(*(pos[-1]-pos[0])) > 8:
+        stars.append(pos[0])
+print(f"\n{len(stars)} tracked (therefore real) stars in the reference frame")
+
+filters = [(f"gaussian {gw:.2f}px", ndimage.gaussian_filter(R_[0], gw))
+           for gw in (0.0, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)]
+filters.append(("matched (PSF)", signal.fftconvolve(R_[0], k[::-1, ::-1], mode="same")))
+print(f"{'filter':>16} {'median SNR':>11} {'mean SNR':>9} {'gain vs raw':>12}")
+base = None
+for name, img in filters:
+    s_ = 1.4826*np.median(np.abs(img-np.median(img)))
+    # Evaluate AT the known centroid, never max-over-a-box: the max of 25
+    # pixels is biased high by noise, and biased MOST for the least-smoothed
+    # image, which would hand the unfiltered frame a win it has not earned.
+    snr = []
+    for p in stars:
+        v = ndimage.map_coordinates(img, [[p[1]], [p[0]]], order=1)[0]
+        snr.append(v/s_)
+    med = float(np.median(snr))
+    if base is None: base = med
+    print(f"{name:>16} {med:>11.2f} {np.mean(snr):>9.2f} {med/base:>11.2f}x")

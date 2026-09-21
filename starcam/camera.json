@@ -37,17 +37,7 @@
   "quality_file": null,
   "location_file": null,
   "privacy_file": null,
-  "optics": {
-    "config": "celestron-firstscope-iya2009",
-    "since": "2026-09-08",
-    "type": "Newtonian reflector, spherical primary, tabletop alt-az Dobsonian",
-    "aperture_mm": 76.0,
-    "focal_length_mm": 300.0,
-    "focal_ratio": 3.95,
-    "tracking": false,
-    "finder": false,
-    "notes": "Celestron FirstScope, International Year of Astronomy 2009 edition (21024-IYA; same optics as the stock 21024, commemorative decals). Replaces the OV5647 stock lens. NO tracking and NO finder - both are operational constraints on the capture design, not footnotes."
-  },
+  "optics_notes": "The Celestron FirstScope moved to xoverpi on 2026-09-14; see xoverpi/camera.json for its optics. This host has no optics fitted. The block was left behind here until 2026-09-21 and made the name FirstScope read as ambiguous across two cameras when only one scope exists.",
   "resolution_notes": "Sampling is far finer than this scope delivers. Airy disk 1.22*lambda/D = 3.6 arcsec across at 550 nm; the primary is SPHERICAL at f/3.95, giving roughly D/(2048*lambda*F^3) = 1.1 waves P-V of spherical aberration, ~4x the Rayleigh quarter-wave limit. So real star images are several arcsec wide against a 0.96 arcsec pixel. The OPTICS are the resolution limit here, not the seeing and not the sensor - which means 2x2 binning costs nothing real and buys signal and Pi-1B throughput. Prefer the binned path.",
   "drift": {
     "untracked": true,

@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""star-fwhm - the PSF width per hour, measured on TRACKED stars. The focus number.
+
+THE PROBLEM THIS EXISTS TO SOLVE. You cannot measure focus on a single frame
+with this rig. A real star spreads its ~13 sigma of detection over 5-6 px, so
+its brightest pixel is only 3-4 sigma - below any peak threshold. Everything
+that IS bright enough to detect per-pixel in one 3 s sub turns out to be a
+residual hot pixel or a cosmic ray: of 29 detections above 8 sigma in one
+frame, 17 percent were still at the same pixel 30 s later, and a Gaussian fit
+restricted to >20 sigma single-frame sources returned a sub-pixel 0.9 px
+"PSF" with 1.5-1.9 ellipticity. Artefacts, every one.
+
+FOUR ESTIMATORS FAILED BEFORE THIS ONE (all on 2026-09-21, all confident):
+  * second moments in a +/-8 px box - truncates at 1.8 sigma, so the BOX sets
+    the answer; a flat noise field returns 10.9 px by arithmetic and it
+    returned 10.6 px every night whatever focus was doing;
+  * curve of growth per star - by r=25 px the aperture holds ~2000 px of sky
+    noise and r50 floats; came back 3x too wide;
+  * stamps normalised by their own peak pixel - selects the noise spike that
+    triggered the detection, collapsing the mean profile to a delta;
+  * a Gaussian fit to bright single-frame sources - fits the artefacts above.
+
+WHAT WORKS. TRACK a star across frames and coadd the stamps on its moving
+centre. Tracking is itself the proof it is a star (hot pixels do not move),
+the coadd lifts it to high SNR, and a 2D Gaussian with background and centre
+free then has something real to fit. No pole needed - only a local drift,
+taken by cross-correlating two frames a minute apart.
+
+Cross-checked against the same fit on a 600-frame de-rotated stack of the
+same hour, where stars stand at 130-270 sigma: 6.0 px there. The stack can
+only be wider (it carries pole error as smear), so a single-frame answer must
+come in at or below that.
+
+Trailing floor: a 3 s exposure at radius r from the pole smears omega*r*3 px
+(1.8 px at r=7700), which is a real part of the width, not an error.
+
+  bigstore-run bin/star-fwhm 2026-09-20 [--hours 00,04,20]
+"""
+import argparse, glob, os
+import numpy as np
+from astropy.io import fits
+from scipy import ndimage, optimize
+
+SCALE = 2*0.000267381
+W = 15.0410686/3600*np.pi/180
+R = 12
+
+ap = argparse.ArgumentParser()
+ap.add_argument("night")
+ap.add_argument("--hours", default="", help="comma list; default every hour dir")
+ap.add_argument("--nframe", type=int, default=40, help="consecutive frames per hour")
+ap.add_argument("--nstar", type=int, default=25)
+a = ap.parse_args()
+root = f"/mnt/muppet/bigstore/xoverpi-frames/night/{a.night}/"
+yy, xx = np.mgrid[-R:R+1, -R:R+1]
+
+def drift(r0, r1, dt, maxs=90):
+    """Global shift between two frames: the seed for tracking."""
+    w = np.outer(np.hanning(r0.shape[0]), np.hanning(r0.shape[1]))
+    C = np.fft.fftshift(np.fft.ifft2(np.fft.fft2(r0*w)*np.conj(np.fft.fft2(r1*w))).real)
+    cy, cx = np.array(C.shape)//2
+    s = C[cy-maxs:cy+maxs+1, cx-maxs:cx+maxs+1]
+    j, i = np.unravel_index(np.argmax(s), s.shape)
+    return np.array([-(i-maxs), -(j-maxs)])/dt
+
+def cen(r, x, y, half=4):
+    xi, yi = int(round(x)), int(round(y))
+    if not (half < yi < r.shape[0]-half-1 and half < xi < r.shape[1]-half-1): return None
+    w = np.clip(r[yi-half:yi+half+1, xi-half:xi+half+1]
+                - np.median(r[yi-half:yi+half+1, xi-half:xi+half+1]), 0, None)
+    if w.sum() <= 0: return None
+    gy, gx = np.mgrid[yi-half:yi+half+1, xi-half:xi+half+1]
+    return np.array([(w*gx).sum()/w.sum(), (w*gy).sum()/w.sum()])
+
+print(f"{a.night}")
+print(f"{'hour':>5} {'stars':>6} {'tracked':>8} {'FWHM px':>8} {'arcsec':>7} {'ellip':>6} {'sky':>5}")
+hours = a.hours.split(",") if a.hours else sorted(os.listdir(root))
+rows = []
+for h in hours:
+    fs = sorted(glob.glob(root+h+"/*.fits.fz"))
+    if len(fs) < a.nframe+5: continue
+    master = np.median(np.stack([fits.getdata(fs[i]).astype(np.float32)
+             for i in np.linspace(0, len(fs)-1, 11).astype(int)]), axis=0)
+    mid = len(fs)//2
+    sub = fs[mid:mid+a.nframe]
+    R_, T = [], []
+    for p in sub:
+        with fits.open(p) as hh:
+            d = hh[-1].data.astype(np.float64); t = hh[-1].header["DATE-OBS"]
+        r = d - master; r -= ndimage.gaussian_filter(r, 16)
+        R_.append(r); T.append(np.datetime64(t[:26]))
+    ts = np.array([(t-T[0])/np.timedelta64(1, 's') for t in T])
+    v = drift(R_[0], R_[-1], ts[-1])
+    g = ndimage.gaussian_filter(R_[0], 1.5)
+    sig = 1.4826*np.median(np.abs(g-np.median(g)))
+    pk = (g == ndimage.maximum_filter(g, 15)) & (g > 4.5*sig)
+    ys, xs = np.nonzero(pk)
+    ok = (xs > 40) & (xs < R_[0].shape[1]-40) & (ys > 40) & (ys < R_[0].shape[0]-40)
+    xs, ys = xs[ok], ys[ok]
+    order = np.argsort(g[ys, xs])[::-1][:a.nstar]
+    acc = np.zeros((2*R+1, 2*R+1)); ntr = 0
+    for i in order:
+        p = cen(R_[0], xs[i], ys[i])
+        if p is None: continue
+        pos, vel, stamps = [p], v.copy(), []
+        for k in range(1, len(R_)):
+            pred = pos[-1] + vel*(ts[k]-ts[k-1])
+            q = cen(R_[k], pred[0], pred[1])
+            if q is None or np.hypot(*(q-pred)) > 4: break
+            if len(pos) >= 2: vel = (q-pos[-2])/(ts[k]-ts[k-2] if k >= 2 else ts[k])
+            pos.append(q)
+        moved = np.hypot(*(pos[-1]-pos[0])) if len(pos) > 1 else 0
+        # a hot pixel does not move; a star over this baseline must
+        if len(pos) < len(R_)*0.6 or moved < 15: continue
+        s = np.zeros((2*R+1, 2*R+1)); m = 0
+        for k, q in enumerate(pos):
+            st = ndimage.map_coordinates(R_[k], [yy+q[1], xx+q[0]], order=1, mode="constant")
+            s += st; m += 1
+        s /= m
+        acc += s - np.median(s); ntr += 1
+    if ntr < 3: continue
+    b = acc/ntr
+    p0 = [b.max()-np.median(b), 0.0, 0.0, 2.0, np.median(b)]
+    fn = lambda q: (q[0]*np.exp(-((xx-q[1])**2+(yy-q[2])**2)/(2*q[3]**2)) + q[4] - b).ravel()
+    sol, _ = optimize.leastsq(fn, p0)
+    amp, bx, by, sg, off = sol; sg = abs(sg)
+    w2 = np.clip(b-off, 0, None)*(np.hypot(xx-bx, yy-by) <= 3*sg)
+    vxx = (w2*(xx-bx)**2).sum()/w2.sum(); vyy = (w2*(yy-by)**2).sum()/w2.sum()
+    vxy = (w2*(xx-bx)*(yy-by)).sum()/w2.sum()
+    t_ = np.sqrt(max((vxx-vyy)**2+4*vxy**2, 0))
+    l1, l2 = (vxx+vyy+t_)/2, (vxx+vyy-t_)/2
+    fw = 2.3548*sg
+    print(f"{h:>5} {len(order):>6} {ntr:>8} {fw:>8.2f} {fw*SCALE*3600:>7.1f} "
+          f"{(np.sqrt(l1/l2) if l2 > 0 else float('nan')):>6.2f} {np.median(master):>5.0f}")
+    rows.append((h, fw, ntr))
+if rows:
+    ws = np.array([r[1] for r in rows]); tot = sum(r[2] for r in rows)
+    print(f"\nnight PSF: FWHM {np.median(ws):.2f} px = {np.median(ws)*SCALE*3600:.1f} arcsec "
+          f"({tot} tracked stars over {len(rows)} hours)")
+    print(f"  hour to hour {ws.min():.2f} to {ws.max():.2f} px "
+          f"(spread {100*(ws.max()-ws.min())/np.median(ws):.0f}%)")
