@@ -16,10 +16,21 @@ source:
 figures:
   - src: ~/tmp/derot/mean-2026-09-20-00-0-600.fits
     caption: >
-      600 frames de-rotated about the celestial pole and coadded, the
-      full-depth centre of the canvas. The brightest star carries the
-      annulus of a defocused Newtonian; the faint diagonal weave is
-      correlated noise, not sky.
+      600 frames — half an hour — de-rotated about the celestial
+      pole and coadded. The slanted edges are the footprint of the field
+      itself, swinging through the canvas as the sky turned; everything
+      inside them is stacked sky.
+    crop: [126, 703, 1975, 2355]
+    crop_note: >
+      Corners chosen by Peter in splay, 2026-09-21, probing the de-rotated
+      mean at (126,731), (1975,703) and (1960,2355) — the bounding box
+      of those three points is this crop.
+    stretch: {fn: asinh, gain: 6.0, lo_pct: 50, hi_pct: 99.9}
+  - src: ~/tmp/derot/mean-2026-09-20-00-0-600.fits
+    caption: >
+      The full-depth centre of the same stack, close up. The brightest star
+      carries the annulus of a defocused Newtonian; the faint diagonal weave
+      is correlated noise, not sky.
     crop: [632, 1428, 1443, 1756]
     stretch: {fn: asinh, gain: 6.0, lo_pct: 50, hi_pct: 99.9}
   - src: ~/tmp/derot/preview-max.fits
