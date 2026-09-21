@@ -114,7 +114,7 @@ def daylight_keep_mask(times_local, cfg=None, day_alt_deg=None):
             "21:00-05:00 clock window (no location/ephem)")
 
 
-def lsb_align(vals):
+def lsb_align(vals, pedestal=None):
     """Normalise a night's mean-ADU series to LSB alignment.
 
     Returns (values, was_msb). Decided on the series MINIMUM, not the
@@ -122,8 +122,23 @@ def lsb_align(vals):
     is the least sensitive to how bright the night actually was. The two
     populations are three orders of magnitude apart, so the 1000 ADU cut
     is nowhere near either of them.
+
+    `pedestal` (the camera's own black-level reference) DISARMS the test
+    when it sits at or above the cut. The heuristic reads "a floor above
+    1000 ADU means 10-bit raw left-shifted into a 16-bit container", which
+    is a Pi-sensor fact, not a universal one: the Canon EOS 2000D writes
+    14-bit raw with a black level of 2048, so every canon night looked
+    MSB-aligned, got divided by 64 down to ~42 ADU, and fell BELOW its own
+    pedestal — the whole archive collapsed onto the 0.5-count floor and
+    drew as a dead flat line at -1.00 stops. Found 2026-09-21; canon
+    retired on 2026-08-16, so nothing had republished its charts since the
+    alignment rework of 08-25 and the last good render was still in S3.
+    For every Pi camera the pedestal is ~50-105, far below the cut, so
+    this guard changes nothing about which nights get normalised there.
     """
     vals = np.asarray(vals, dtype=float)
+    if pedestal is not None and float(pedestal) >= MSB_ALIGN_MIN_ADU:
+        return vals, False
     if vals.size == 0 or float(vals.min()) <= MSB_ALIGN_MIN_ADU:
         return vals, False
     return vals / MSB_ALIGN_FACTOR, True
@@ -182,7 +197,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     # Put MSB-aligned nights on the same ADU scale as everything else, so
     # the fixed pedestal from camera.json means the same thing on every
     # chart (see lsb_align).
-    vals, _was_msb = lsb_align(vals)
+    vals, _was_msb = lsb_align(vals, pedestal)
     if pedestal is None:
         pedestal = float(np.percentile(vals, 1))
     pedestal = float(pedestal)
