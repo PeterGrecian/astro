@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""add-note — publish one Field Notes entry from its card file.
+
+Field Notes (/astro/notes) is the logbook: what an instrument showed on a
+given night and what we concluded from it, tagged by instrument so Polecam,
+eclipticam and the FirstScope all land in one stream. It is NOT a pipeline
+output and there is no nightly job — an entry exists because something was
+worth writing down.
+
+S3 layout (one flat collection, deliberately not per-instrument — the point
+of a logbook is that it reads in date order across the whole estate):
+
+    notes/index.json              manifest (schema 1), newest first
+    notes/figures/<id>-<n>.jpg    figure n of entry <id>
+    notes/thumbs/<id>.jpg         640px card thumbnail (figure 1)
+
+WHAT IS DIFFERENT FROM add-transient
+------------------------------------
+add-transient takes flags OR a card, and a sibling publish.py renders the
+image and shells out to it. That trio exists for historical reasons (the tool
+came first, the card files came later, on 2026-08-28). This tool is
+CARD-ONLY from the start: the card in git is the source, the figures are
+build artefacts rendered from the recipe it carries, and there is no way to
+publish prose that is not in a file. One less path, and the git copy cannot
+drift from what is published.
+
+An entry may carry SEVERAL figures, which a transient never does — a note
+usually argues from a comparison (the stack against the single frame, the
+strip against the frame it came from).
+
+    add-note astro/notes/2026-09-20-firstscope-derotation.md      # dry run
+    add-note astro/notes/*.md --publish
+    add-note --list
+    add-note --remove 2026-09-20-firstscope-derotation --publish
+
+Re-publishing an id REPLACES that entry, so fixing a sentence or re-cropping
+a figure does not grow the manifest. Renaming a card's title is safe;
+changing its id is not.
+"""
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "notes"))
+from render import parse_card, render_all  # noqa: E402
+
+BUCKET = "astro-berrylands-eu-west-1"
+PREFIX = "notes"
+INDEX_KEY = f"{PREFIX}/index.json"
+THUMB_WIDTH = 640
+FULL_WIDTH = 2560
+
+# Instruments the website shows chips for, in chip order. Like the transients
+# categories this is NOT a closed list — an unknown instrument is titlecased
+# and appended, because the next thing pointed at the sky should not need a
+# code change to be written about.
+INSTRUMENTS = ("firstscope", "astrocam", "eclipticam", "canon", "starcam",
+               "xoverpi", "other")
+
+# Body headings a card may use. Everything before the first heading is the
+# summary — the paragraph the card list shows — so a short note needs no
+# headings at all.
+SECTIONS = ("summary", "notes", "numbers")
+
+
+def split_body(text: str) -> dict:
+    """Prose sections of a card, keyed by lowercased '# Heading'.
+
+    'numbers' becomes a list of its bullets (measured values, one per line);
+    everything else is joined into unwrapped paragraphs, because the card
+    file is hard-wrapped for reading and the website wants sentences.
+    """
+    body = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.S)
+    out, cur = {"summary": []}, "summary"
+    for line in body.splitlines():
+        h = re.match(r"^#+\s+(.+?)\s*$", line)
+        if h:
+            cur = h.group(1).strip().lower()
+            out.setdefault(cur, [])
+            continue
+        out[cur].append(line)
+
+    res = {}
+    for key, lines in out.items():
+        if key == "numbers":
+            items, buf = [], ""
+            for ln in lines:
+                if ln.startswith("- "):
+                    if buf:
+                        items.append(buf.strip())
+                    buf = ln[2:]
+                elif ln.strip():
+                    buf += " " + ln.strip()
+            if buf:
+                items.append(buf.strip())
+            res[key] = items
+        else:
+            paras = re.split(r"\n\s*\n", "\n".join(lines).strip())
+            res[key] = "\n\n".join(" ".join(p.split())
+                                   for p in paras if p.strip())
+    return res
+
+
+def make_thumb(img):
+    """640px-wide JPEG bytes. Cards are ~340px on a 2x screen."""
+    from PIL import Image
+    t = img.convert("RGB")
+    if t.width > THUMB_WIDTH:
+        h = round(t.height * THUMB_WIDTH / t.width)
+        t = t.resize((THUMB_WIDTH, h), Image.LANCZOS)
+    buf = io.BytesIO()
+    t.save(buf, "JPEG", quality=85, optimize=True)
+    return buf.getvalue()
+
+
+def encode_full(img):
+    """Viewing-size JPEG bytes.
+
+    Capped at 2560 wide like the transients gallery: this is a viewing
+    surface, not an archive, and the FITS the figure was rendered from is
+    still wherever it already lives. A polar strip is the one shape this
+    cap treats unkindly (22561 px tall at 1619 wide), so a strip figure
+    should carry its own `scale:` in the recipe rather than rely on this.
+    """
+    from PIL import Image
+    full = img.convert("RGB")
+    if full.width > FULL_WIDTH:
+        h = round(full.height * FULL_WIDTH / full.width)
+        full = full.resize((FULL_WIDTH, h), Image.LANCZOS)
+    buf = io.BytesIO()
+    full.save(buf, "JPEG", quality=90, optimize=True)
+    return buf.getvalue()
+
+
+def build_entry(card_path: Path, root: Path):
+    """(entry, [(key, bytes)]) for one card, ready to upload."""
+    meta = parse_card(card_path)
+    sec = split_body(card_path.read_text())
+
+    date = str(meta["date"])
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise SystemExit(f"{card_path}: date must be YYYY-MM-DD, got {date!r}")
+    item_id = str(meta["id"])
+
+    uploads = []
+    figures = []
+    rendered = render_all(meta, root)
+    for i, (fig, img) in enumerate(rendered, 1):
+        key = f"{PREFIX}/figures/{item_id}-{i}.jpg"
+        uploads.append((key, encode_full(img)))
+        figures.append({
+            "key": key,
+            "caption": str(fig.get("caption") or ""),
+            "width": img.width,
+            "height": img.height,
+        })
+    thumb_key = None
+    if rendered:
+        thumb_key = f"{PREFIX}/thumbs/{item_id}.jpg"
+        uploads.append((thumb_key, make_thumb(rendered[0][1])))
+
+    tags = meta.get("tags") or []
+    if isinstance(tags, str):
+        tags = [t.strip() for t in tags.split(",") if t.strip()]
+
+    entry = {
+        "id": item_id,
+        "title": str(meta["title"]),
+        "instrument": str(meta["instrument"]).lower(),
+        "date": date,
+        "night": str(meta.get("night") or ""),
+        "tags": [str(t) for t in tags],
+        "summary": sec.get("summary", ""),
+        "body": sec.get("notes", ""),
+        "numbers": sec.get("numbers", []),
+        "figures": figures,
+        "thumb_key": thumb_key,
+        "added_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    return entry, uploads
+
+
+def s3_client():
+    import boto3
+    return boto3.client("s3")
+
+
+def load_index(s3):
+    """Current manifest from S3, or an empty one if nothing is published."""
+    try:
+        obj = s3.get_object(Bucket=BUCKET, Key=INDEX_KEY)
+        return json.loads(obj["Body"].read())
+    except Exception:
+        return {"schema": 1, "generated_utc": None, "items": []}
+
+
+def write_index(s3, index):
+    index["generated_utc"] = datetime.now(timezone.utc).isoformat(
+        timespec="seconds")
+    # Newest first, id breaking ties so the order does not shuffle when an
+    # unrelated entry is edited.
+    index["items"].sort(key=lambda e: (e.get("date") or "", e.get("id") or ""),
+                        reverse=True)
+    body = json.dumps(index, indent=2).encode("utf-8")
+    s3.put_object(Bucket=BUCKET, Key=INDEX_KEY, Body=body,
+                  ContentType="application/json")
+    return len(body)
+
+
+def cmd_list(s3):
+    index = load_index(s3)
+    items = index.get("items", [])
+    if not items:
+        print("no entries published")
+        return 0
+    for e in items:
+        figs = len(e.get("figures") or [])
+        print(f"{e.get('date','?')}  {e.get('instrument','?'):<12} "
+              f"{e.get('id','?')}  ({figs} figure(s))")
+    print(f"\n{len(items)} entr(y|ies), manifest generated "
+          f"{index.get('generated_utc')}")
+    return 0
+
+
+def cmd_remove(s3, item_id, publish):
+    index = load_index(s3)
+    victim = next((e for e in index["items"] if e.get("id") == item_id), None)
+    if victim is None:
+        print(f"no entry with id {item_id!r}", file=sys.stderr)
+        return 1
+    keys = [f["key"] for f in (victim.get("figures") or [])]
+    if victim.get("thumb_key"):
+        keys.append(victim["thumb_key"])
+    if not publish:
+        print(f"would remove {item_id} and {len(keys)} object(s) "
+              f"— pass --publish")
+        return 0
+    index["items"] = [e for e in index["items"] if e.get("id") != item_id]
+    for key in keys:
+        s3.delete_object(Bucket=BUCKET, Key=key)
+        print(f"deleted s3://{BUCKET}/{key}")
+    write_index(s3, index)
+    print(f"removed {item_id}")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("card", type=Path, nargs="*",
+                    help="card file(s) under astro/notes/")
+    ap.add_argument("--root", type=Path, default=Path.home(),
+                    help="base for relative figure sources (default: $HOME)")
+    ap.add_argument("--publish", action="store_true",
+                    help="actually upload; without it this is a dry run")
+    ap.add_argument("--list", action="store_true",
+                    help="list what is published and exit")
+    ap.add_argument("--remove", metavar="ID",
+                    help="remove one entry and its objects")
+    args = ap.parse_args()
+
+    if args.list:
+        return cmd_list(s3_client())
+    if args.remove:
+        return cmd_remove(s3_client(), args.remove, args.publish)
+    if not args.card:
+        ap.error("give at least one card file (or --list / --remove)")
+
+    built = []
+    for card_path in args.card:
+        if card_path.is_dir() or card_path.name == "README.md":
+            continue
+        entry, uploads = build_entry(card_path, args.root)
+        total_kb = sum(len(b) for _k, b in uploads) / 1024
+        print(f"{entry['id']}  [{entry['instrument']}]  "
+              f"{len(entry['figures'])} figure(s), {total_kb:.0f}KB")
+        for fig in entry["figures"]:
+            print(f"    {fig['width']}x{fig['height']}  {fig['caption']}")
+        built.append((entry, uploads))
+
+    if not built:
+        print("no cards given", file=sys.stderr)
+        return 1
+    if not args.publish:
+        print(f"\ndry run ({len(built)} card(s)) — pass --publish to upload")
+        return 0
+
+    s3 = s3_client()
+    index = load_index(s3)
+    for entry, uploads in built:
+        for key, body in uploads:
+            s3.put_object(Bucket=BUCKET, Key=key, Body=body,
+                          ContentType="image/jpeg")
+            print(f"uploaded s3://{BUCKET}/{key}")
+        index["items"] = [e for e in index["items"]
+                          if e.get("id") != entry["id"]]
+        index["items"].append(entry)
+    n = write_index(s3, index)
+    print(f"manifest s3://{BUCKET}/{INDEX_KEY} ({n} bytes, "
+          f"{len(index['items'])} entries)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
