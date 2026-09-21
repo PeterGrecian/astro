@@ -46,6 +46,74 @@ MSB_ALIGN_FACTOR = 64.0
 MSB_ALIGN_MIN_ADU = 1000.0
 
 
+# --- daylight rejection ------------------------------------------------
+# Multi-night charts have to drop DAY captures: on cameras that run round
+# the clock those land in the same noon-to-noon CSV, read saturated, and
+# draw as a flat line across the top of the chart.
+#
+# The test is the SUN, not the clock. Until 2026-09-21 both cross-night
+# charts hardcoded "local hour >= 21 or < 5", which is only ever right for
+# one week of the year: by late September capture already starts at 20:12
+# BST and runs to 06:10, so an hour of real twilight was discarded at each
+# end BEFORE the axis was computed — and since the axis is derived from
+# the data actually drawn, the chart lost the dusk fall and the dawn rise
+# together. That is the bathtub: the per-night chart showed both walls and
+# the combined chart showed only the flat bottom (Peter, 2026-09-21). It
+# would have gone on worsening every week as the nights draw in, and in
+# midwinter, with capture starting near 17:00, the filter would have
+# thrown away half the night.
+#
+# Sun altitude is season-proof and is already how capture itself decides
+# to start and stop (astro.state), so the chart and the capture gate now
+# answer to the same physics. The default threshold matches state.py's
+# civil-twilight day line; a camera's own `state.sun_altitude_day_deg`
+# wins where it is set (astrocam: -8).
+DEFAULT_DAY_ALT_DEG = -6.0
+
+
+def daylight_keep_mask(times_local, cfg=None, day_alt_deg=None):
+    """Boolean mask over `times_local`: True to KEEP the frame.
+
+    Keeps everything captured with the sun at or below the camera's
+    daytime altitude — all of night and both twilights, no daylight.
+    Returns (mask, rule) where `rule` names which test was applied, so
+    the caller can say so in its output.
+
+    Falls back to the old clock window when the camera has no location
+    or ephem is unavailable — the chart still draws, and says why.
+    """
+    times_local = list(times_local)
+    loc = getattr(cfg, "location", None) if cfg is not None else None
+    if day_alt_deg is None:
+        state = (cfg.get("state") or {}) if cfg is not None else {}
+        day_alt_deg = float(state.get("sun_altitude_day_deg")
+                            or DEFAULT_DAY_ALT_DEG)
+    if loc:
+        try:
+            from astro.state import sun_altitude_deg
+            lat, lon = float(loc["lat_deg"]), float(loc["lon_deg"])
+            # The sun moves ~0.25 deg a minute, far slower than the frame
+            # cadence, so one altitude per minute is plenty and turns
+            # thousands of ephem calls into hundreds.
+            cache = {}
+            mask = []
+            for t in times_local:
+                utc = t.astimezone(timezone.utc)
+                key = utc.replace(second=0, microsecond=0)
+                alt = cache.get(key)
+                if alt is None:
+                    alt = cache[key] = sun_altitude_deg(lat, lon, key)
+                mask.append(alt <= day_alt_deg)
+            return (np.array(mask, dtype=bool),
+                    f"sun <= {day_alt_deg:g} deg")
+        except (ImportError, KeyError, TypeError, ValueError) as exc:
+            print(f"  daylight filter: sun altitude unavailable ({exc}); "
+                  f"falling back to the 21:00-05:00 clock window")
+    return (np.array([t.hour >= 21 or t.hour < 5 for t in times_local],
+                     dtype=bool),
+            "21:00-05:00 clock window (no location/ephem)")
+
+
 def lsb_align(vals):
     """Normalise a night's mean-ADU series to LSB alignment.
 

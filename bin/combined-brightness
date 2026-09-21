@@ -38,8 +38,8 @@ from matplotlib.ticker import FuncFormatter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
-from astro.process.brightness import (darkest_anchor, find_night_csvs,
-                                      lsb_align)
+from astro.process.brightness import (darkest_anchor, daylight_keep_mask,
+                                      find_night_csvs, lsb_align)
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -165,14 +165,12 @@ def main():
     # night so curves are directly comparable. Falls back to per-night
     # p1 (loose, used only if camera.json lacks the calibration).
     fixed_pedestal = cfg.get("pedestal")
-    # Drop frames captured outside the night-of-interest window:
-    # day captures land in the same noon-to-noon CSV but read as
-    # saturated (mean = 65535), drawing as a flat line at the top of
-    # the chart that confuses the eye. Restrict to 20:00 UTC -> 04:00 UTC
-    # (= 21:00 -> 05:00 BST).
-    def _in_observing_window(t_local):
-        h = t_local.hour
-        return h >= 21 or h < 5
+    # Drop DAYLIGHT frames: on cameras that run round the clock they land
+    # in the same noon-to-noon CSV, read saturated, and draw as a flat line
+    # across the top of the chart. The test is the sun's altitude, not the
+    # clock — see brightness.daylight_keep_mask for why the old
+    # 21:00-05:00 window cost this chart both walls of its bathtub.
+    daylight_rule = None
 
     # Explicit reference nights (from --nights / config reference_nights).
     ref_set = set()
@@ -189,7 +187,7 @@ def main():
         times, vals = load_curve(csv_p)
         if times is None:
             continue
-        keep = np.array([_in_observing_window(t) for t in times])
+        keep, daylight_rule = daylight_keep_mask(times, cfg)
         times = times[keep]
         vals = vals[keep]
         if len(times) == 0:
@@ -237,15 +235,16 @@ def main():
     ax.set_yscale("log", base=2)
     ax.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
-    ax.set_xlabel("local time (BST)")
+    # Just "BST" — the axis is plainly a clock, and the house rule is that
+    # human-facing times are Europe/London, so "local" added nothing.
+    ax.set_xlabel("BST")
     ax.set_ylabel("stops above pedestal")
-    title_cam = cfg.name.split("-", 1)[-1] if "-" in cfg.name else cfg.name
-    n_ref = len(ref_set & {n for n, _ in nights})
-    # `plotted` already counts the reference nights, so "+N" would read as
-    # a total of plotted+N. State the split instead.
-    title = (f"{title_cam} — {plotted} nights"
-             + (f", {n_ref} of them reference" if n_ref else ""))
-    ax.set_title(title)
+    # The title says what the reader is looking at, not what the pipeline
+    # did. "v3w — 7 nights, 1 of them reference" named the camera the page
+    # already names and a curve count the reader can see; it told a visitor
+    # nothing about what the picture means (Peter, 2026-09-19). The per-night
+    # detail still goes to stdout above, where the operator wants it.
+    ax.set_title("How the brightness of the sky changed overnight")
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
     ax.xaxis.set_major_formatter(
@@ -259,13 +258,11 @@ def main():
     # starting is visible. Deriving the frame from the data means the two
     # cannot drift apart again.
     #
-    # NOTE the remaining seasonal limit is now _in_observing_window()'s
-    # `h >= 21 or h < 5`, not this axis. That filter exists to drop
-    # saturated day frames, but it is written in clock hours, so in
-    # midwinter — when capture starts nearer 17:00 — it will discard real
-    # evening data before this axis ever sees it. Excluding by saturation
-    # or sun altitude rather than by hour is the fix; not done here
-    # because it changes what the chart measures, not just its frame.
+    # The seasonal limit this note used to warn about — a daylight filter
+    # written in clock hours, discarding real evening data before the axis
+    # ever saw it — was fixed on 2026-09-21 by gating on sun altitude
+    # instead (brightness.daylight_keep_mask). Both edges are now honest
+    # all year.
     lo = min(a for a, _ in x_seen)
     hi = max(b for _, b in x_seen)
     lo = lo.replace(minute=0, second=0, microsecond=0)
@@ -282,6 +279,7 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=110, facecolor="white")
     plt.close(fig)
+    print(f"daylight filter: {daylight_rule}")
     print(f"wrote {out_path}")
 
     if args.publish:

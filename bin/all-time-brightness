@@ -66,7 +66,8 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
-from astro.process.brightness import darkest_anchor, find_night_csvs
+from astro.process.brightness import (darkest_anchor, daylight_keep_mask,
+                                      find_night_csvs)
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -78,25 +79,28 @@ FLOOR_LIMIT_ADU = 2.0
 MODE_COLOURS = ["#FF9500", "#007AFF", "#34C759", "#AF52DE", "#FF3B30"]
 
 
-def observing_rows(csv_path):
-    """(utc_datetime, mean, max) for frames inside the observing window.
+def observing_rows(csv_path, cfg=None):
+    """(utc_datetime, mean, max) for frames taken with the sun down.
 
-    Same 21:00-05:00 BST restriction combined-brightness uses: day captures
-    land in the same noon-to-noon CSV and read as saturated.
+    Same daylight rejection combined-brightness uses (sun altitude, not
+    clock hours — see brightness.daylight_keep_mask): day captures land in
+    the same noon-to-noon CSV and read as saturated.
     """
-    out = []
+    rows = []
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
             try:
                 t = datetime.fromisoformat(row["iso_utc"])
                 if t.tzinfo is None:
                     t = t.replace(tzinfo=timezone.utc)
-                local = t.astimezone(LONDON)
-                if not (local.hour >= 21 or local.hour < 5):
-                    continue
-                out.append((t, float(row["mean"]), float(row["max"])))
+                rows.append((t, float(row["mean"]), float(row["max"])))
             except (KeyError, ValueError):
                 continue
+    if not rows:
+        return []
+    keep, _rule = daylight_keep_mask(
+        [t.astimezone(LONDON) for t, _, _ in rows], cfg)
+    out = [r for r, k in zip(rows, keep) if k]
     out.sort()
     return out
 
@@ -164,7 +168,7 @@ def main():
     # Pass 1 — per-night trough and capture mode.
     nights, skipped = [], []
     for night_str, csv_p in find_night_csvs(cfg):
-        rows = observing_rows(csv_p)
+        rows = observing_rows(csv_p, cfg)
         if len(rows) < 20:
             skipped.append((night_str, f"only {len(rows)} frames in window"))
             continue
