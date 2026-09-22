@@ -66,9 +66,28 @@ def parse_card(path: Path) -> dict:
     return meta
 
 
+# The same volume has two names, exactly as bigstore-run documents:
+#   on muppet        /mnt/bigstore/astro-data
+#   on any client    /mnt/muppet/bigstore
+# A card written on muppet names the first; rendered on zog it must find the
+# second, and vice versa. Without this a figure pointing at ARCHIVE (which is
+# what we want cards to do) fails on whichever host did not write it.
+BIGSTORE_NAMES = ("/mnt/bigstore/astro-data", "/mnt/muppet/bigstore")
+
+
 def resolve(src: str, root: Path) -> Path:
     p = Path(str(src)).expanduser()
-    return p if p.is_absolute() else (root / p)
+    if not p.is_absolute():
+        return root / p
+    if p.exists():
+        return p
+    text = str(p)
+    for a, b in (BIGSTORE_NAMES, BIGSTORE_NAMES[::-1]):
+        if text.startswith(a):
+            alt = Path(text.replace(a, b, 1))
+            if alt.exists():
+                return alt
+    return p
 
 
 def load_array(path: Path) -> np.ndarray:
@@ -101,6 +120,41 @@ def stretch_array(a: np.ndarray, spec: dict) -> np.ndarray:
     return np.clip(v, 0, 1)
 
 
+def draw_overlay(img, spec: dict, root: Path):
+    """Circle the stars an astrometry.net solve actually matched.
+
+    `spec` is the card's `overlay:` block:
+
+        overlay: {corr: ~/tmp/platesolve/crop_centre.corr, radius: 14}
+
+    A .corr table is what solve-field writes for the correspondences it
+    used: field_x/field_y is where the star sits in OUR pixels, index_x/
+    index_y where the catalogue says it should. Circling them is the whole
+    claim of a plate solve made visible — these are the stars it recognised.
+
+    The y convention was checked against the data rather than assumed:
+    field_y indexes the array row directly (median peak 202 ADU under the
+    marks against a 98 ADU background; reading it as a FITS bottom-up
+    coordinate lands on empty sky at 102).
+    """
+    from astropy.io import fits
+    from PIL import ImageDraw
+    src = resolve(spec["corr"], root)
+    if not src.exists():
+        raise SystemExit(f"missing overlay table: {src}")
+    rows = fits.open(src)[1].data
+    r = int(spec.get("radius", 14))
+    w = int(spec.get("width", 2))
+    colour = spec.get("colour", "#FF9500")
+    d = ImageDraw.Draw(img)
+    n = 0
+    for row in rows:
+        x, y = float(row["field_x"]), float(row["field_y"])
+        d.ellipse([x - r, y - r, x + r, y + r], outline=colour, width=w)
+        n += 1
+    return n
+
+
 def render_figure(fig: dict, root: Path):
     """One figure recipe -> a PIL RGB image."""
     from PIL import Image
@@ -120,6 +174,11 @@ def render_figure(fig: dict, root: Path):
         if fig.get("crop"):
             x0, y0, x1, y1 = (int(v) for v in fig["crop"])
             img = img.crop((x0, y0, x1, y1))
+
+    # Overlay BEFORE scaling, so marker coordinates are in source pixels and
+    # the recipe does not have to know what scale it will be drawn at.
+    if fig.get("overlay"):
+        draw_overlay(img, fig["overlay"], root)
 
     scale = float(fig.get("scale", 1) or 1)
     if scale != 1:

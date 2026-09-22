@@ -63,48 +63,70 @@ FULL_WIDTH = 2560
 INSTRUMENTS = ("firstscope", "astrocam", "eclipticam", "canon", "starcam",
                "xoverpi", "other")
 
-# Body headings a card may use. Everything before the first heading is the
-# summary — the paragraph the card list shows — so a short note needs no
-# headings at all.
-SECTIONS = ("summary", "notes", "numbers")
+# Everything before the first heading is the SUMMARY — the paragraph the card
+# list shows — so a short note needs no headings at all. Everything after is
+# carried as ORDERED SECTIONS, each keeping its own heading and its own
+# Markdown.
+#
+# It started as three fixed keys (summary / notes / numbers), which was enough
+# for a note that argues in paragraphs and ends in a bullet list. The first
+# real document from astro-capture broke it at once: the sky-brightness note
+# has five sections and FOUR TABLES, and fixed keys silently dropped every
+# section whose heading was not on the list. A logbook that cannot hold a
+# table is not a logbook, so the card now carries its own structure and the
+# website renders a small Markdown subset (headings, tables, lists, indented
+# code, bold and inline code).
 
 
-def split_body(text: str) -> dict:
-    """Prose sections of a card, keyed by lowercased '# Heading'.
+def split_body(text: str):
+    """(summary, sections) for a card.
 
-    'numbers' becomes a list of its bullets (measured values, one per line);
-    everything else is joined into unwrapped paragraphs, because the card
-    file is hard-wrapped for reading and the website wants sentences.
+    `summary` is the unwrapped prose before the first heading. `sections` is
+    an ordered list of {"heading", "md"}, each holding its own Markdown
+    verbatim — tables, lists and indented blocks intact, because the website
+    renders a subset of Markdown rather than plain paragraphs.
+
+    Card files are hard-wrapped for reading, so ordinary PARAGRAPHS are
+    unwrapped into single lines; table rows, list items, indented code and
+    headings are passed through untouched, since their line breaks carry
+    meaning.
     """
     body = re.sub(r"^---\n.*?\n---\n", "", text, flags=re.S)
-    out, cur = {"summary": []}, "summary"
+    summary_lines, sections = [], []
+    cur = None
     for line in body.splitlines():
-        h = re.match(r"^#+\s+(.+?)\s*$", line)
+        h = re.match(r"^(#+)\s+(.+?)\s*$", line)
         if h:
-            cur = h.group(1).strip().lower()
-            out.setdefault(cur, [])
+            cur = {"heading": h.group(2).strip(), "lines": []}
+            sections.append(cur)
             continue
-        out[cur].append(line)
+        (cur["lines"] if cur else summary_lines).append(line)
 
-    res = {}
-    for key, lines in out.items():
-        if key == "numbers":
-            items, buf = [], ""
-            for ln in lines:
-                if ln.startswith("- "):
-                    if buf:
-                        items.append(buf.strip())
-                    buf = ln[2:]
-                elif ln.strip():
-                    buf += " " + ln.strip()
-            if buf:
-                items.append(buf.strip())
-            res[key] = items
-        else:
-            paras = re.split(r"\n\s*\n", "\n".join(lines).strip())
-            res[key] = "\n\n".join(" ".join(p.split())
-                                   for p in paras if p.strip())
-    return res
+    def unwrap(lines):
+        """Join wrapped prose, leave structured lines alone."""
+        out, para = [], []
+
+        def flush():
+            if para:
+                out.append(" ".join(" ".join(para).split()))
+                para.clear()
+
+        for ln in lines:
+            structured = (not ln.strip() or ln.startswith("|")
+                          or ln.startswith("- ") or ln.startswith("* ")
+                          or ln.startswith("    ") or ln.startswith("\t")
+                          or re.match(r"^\d+\. ", ln))
+            if structured:
+                flush()
+                out.append(ln.rstrip())
+            else:
+                para.append(ln.strip())
+        flush()
+        return "\n".join(out).strip()
+
+    return (unwrap(summary_lines),
+            [{"heading": s["heading"], "md": unwrap(s["lines"])}
+             for s in sections if unwrap(s["lines"])])
 
 
 def make_thumb(img):
@@ -141,7 +163,7 @@ def encode_full(img):
 def build_entry(card_path: Path, root: Path):
     """(entry, [(key, bytes)]) for one card, ready to upload."""
     meta = parse_card(card_path)
-    sec = split_body(card_path.read_text())
+    summary, sections = split_body(card_path.read_text())
 
     date = str(meta["date"])
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
@@ -176,9 +198,8 @@ def build_entry(card_path: Path, root: Path):
         "date": date,
         "night": str(meta.get("night") or ""),
         "tags": [str(t) for t in tags],
-        "summary": sec.get("summary", ""),
-        "body": sec.get("notes", ""),
-        "numbers": sec.get("numbers", []),
+        "summary": summary,
+        "sections": sections,
         "figures": figures,
         "thumb_key": thumb_key,
         "added_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -279,7 +300,12 @@ def main() -> int:
         entry, uploads = build_entry(card_path, args.root)
         total_kb = sum(len(b) for _k, b in uploads) / 1024
         print(f"{entry['id']}  [{entry['instrument']}]  "
-              f"{len(entry['figures'])} figure(s), {total_kb:.0f}KB")
+              f"{len(entry['figures'])} figure(s), "
+              f"{len(entry['sections'])} section(s), {total_kb:.0f}KB")
+        for sec in entry["sections"]:
+            tables = sec["md"].count("\n|") and "table" or ""
+            print(f"    section: {sec['heading']}"
+                  + (f"  ({tables})" if tables else ""))
         for fig in entry["figures"]:
             print(f"    {fig['width']}x{fig['height']}  {fig['caption']}")
         built.append((entry, uploads))
