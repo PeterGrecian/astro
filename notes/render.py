@@ -123,9 +123,11 @@ def stretch_array(a: np.ndarray, spec: dict) -> np.ndarray:
 def draw_overlay(img, spec: dict, root: Path):
     """Circle the stars an astrometry.net solve actually matched.
 
-    `spec` is the card's `overlay:` block:
+    `spec` is the card's `overlay:` block, either a solver's correspondence
+    table or an explicit list of crop-relative points:
 
         overlay: {corr: ~/tmp/platesolve/crop_centre.corr, radius: 14}
+        overlay: {points: [[120, 43], [512, 388]], radius: 18}
 
     A .corr table is what solve-field writes for the correspondences it
     used: field_x/field_y is where the star sits in OUR pixels, index_x/
@@ -137,19 +139,25 @@ def draw_overlay(img, spec: dict, root: Path):
     marks against a 98 ADU background; reading it as a FITS bottom-up
     coordinate lands on empty sky at 102).
     """
-    from astropy.io import fits
     from PIL import ImageDraw
-    src = resolve(spec["corr"], root)
-    if not src.exists():
-        raise SystemExit(f"missing overlay table: {src}")
-    rows = fits.open(src)[1].data
+    if spec.get("corr"):
+        from astropy.io import fits
+        src = resolve(spec["corr"], root)
+        if not src.exists():
+            raise SystemExit(f"missing overlay table: {src}")
+        rows = [(float(r["field_x"]), float(r["field_y"]))
+                for r in fits.open(src)[1].data]
+    else:
+        # `points:` carries the coordinates in the card itself, for a marking
+        # that is OURS rather than a solver's — the sources a count was made
+        # from, say. They are CROP-RELATIVE, because the crop happens first.
+        rows = [(float(x), float(y)) for x, y in spec["points"]]
     r = int(spec.get("radius", 14))
     w = int(spec.get("width", 2))
     colour = spec.get("colour", "#FF9500")
     d = ImageDraw.Draw(img)
     n = 0
-    for row in rows:
-        x, y = float(row["field_x"]), float(row["field_y"])
+    for x, y in rows:
         d.ellipse([x - r, y - r, x + r, y + r], outline=colour, width=w)
         n += 1
     return n
