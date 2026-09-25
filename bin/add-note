@@ -194,6 +194,7 @@ def build_entry(card_path: Path, root: Path):
     entry = {
         "id": item_id,
         "title": str(meta["title"]),
+        "subtitle": str(meta.get("subtitle") or ""),
         "instrument": str(meta["instrument"]).lower(),
         "date": date,
         "night": str(meta.get("night") or ""),

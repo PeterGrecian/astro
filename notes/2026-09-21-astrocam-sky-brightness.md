@@ -1,6 +1,7 @@
 ---
 id: 2026-09-21-astrocam-sky-brightness
-title: What our sky actually measures, in mag per square arcsecond
+title: How dark is the sky in Surbiton?
+subtitle: TL;DR 18.1 magnitudes/arcsec²
 instrument: astrocam
 date: 2026-09-22
 night: 2026-09-21
@@ -18,34 +19,38 @@ source:
 figures:
   - src: /mnt/bigstore/astro-data/astrocam-frames/2026-09-21/brightness.png
     caption: >
-      Per-frame brightness across the night, stops above the chart pedestal.
+      Per-frame brightness across the night, stops above the black level (64).
       The trough at 02h is the darkest hour; the sharp rise after 04h is dawn.
 ---
 
-The house has always quoted its sky from a light pollution map: Bortle 6,
-SQM around 19.4. On the night of 2026-09-21 we measured it instead, from our
-own frames, and it is about 1.3 magnitudes brighter than that.
+Looking at light pollution maps Surbiton is on the fringe of urban/suburban
+London, quite near to Heathrow Airport, M25 and M4 so a provisional
+brightness figure of 19 is reasonable.  However, we can measure the actual
+brightness by identifying stars, looking up their measured magnitudes
+(brightnesses) and using that to calibrate our measurements.  We also need to
+know the background darkness.  We found that the brightness was closer to 18
+than 19, 18.1 being a reasonable figure.
 
 ## The night
 
 Astrocam ran 598 frames of 59.9 s at gain 1. Capture opened when the sun
 reached 10 degrees below the horizon at 19:01 UTC and closed at 04:48.
 
-| hour (UTC) | frames | frame mean (ADU) | stops above pedestal |
+| hour (UTC) | frames | frame mean (ADU) | stops above black (64) |
 |---|---|---|---|
-| 19 | 56 | 102.813 | 5.723 |
-| 20 | 61 | 95.100 | 5.495 |
-| 21 | 60 | 90.187 | 5.329 |
-| 22 | 60 | 87.570 | 5.232 |
-| 23 | 60 | 85.152 | 5.136 |
-| 00 | 60 | 82.725 | 5.032 |
-| 01 | 60 | 82.153 | 5.007 |
-| **02** | **60** | **81.845** | **4.993** |
-| 03 | 60 | 82.336 | 5.015 |
-| 04 | 60 | 110.972 | 5.930 |
+| 19 | 56 | 102.813 | 5.3 |
+| 20 | 61 | 95.100 | 5.0 |
+| 21 | 60 | 90.187 | 4.7 |
+| 22 | 60 | 87.570 | 4.6 |
+| 23 | 60 | 85.152 | 4.4 |
+| 00 | 60 | 82.725 | 4.2 |
+| 01 | 60 | 82.153 | 4.2 |
+| **02** | **60** | **81.845** | **4.2** |
+| 03 | 60 | 82.336 | 4.2 |
+| 04 | 60 | 110.972 | 5.6 |
 
 The darkest single frame of the night landed at **02:26:23 UTC, 03:26 BST**,
-at a frame mean of 81.711 ADU, which is 4.987 stops above the pedestal. The
+at a frame mean of 81.711 ADU, which is 4.1 stops above black. The
 six darkest frames all fall between 02:23 and 02:28.
 
 ## The moon
@@ -60,12 +65,12 @@ gibbous moon that had merely got out of the way. The two September nights that
 beat it were genuine new moon nights, 1.2 and 4.8 percent illuminated. On moon
 terms this was the least favourable of the three by a wide margin.
 
-| night | darkest frame (ADU) | stops | moon illum at trough |
+| night | darkest frame (ADU) | stops above black (64) | moon illum at trough |
 |---|---|---|---|
-| 2026-09-10 | 78.812 | 4.849 | 1.2 % |
-| 2026-09-13 | 79.671 | 4.891 | 4.8 % |
-| **2026-09-21** | **81.711** | **4.987** | **79.2 %, set 00:19** |
-| 2026-08-19 | 83.830 | 5.080 | 49.7 % |
+| 2026-09-10 | 78.812 | 3.9 | 1.2 % |
+| 2026-09-13 | 79.671 | 4.0 | 4.8 % |
+| **2026-09-21** | **81.711** | **4.1** | **79.2 %, set 00:19** |
+| 2026-08-19 | 83.830 | 4.3 | 49.7 % |
 
 (The 69.888 ADU frame from 2026-06-09 is excluded: that is the imx219 era,
 POSINDEX 1, a different sensor with a different black level and pedestal. It
@@ -73,17 +78,13 @@ is not comparable.)
 
 ## The plate solve
 
-Sky brightness in physical units needs a plate scale and a photometric
-zeropoint, and astrocam had neither: `plate_scale_deg_px` in camera.json has
-been flagged STALE and INVALID since the imx708 swap in July, being an
-imx219-era value, and no zeropoint existed for this camera at all.
+We found a plate scale and a photometric zeropoint like this using the green
+channel of one frame, extracted from the Bayer mosaic (the two greens sit on
+the anti-diagonal, so the in-capture 180 degree rotation leaves them where
+they are).  Five 600 px crops were solved against the Tycho-2 indexes on
+muppet, and all five solved.
 
-Both came from one frame. The green channel was extracted from the Bayer
-mosaic (the two greens sit on the anti-diagonal, so the in-capture 180 degree
-rotation leaves them where they are), and five 600 px crops were solved
-against the Tycho-2 indexes on muppet. All five solved.
-
-| crop | native arcsec/px | zeropoint (Gaia G) | sky above black (ADU) | mu_G |
+| crop | native arcsec/px | zeropoint (Gaia G) | sky above black (ADU) | \(\mu_G\) |
 |---|---|---|---|---|
 | centre | 60.88 | 11.526 | 33.5 | 18.14 |
 | left | 56.84 | 11.392 | 30.0 | 17.98 |
@@ -97,7 +98,16 @@ median astrometric residual of 129 arcsec against 37 to 43 arcsec for the rest.
 Exposure time cancels, because the star and the sky are measured in the same
 frame:
 
-    mu_G = ZP + 2.5 * log10(4 * p^2 / S_sky)
+$$
+\mu_G = \mathrm{ZP} + 2.5\,\log_{10}\!\left(\frac{4p^2}{S_\mathrm{sky}}\right)
+$$
+
+where:
+
+- \(\mu_G\) is the sky brightness in Gaia G magnitudes per square arcsecond
+- \(\mathrm{ZP}\) is the zeropoint, the magnitude of a star that gives 1 ADU, found by matching stars in the frame to their Gaia magnitudes
+- \(p\) is the native plate scale in arcsec per pixel; the green channel has one pixel per 2 by 2 Bayer block, so each covers \(4p^2\) square arcseconds
+- \(S_\mathrm{sky}\) is the sky level above black in that pixel, in ADU
 
 ## Results
 
@@ -107,18 +117,28 @@ field is real radial distortion of about 7 percent, so a single scalar will
 always be an approximation here. Implied horizontal field of view is **75.4
 degrees**, not the 66 degrees asserted in camera.json's focus notes.
 
-**Black level 64, now measured rather than inferred.** The first percentile of
-all four Bayer channels is exactly 64.00, because part of the frame is
-permanently occluded by trees and roofline and sits at the electronic floor
-all night. The occluded region is a built-in dark reference. Strictly this is
-an upper bound, since a light leak would raise it, but four independent
-channels agreeing exactly is hard to explain otherwise.
+**Black level 64.** The sensor values are offset by a pedestal to prevent
+noise causing values going negative, which would be clipped.  It's harmless,
+as long as it's constant, big enough and known, but it does reduce the
+effective maximum value to 1023 minus the pedestal.  Not usually a concern.
+We measured it.  Part of the frame is permanently blocked by trees and
+roofline, which gives a dark reference in every frame.  On the darkest nights
+the darkest 32 by 32 patches read 64.2 to 64.4, but that small excess is
+scattered light, not the sensor: across seven frames from dark to overcast
+the tree level rises with the sky, by up to 13 ADU in green, and the green
+excess over red and blue grows in step, which is the signature of reflected
+light.  Extrapolating to no light gives red about 64.05 and blue about 64.10,
+the sensor's nominal 64 within the error.  Values below 64 are recorded, so
+nothing is clipped, and the read noise is about 0.3 ADU, around 2 electrons.
+(An earlier version said the first percentile was "exactly 64.00", which was
+integer pixel values piling up at 64 and 65, and a later one said 64.3; the
+trees are lit, so 64 it is.  Checked by astro-science, 2026-09-25.)
 
-**Sky surface brightness: mu_G = 18.1 mag/arcsec^2**, with a spread of 18.0 to
+**Sky surface brightness: \(\mu_G\) = 18.1 mag/arcsec²**, with a spread of 18.0 to
 18.3 across the four good crops. The result is barely sensitive to the black
 level: moving it by 2 ADU either way shifts mu by 0.07.
 
-## What that means, honestly
+## Summary
 
 Three effects push the true zenith figure darker than 18.1, and none of them
 is large enough to recover 19.4:
@@ -130,7 +150,8 @@ is large enough to recover 19.4:
 - The 6 px photometric aperture loses some of the PSF wing, which biases the
   zeropoint low and mu low, perhaps 0.1.
 
-Taken generously that is about **18.5 zenith-equivalent, which is Bortle 7**,
-the suburban to urban transition, rather than the Bortle 6 we have been
-claiming. And this was measured on one of the darkest nights of the year so
-far, after moonset, in the darkest hour of that night.
+18.1 is Bortle 8 (city).  We might get darker nights, so maybe 18.5 might
+happen at the zenith, on a really clear night, which would be Bortle 7.
+Bortle 7 has not yet been observed but might be.  Any wisps of cloud brighten
+the sky and a deep frost might reduce this, however we want a representative
+figure and 18.1 is that.
