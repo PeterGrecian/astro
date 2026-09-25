@@ -21,7 +21,7 @@ exposure:
   sub_time: 30s
   total_integration: 20m
   iso_gain: ISO 1600
-  bortle: Class 6 (Suburban, SQM ~19.4)
+  bortle: Class 8 (City, measured 18.1 mag/arcsec²)
 source:
   image: "canon-frames/night/2026-08-20/cygnus_preview.jpg"
   combine: median
@@ -34,7 +34,7 @@ A rich widefield view across Cygnus cutting through the star clouds of the summe
 
 # Observation & Processing
 
-Captured on a fixed mount using short 30-second sub-exposures to control sidereal trailing before stacking. The individual raw CR2 files were converted with bad-pixel masking (MAD hot/cold map) to eliminate sensor artefacts. Star centroids were computed and aligned with sub-pixel affine registration, followed by kappa-sigma median clipping to reject aircraft strobes and low-orbit satellite reflections. Background sky gradient was modelled with a 2D polynomial surface and subtracted, followed by a non-linear asinh stretch to preserve star colour while bringing out faint interstellar dust lanes.
+Captured on a fixed mount using short 30-second sub-exposures to control sidereal trailing before stacking. The individual raw CR2 files were converted with bad-pixel masking (MAD hot/cold map) to eliminate sensor artefacts. Star centroids were computed and aligned with sub-pixel affine registration, followed by kappa-sigma median clipping to reject aircraft strobes and low-orbit satellite reflections. Background sky gradient was modelled with a 2D polynomial surface and subtracted, followed by a non-linear asinh stretch to preserve star colour while bringing out faint interstellar dust lanes. The Sky Quality figure above is measured from our own frames rather than read off a light-pollution map: the measurement, and how much to trust it, are at /astro/notes/2026-09-21-astrocam-sky-brightness.
 
 # Technical Highlights
 

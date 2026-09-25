@@ -21,7 +21,7 @@ exposure:
   sub_time: 30s
   total_integration: 30s
   iso_gain: ISO 1600
-  bortle: Class 6 (Suburban)
+  bortle: Class 8 (City, measured 18.1 mag/arcsec²)
 source:
   image: "canon-frames/night/2026-08-12/perseid_fireball.jpg"
   combine: single
@@ -34,7 +34,7 @@ A vivid Perseid meteor fireball exploding through the upper atmosphere at 59 km/
 
 # Observation & Processing
 
-Single 30-second sub-exposure caught during the peak night of the Perseid meteor shower. The trail exhibits classic meteoric properties: interior start and stop points within the sensor boundary, dramatic aerodynamic tapering, and high velocity crossing angle non-sidereal to the background star trails.
+Single 30-second sub-exposure caught during the peak night of the Perseid meteor shower. The trail exhibits classic meteoric properties: interior start and stop points within the sensor boundary, dramatic aerodynamic tapering, and high velocity crossing angle non-sidereal to the background star trails. The Sky Quality figure above is measured from our own frames rather than read off a light-pollution map: the measurement, and how much to trust it, are at /astro/notes/2026-09-21-astrocam-sky-brightness.
 
 # Technical Highlights
 

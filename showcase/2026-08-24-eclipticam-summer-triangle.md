@@ -21,7 +21,7 @@ exposure:
   sub_time: 60s
   total_integration: 2h 00m
   iso_gain: Analogue Gain 8.0
-  bortle: Class 6 (Suburban)
+  bortle: Class 8 (City, measured 18.1 mag/arcsec²)
 source:
   image: "eclipticam-frames/night/2026-08-24/ecliptic_sweep.jpg"
   combine: max
@@ -34,7 +34,7 @@ Widefield 120-degree landscape sweep capturing the Summer Triangle — Vega in L
 
 # Observation & Processing
 
-Streamed by the dual-sensor Eclipticam v3w system. The wide-angle IMX708 sensor captures an expansive chunk of the southern meridian. 120 sixty-second sub-exposures were max-stacked to visualize stellar motion along the celestial equator while preserving foreground rooftop silhouette references.
+Streamed by the dual-sensor Eclipticam v3w system. The wide-angle IMX708 sensor captures an expansive chunk of the southern meridian. 120 sixty-second sub-exposures were max-stacked to visualize stellar motion along the celestial equator while preserving foreground rooftop silhouette references. The Sky Quality figure above is measured from our own frames rather than read off a light-pollution map: the measurement, and how much to trust it, are at /astro/notes/2026-09-21-astrocam-sky-brightness.
 
 # Technical Highlights
 

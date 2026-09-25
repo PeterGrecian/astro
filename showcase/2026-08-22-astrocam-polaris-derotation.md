@@ -21,7 +21,7 @@ exposure:
   sub_time: 60s
   total_integration: 4h 00m
   iso_gain: Analogue Gain 12.0
-  bortle: Class 6 (Suburban)
+  bortle: Class 8 (City, measured 18.1 mag/arcsec²)
 source:
   image: "astrocam-frames/night/2026-08-22/polar_derot.jpg"
   combine: derot-median
@@ -34,7 +34,7 @@ A four-hour continuous stack derotated around the true North Celestial Pole. By 
 
 # Observation & Processing
 
-Acquired automatically by the astrocam daemon over 240 consecutive one-minute exposures. The pivot centre was solved globally via non-linear least squares on star arcs across the entire night. Each tile was transformed with bicubic interpolation to rotate out Earth's rotation, then summed using variance weighting against the darkest contiguous window of the night.
+Acquired automatically by the astrocam daemon over 240 consecutive one-minute exposures. The pivot centre was solved globally via non-linear least squares on star arcs across the entire night. Each tile was transformed with bicubic interpolation to rotate out Earth's rotation, then summed using variance weighting against the darkest contiguous window of the night. The Sky Quality figure above is measured from our own frames rather than read off a light-pollution map: the measurement, and how much to trust it, are at /astro/notes/2026-09-21-astrocam-sky-brightness.
 
 # Technical Highlights
 
