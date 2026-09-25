@@ -276,6 +276,76 @@ def write_fits(arr, path, dtype):
     fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path, overwrite=True)
 
 
+# The colour max-stack is stored as a (3, H, W) float32 cube.
+#
+# The TRANSPOSE is the load-bearing part. In memory the array is (H, W, 3),
+# so FITS's fastest axis would be the 3-long colour axis, and astropy tiles
+# on that axis by default: five million tiles of three values each, whose
+# per-tile overhead INFLATED the file to 190 MB — five times the raw array —
+# and made reading it take 38 s. Written plane-first it is an ordinary image
+# cube with 2304-wide row tiles, and the same data lands in 13 MB and reads
+# in 0.1 s. Getting that wrong looks like "floats do not compress"; they do.
+#
+# quantize_level=256 rather than astropy's default 16: this is presentation
+# data, but max.jpg stretches it hard (asinh over a narrow percentile
+# window), which amplifies the quantisation floor along with everything
+# else. At the default the re-render drifted up to 19 levels of 255 from a
+# full restack; at 256 the floor is 1.6e-5 against values of ~0.3, and the
+# re-render matches. Costs 4.5 MB a night over the default.
+RGB_QUANTIZE_LEVEL = 256
+
+
+def write_colour_stack(arr, path):
+    """Persist the (H, W, 3) colour max-stack. See the note above."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cube = np.ascontiguousarray(arr.astype(np.float32).transpose(2, 0, 1))
+    hdu = fits.CompImageHDU(data=cube, compression_type="RICE_1",
+                            quantize_level=RGB_QUANTIZE_LEVEL)
+    fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(path, overwrite=True)
+
+
+def read_colour_stack(path):
+    """Inverse of write_colour_stack: (3, H, W) cube -> (H, W, 3)."""
+    return fits.getdata(path).astype(np.float32).transpose(1, 2, 0)
+
+
+def render_max_only(cfg, night, args) -> int:
+    """Re-render max.jpg from the persisted colour stack. See --max-only."""
+    out_dir = night_output_dir(cfg, night)
+    src = out_dir / "max-rgb.fits.fz"
+    if not src.exists():
+        print(f"no {src} — that night predates the persisted colour stack, "
+              f"so it needs a full run (drop --max-only)", file=sys.stderr)
+        return 1
+    max_rgb = read_colour_stack(src)
+
+    render = make_render(cfg)
+    area_gain_strength = args.area_gain if args.area_gain is not None \
+        else float(cfg.get("area_gain") or 0.0)
+    sky_frac = args.sky_frac if args.sky_frac is not None \
+        else float(cfg.get("sky_frac") or 0.0)
+    hi_pct = args.hi_pct if args.hi_pct is not None else cfg.get("max_hi_pct")
+    neutral = args.neutral if args.neutral is not None \
+        else float(cfg.get("max_neutral") or 0.0)
+    saturation = args.saturation if args.saturation is not None \
+        else (1.0 if cfg.get("max_saturation") is None
+              else float(cfg.get("max_saturation")))
+    kw = {"area_gain_strength": area_gain_strength, "sky_frac": sky_frac,
+          "neutral": neutral, "saturation": saturation}
+    if hi_pct is not None:
+        kw["hi_pct"] = float(hi_pct)
+    dst = out_dir / "max.jpg"
+    render(max_rgb, dst, **kw)
+    print(f"max.jpg: area gain {area_gain_strength:g}, sky_frac {sky_frac:g}, "
+          f"hi_pct {hi_pct if hi_pct is not None else 'default'}, "
+          f"neutral {neutral:g}, saturation {saturation:g}")
+    print(f"wrote {dst}")
+
+    if args.publish:
+        publish_mod.publish_night(cfg, night, [dst], dry_run=args.dry_run)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--camera", required=True)
@@ -320,6 +390,13 @@ def main() -> int:
                          "noise into ~50 levels of colour, so this is the "
                          "knob that tones it down. Default: the camera's "
                          "`max_saturation`, or 1.")
+    ap.add_argument("--max-only", action="store_true",
+                    help="re-render max.jpg from the persisted "
+                         "max-rgb.fits.fz and stop — no restack, no other "
+                         "deliverable touched. Seconds instead of minutes, "
+                         "which is what makes a colour change affordable "
+                         "across the whole archive. Nights stacked before "
+                         "max-rgb.fits.fz existed have to be re-run in full.")
     ap.add_argument("--no-derot", action="store_true")
     ap.add_argument("--publish", action="store_true",
                     help="upload web assets to S3 after generation")
@@ -330,6 +407,9 @@ def main() -> int:
     cfg = CameraConfig.load(args.camera)
     night = args.night or last_completed_night()
     print(f"camera: {cfg.name}  night: {night}")
+
+    if args.max_only:
+        return render_max_only(cfg, night, args)
 
     frames = list_night_frames(cfg, night)
     if not frames:
@@ -432,6 +512,13 @@ def main() -> int:
     write_fits(max_img, out_dir / f"{stem}max.fits.fz", np.uint16)
     write_fits(min_img, out_dir / f"{stem}min.fits.fz", np.uint16)
     write_fits(sum_img, out_dir / f"{stem}sum.fits.fz", np.float32)
+    if max_rgb is not None:
+        # The colour max-stack, persisted so max.jpg can be re-rendered
+        # WITHOUT re-reading the night's frames (`--max-only`). It used to be
+        # thrown away after rendering, which made every colour change — a
+        # saturation tweak, a stretch experiment — cost a full restack of
+        # every night being touched. ~3 min/night against ~2 s.
+        write_colour_stack(max_rgb, out_dir / f"{stem}max-rgb.fits.fz")
 
     hot, cold, sky_med, sky_sigma, hot_thr, cold_thr = \
         compute_bad_pixel_mask(min_img, max_img)
