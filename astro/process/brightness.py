@@ -114,6 +114,33 @@ def daylight_keep_mask(times_local, cfg=None, day_alt_deg=None):
             "21:00-05:00 clock window (no location/ephem)")
 
 
+def chart_zero(cfg) -> tuple[float | None, str]:
+    """The ADU the brightness charts subtract before taking log2, and its
+    axis label. Returns (value, label).
+
+    The sensor's `black_level` where camera.json has one on the same
+    per-frame LSB basis as the data, else the old `pedestal`. Stops are
+    log2(mean - zero), so the zero has to be the real electronic zero:
+    astrocam's pedestal of 50 sits 14 ADU below its measured black level
+    of 64 and read ~0.84 stop high at the darkest (81.7 ADU: log2(31.7)
+    vs log2(17.7)). Changed 2026-09-25 at mywebsite-keeper's request, on
+    astro-science's measurement; `pedestal` stays in camera.json as the
+    chart floor it was documented as, and is no longer subtracted here.
+
+    Falls back to `pedestal` where black_level is on a DIFFERENT basis:
+    eclipticam-v1's pedestal 10180 is a 10-coadd MSB container value
+    while its black_level 15.9 is per frame, and starcam/xoverpi carry a
+    per-frame black_level with no pedestal over co-added data. Those keep
+    exactly what they drew before.
+    """
+    ped = cfg.get("pedestal")
+    bl = cfg.get("black_level")
+    if (ped is not None and bl is not None
+            and float(ped) < MSB_ALIGN_MIN_ADU):
+        return float(bl), "black level"
+    return (float(ped) if ped is not None else None), "pedestal"
+
+
 def lsb_align(vals, pedestal=None):
     """Normalise a night's mean-ADU series to LSB alignment.
 
@@ -178,7 +205,8 @@ def read_csv(csv_path: Path):
 
 def plot_night(rows, night: str, camera: str, out_path: Path,
                pedestal: float | None = None,
-               stacked_window_utc: tuple[str, str] | None = None):
+               stacked_window_utc: tuple[str, str] | None = None,
+               zero_label: str = "pedestal"):
     """Scatter of log2(mean - pedestal) vs local time for one night's
     rows (as produced by measure()). X-axis ends at 05:00 the next
     morning (cover-close safety time), matching bin/plot-brightness.
@@ -213,7 +241,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     tz_label = datetime.combine(
         night_date, time(22, 0), tzinfo=LONDON).tzname()
     ax.set_xlabel(f"local time ({tz_label})")
-    ax.set_ylabel(f"stops above pedestal ({pedestal:.0f})")
+    ax.set_ylabel(f"stops above {zero_label} ({pedestal:.0f})")
     ax.set_title(f"{camera} — night {night} — per-frame brightness")
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))

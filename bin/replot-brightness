@@ -97,7 +97,7 @@ def main() -> int:
         for n in sorted(missing):
             sys.stderr.write(f"  {n}: no brightness.csv, skipping\n")
 
-    pedestal = cfg.get("pedestal")
+    pedestal, zero_label = brightness.chart_zero(cfg)
     ok = failed = 0
     for night, csv_path in nights:
         # Mid-migration nights carry a subcam prefix ("v3w_brightness.csv");
@@ -129,6 +129,7 @@ def main() -> int:
         try:
             brightness.plot_night(rows, night, cfg.name, png,
                                   pedestal=pedestal,
+                                  zero_label=zero_label,
                                   stacked_window_utc=window)
         except Exception as e:                      # noqa: BLE001
             sys.stderr.write(f"  {night}: plot failed: {e}\n")

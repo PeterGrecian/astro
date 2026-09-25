@@ -38,8 +38,9 @@ from matplotlib.ticker import FuncFormatter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
-from astro.process.brightness import (darkest_anchor, daylight_keep_mask,
-                                      find_night_csvs, lsb_align)
+from astro.process.brightness import (chart_zero, darkest_anchor,
+                                      daylight_keep_mask, find_night_csvs,
+                                      lsb_align)
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -163,10 +164,11 @@ def main():
 
     fig, ax = plt.subplots(figsize=(11, 5))
     cmap = plt.get_cmap("tab10")
-    # Fixed sensor pedestal from camera.json — same zero point for every
+    # Fixed zero point from camera.json (black_level, or pedestal where
+    # that is on another basis; see chart_zero) — the same for every
     # night so curves are directly comparable. Falls back to per-night
     # p1 (loose, used only if camera.json lacks the calibration).
-    fixed_pedestal = cfg.get("pedestal")
+    fixed_pedestal, zero_label = chart_zero(cfg)
     # Drop DAYLIGHT frames: on cameras that run round the clock they land
     # in the same noon-to-noon CSV, read saturated, and draw as a flat line
     # across the top of the chart. The test is the sun's altitude, not the
@@ -240,7 +242,7 @@ def main():
     # Just "BST" — the axis is plainly a clock, and the house rule is that
     # human-facing times are Europe/London, so "local" added nothing.
     ax.set_xlabel("BST")
-    ax.set_ylabel("stops above pedestal")
+    ax.set_ylabel(f"stops above {zero_label}")
     # The title says what the reader is looking at, not what the pipeline
     # did. "v3w — 7 nights, 1 of them reference" named the camera the page
     # already names and a curve count the reader can see; it told a visitor
