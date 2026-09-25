@@ -47,7 +47,24 @@ def load_wcs(path: Path):
         wcs = WCS(h)
         wcs.array_shape = tuple(reversed(data["image_size"]))
         return wcs, float(data["plate_scale_arcsec_per_pixel"])
-    raise SystemExit(f"unsupported WCS file: {path}")
+    # A solve-field .wcs (or any FITS file carrying a WCS header). The
+    # docstring has always promised this; only the JSON branch existed,
+    # so every astrometry.net solve had to be hand-converted first.
+    from astropy.io import fits as astrofits
+    with astrofits.open(path) as h:
+        hdr = h[0].header
+        wcs = WCS(hdr)
+        if hdr.get("NAXIS1") and hdr.get("NAXIS2"):
+            wcs.array_shape = (int(hdr["NAXIS2"]), int(hdr["NAXIS1"]))
+        elif hdr.get("IMAGEW") and hdr.get("IMAGEH"):
+            # solve-field .wcs files are header-only (NAXIS=0) and carry the
+            # solved image's size as IMAGEW/IMAGEH instead.
+            wcs.array_shape = (int(hdr["IMAGEH"]), int(hdr["IMAGEW"]))
+    # Plate scale from the CD/PC matrix determinant: the geometric mean of
+    # the two axis scales, which is the right single number for a field
+    # with slightly unequal axis scales.
+    scale = float(np.sqrt(np.abs(np.linalg.det(wcs.pixel_scale_matrix))) * 3600.0)
+    return wcs, scale
 
 
 def main():
