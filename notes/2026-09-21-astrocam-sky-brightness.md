@@ -140,8 +140,7 @@ level: moving it by 2 ADU either way shifts mu by 0.07.
 
 ## Summary
 
-Three effects push the true zenith figure darker than 18.1, and none of them
-is large enough to recover 19.4:
+Three effects push the true zenith figure darker than 18.1:
 
 - Astrocam points at the celestial pole, so it is looking at 51.4 degrees
   altitude through airmass 1.28, not at the zenith. Worth perhaps 0.2 to 0.4.
