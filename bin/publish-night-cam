@@ -160,28 +160,10 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         fi
     done
 
-    # --- diff-sweep: (max - mean) per pixel, minus the statistical
-    # max-of-N-Gaussians noise floor (M=1). Cancels pedestal, sky
-    # pollution DC, and pure-noise speckle; what survives is real
-    # bright transients (planes, meteors, satellite trails).
-    diff_dir="${night_dir}/sweep-diff"
-    mkdir -p "$diff_dir"
-    diff_args=(
-        --camera "$CAMERA" --night "$NIGHT"
-        --sweep-start 22:00 --sweep-end 04:00
-        --window-min "$WINDOW_MIN" --step-min "$STEP_MIN"
-        --fps "$FPS"
-        --out-dir "$diff_dir"
-        --noise-floor-mult 1.0
-    )
-    echo "--- diff-sweep (mono, window-mean subtracted)"
-    if "$PY" "$HERE/diff-sweep" "${diff_args[@]}"; then
-        out="${night_dir}/sweep-diff.mp4"
-        cp "$diff_dir/sweep.mp4" "$out"
-        echo "wrote $out"
-    else
-        echo "diff-sweep FAILED; continuing without it"
-    fi
+    # diff-sweep RETIRED from deliverables 2026-10-08 (Peter): on astrocam the
+    # window mean empties the polar cap, and derot/derot-deep now carry the
+    # night. bin/diff-sweep stays (its --glow-model path is the planned
+    # glow-subtracted replacement). Published nights keep their old files.
 
     # --- detrans-sweep: de-translated registered-streak animation.
     # Only runs for cameras with a `detrans` block in camera.json
@@ -287,7 +269,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             -vf "select=eq(n\,$n)" -frames:v 1 -q:v 4 "$2" \
             && echo "wrote $2 (mid frame $n of $(basename "$1"))"
     }
-    for s in colour diff detrans detrans-deep derot derot-deep; do
+    for s in colour detrans detrans-deep derot derot-deep; do
         extract_mid "${night_dir}/sweep-${s}.mp4" \
                     "${night_dir}/poster-${s}.jpg"
     done
@@ -316,7 +298,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             echo "web encode FAILED for $(basename "$1"); continuing"
         fi
     }
-    for s in colour diff detrans detrans-deep derot derot-deep; do
+    for s in colour detrans detrans-deep derot derot-deep; do
         make_web "${night_dir}/sweep-${s}.mp4" \
                  "${night_dir}/sweep-${s}-web.mp4"
     done
@@ -378,14 +360,12 @@ names = [
     "sensitivity.json",
     "thumb.jpg",
     "poster-colour.jpg",
-    "poster-diff.jpg",
     "poster-detrans.jpg",
     "poster-detrans-deep.jpg",
     "poster-derot.jpg",
     "poster-derot-deep.jpg",
     # web-delivery versions (what the website actually serves: loop+fullscreen)
     "sweep-colour-web.mp4",
-    "sweep-diff-web.mp4",
     "sweep-detrans-web.mp4",
     "sweep-detrans-deep-web.mp4",
     "sweep-derot-web.mp4",
@@ -396,7 +376,7 @@ names = [
 # only the new web mp4s + posters go up. A normal run uploads them.
 if not web_only:
     names += [
-        "sweep-colour.mp4", "sweep-diff.mp4",
+        "sweep-colour.mp4",
         "sweep-detrans.mp4", "sweep-detrans-deep.mp4",
         "sweep-derot.mp4", "sweep-derot-deep.mp4",
     ]
@@ -409,13 +389,13 @@ missing = [n for n in names if not (nd/n).exists()]
 # OK so publish's privacy guard doesn't refuse them.
 if getattr(cfg, "privacy", None):
     for n in ("sweep-colour.mp4",
-              "sweep-diff.mp4", "sweep-detrans.mp4",
+              "sweep-detrans.mp4",
               "sweep-detrans-deep.mp4",
               "sweep-colour-web.mp4",
-              "sweep-diff-web.mp4", "sweep-detrans-web.mp4",
+              "sweep-detrans-web.mp4",
               "sweep-detrans-deep-web.mp4", "thumb.jpg",
               "poster-colour.jpg",
-              "poster-diff.jpg", "poster-detrans.jpg",
+              "poster-detrans.jpg",
               "poster-detrans-deep.jpg",
               "sweep-derot.mp4", "sweep-derot-deep.mp4",
               "sweep-derot-web.mp4", "sweep-derot-deep-web.mp4",
