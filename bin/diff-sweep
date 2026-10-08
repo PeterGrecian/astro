@@ -32,6 +32,16 @@ over the deque, compute max + mean (+ std if noise floor enabled)
 over that window. The deque is pruned of frames older than the oldest
 still-open window.
 
+- --glow-model PATH: subtract the night's fitted smooth sky glow (a
+  skyglow-model npz: modes + sky mask) from every frame instead of the
+  window mean. Each frame's 2-3 amplitudes are fitted to its own sky-block
+  medians, so the background goes with ~3 numbers per frame and nothing
+  static or slow is averaged away. Output is max(frame - model) over the
+  window (the mean is NOT subtracted); residuals stay SIGNED and the
+  percentile stretch puts the black point a little below zero, so sky
+  noise reads as grain rather than half the pixels clipped to black.
+  --window-min 1 gives a plain single-frame background-subtracted video.
+
 --synthetic mode: a single bright pixel walking diagonally on a
 constant background. Bg subtracts to zero; trail survives.
 """
@@ -165,11 +175,44 @@ def load_fits_binned(path, rgb_pattern):
     return bayer.bin2x2(d)
 
 
+class GlowModel:
+    """Smooth sky-glow model from `skyglow-model fit` (or a pooled basis):
+    green modes [q, Y, X] in 24-superpixel blocks over the binned frame.
+    The R, G, B glow maps agree in shape to ~2% (2026-10-07), so the green
+    modes serve the grey 2x2-sum frame too; only the amplitudes are fitted."""
+
+    def __init__(self, path):
+        z = np.load(path)
+        modes = z["modes"][1] if z["modes"].ndim == 4 else z["modes"]
+        self.bs = int(z["bs"]) if "bs" in z else 24
+        self.black = 4.0 * float(z["black"]) if "black" in z else 256.0
+        self.sky = z["sky"].astype(bool)
+        ny, nx = self.sky.shape
+        self.M = modes.reshape(len(modes), -1)[:, self.sky.ravel()].T
+        from scipy.interpolate import RectBivariateSpline
+        self._splines = [RectBivariateSpline((np.arange(ny) + 0.5) * self.bs,
+                                             (np.arange(nx) + 0.5) * self.bs, m)
+                         for m in modes]
+        self._full = None
+
+    def subtract(self, frame):
+        f = frame.astype(np.float32) - self.black
+        h, w = f.shape
+        if self._full is None:
+            self._full = np.stack([sp(np.arange(h), np.arange(w)) for sp in self._splines]).astype(np.float32)
+        b = self.bs
+        ny, nx = self.sky.shape
+        blk = np.median(f[:ny * b, :nx * b].reshape(ny, b, nx, b)
+                        .transpose(0, 2, 1, 3).reshape(ny, nx, -1), axis=2)
+        amp = np.linalg.lstsq(self.M, blk[self.sky], rcond=None)[0]
+        return f - np.tensordot(amp, self._full, axes=1)
+
+
 def close_window(idx, w_start, w_end, recent, rgb_pattern,
                  frames_dir, rotate_180,
                  noise_floor_mult=0.0, mean_mult=1.0,
                  signed=False, neg_blue=False,
-                 line_field=None, line_L=7):
+                 line_field=None, line_L=7, glow=False):
     """Find the frames in [w_start, w_end), compute (max - k·mean)
     optionally minus a noise floor, render."""
     in_win = [(t, f) for (t, f) in recent if w_start <= t < w_end]
@@ -181,7 +224,7 @@ def close_window(idx, w_start, w_end, recent, rgb_pattern,
     N = stack.shape[0]
     mean = stack.mean(axis=0)
     max_ = stack.max(axis=0)
-    out_img = max_ - mean_mult * mean
+    out_img = max_ if glow else max_ - mean_mult * mean
     if noise_floor_mult > 0 and N >= 2:
         # Expected max of N Gaussians sits at mean + sigma * sqrt(2 ln N).
         # Subtract that, scaled by user multiplier, to suppress pure-noise
@@ -189,7 +232,7 @@ def close_window(idx, w_start, w_end, recent, rgb_pattern,
         sigma = stack.std(axis=0, ddof=1)
         floor = noise_floor_mult * sigma * float(np.sqrt(2.0 * np.log(N)))
         out_img = out_img - floor
-    if not signed:
+    if not signed and not glow:
         np.maximum(out_img, 0, out=out_img)
     # Trail line-filter: keep linear star trails, suppress dots + cloud.
     if line_field is not None:
@@ -240,6 +283,9 @@ def main() -> int:
     ap.add_argument("--neg-blue", action="store_true",
                     help="render negative values as a blue lobe; implies "
                          "--signed")
+    ap.add_argument("--glow-model", type=Path, metavar="NPZ",
+                    help="subtract this fitted sky-glow model per frame "
+                         "instead of the window mean (grey only)")
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--no-mp4", action="store_true")
     ap.add_argument("--synthetic", type=int, default=0, metavar="N")
@@ -283,9 +329,15 @@ def main() -> int:
             print("no frames in sweep range", file=sys.stderr)
             return 1
 
+        glow = GlowModel(args.glow_model) if args.glow_model else None
+        if glow is not None and rgb_pattern is not None:
+            print("--glow-model is grey only; ignoring --colour", file=sys.stderr)
+            rgb_pattern = None
+
         def gen():
             for t, p in all_frames:
-                yield t, load_fits_binned(p, rgb_pattern)
+                f = load_fits_binned(p, rgb_pattern)
+                yield t, (glow.subtract(f) if glow is not None else f)
         frames_iter = gen()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -334,7 +386,8 @@ def main() -> int:
                          noise_floor_mult=args.noise_floor_mult,
                          mean_mult=args.mean_mult,
                          signed=args.signed, neg_blue=args.neg_blue,
-                         line_field=line_field, line_L=args.line_L)
+                         line_field=line_field, line_L=args.line_L,
+                         glow=bool(args.glow_model))
 
         # Prune deque: drop frames older than the oldest still-open
         # window's start.
@@ -353,7 +406,8 @@ def main() -> int:
                      frames_dir, rotate_180,
                      noise_floor_mult=args.noise_floor_mult,
                      signed=args.signed, neg_blue=args.neg_blue,
-                     line_field=line_field, line_L=args.line_L)
+                     line_field=line_field, line_L=args.line_L,
+                     glow=bool(args.glow_model))
 
     print(f"diff-sweep: {n} frames in, {len(windows)} JPEGs written")
 
