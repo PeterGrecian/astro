@@ -222,6 +222,42 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     else
         echo "detrans-deep FAILED; continuing without it"
     fi
+
+    # --- derot-sky sweeps: the astrocam pair to the detrans sweeps. astrocam
+    # holds the pole, so the sky ROTATES in frame; derot-sky maps every output
+    # pixel to a sky direction through a fitted camera model, glow-subtracted,
+    # foreground masked (see bin/derot-sky). Runs for a camera with a
+    # <camera>/cammodel-*.json; needs the night's glow cube + fit + a pointing
+    # refine first (each built only if missing, all beside the frames). A
+    # cloudy night fails cleanly and the pipeline continues without them.
+    cammodel=$(ls "$REPO/${CAMERA}"/cammodel-*.json 2>/dev/null | sort | tail -1 || true)
+    if [[ -n "$cammodel" && "${SKIP_DEROT_SKY:-0}" -ne 1 ]]; then
+        echo "--- derot-sky sweeps (camera model $(basename "$cammodel"))"
+        # ~600 MB per sweep worker (10 registered frames + cache), so its own
+        # job cap: 4 fits muppet beside the NFS server; override DEROT_JOBS.
+        derot_sky_sweeps () {
+            local cube="${night_dir}/skyglow-cube.npz" glow="${night_dir}/skyglow-model.npz"
+            local cam="${night_dir}/skyglow-cammodel.json" t
+            [[ -s "$cube" ]] || BIGSTORE="${BIGSTORE:-/mnt/bigstore/astro-data}" \
+                "$PY" "$HERE/skyglow-model" cube "$CAMERA" "$NIGHT" --to-night -j "$JOBS" || return 1
+            [[ -s "$glow" ]] || "$PY" "$HERE/skyglow-model" fit "$cube" -o "$glow" || return 1
+            if [[ ! -s "$cam" ]]; then
+                # pointing refine on a frame near local midnight; first one that
+                # fits (a cloudy frame finds too few stars) wins
+                for t in 23:00:00 00:00:00 22:30:00 01:00:00 02:00:00; do
+                    "$PY" "$HERE/derot-sky" refine "$cammodel" "$NIGHT" "$t" --glow "$glow" -o "$cam.try" \
+                        && "$PY" -c "import json,sys; p=json.load(open('$cam.try')); sys.exit(not (p['refine_n'] >= 50 and p['refine_median_px'] < 1.5))" \
+                        && mv "$cam.try" "$cam" && break
+                done
+                rm -f "$cam.try"
+                [[ -s "$cam" ]] || { echo "derot-sky: no clean refine frame"; return 1; }
+            fi
+            "$PY" "$HERE/derot-sky" sweep "$cam" "$NIGHT" --glow "$glow" \
+                --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" -j "${DEROT_JOBS:-4}" \
+                --out-max "${night_dir}/sweep-derot.mp4" --out-deep "${night_dir}/sweep-derot-deep.mp4"
+        }
+        derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"
+    fi
   fi  # end render block (skipped when WEB_ONLY: reuse existing sweep mp4s)
 
     # --- moon crops: extract the moon from the night's frames into
@@ -251,7 +287,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             -vf "select=eq(n\,$n)" -frames:v 1 -q:v 4 "$2" \
             && echo "wrote $2 (mid frame $n of $(basename "$1"))"
     }
-    for s in colour diff detrans detrans-deep; do
+    for s in colour diff detrans detrans-deep derot derot-deep; do
         extract_mid "${night_dir}/sweep-${s}.mp4" \
                     "${night_dir}/poster-${s}.jpg"
     done
@@ -280,7 +316,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             echo "web encode FAILED for $(basename "$1"); continuing"
         fi
     }
-    for s in colour diff detrans detrans-deep; do
+    for s in colour diff detrans detrans-deep derot derot-deep; do
         make_web "${night_dir}/sweep-${s}.mp4" \
                  "${night_dir}/sweep-${s}-web.mp4"
     done
@@ -345,11 +381,15 @@ names = [
     "poster-diff.jpg",
     "poster-detrans.jpg",
     "poster-detrans-deep.jpg",
+    "poster-derot.jpg",
+    "poster-derot-deep.jpg",
     # web-delivery versions (what the website actually serves: loop+fullscreen)
     "sweep-colour-web.mp4",
     "sweep-diff-web.mp4",
     "sweep-detrans-web.mp4",
     "sweep-detrans-deep-web.mp4",
+    "sweep-derot-web.mp4",
+    "sweep-derot-deep-web.mp4",
 ]
 # Full-res mp4s are big (30-68MB). In web-only backfill they are ALREADY in
 # S3 from the original run, so don't re-upload them over a slow uplink —
@@ -358,6 +398,7 @@ if not web_only:
     names += [
         "sweep-colour.mp4", "sweep-diff.mp4",
         "sweep-detrans.mp4", "sweep-detrans-deep.mp4",
+        "sweep-derot.mp4", "sweep-derot-deep.mp4",
     ]
 # Deliverables dropped from publishing — delete their stale S3 keys if present.
 # (mono sweep dropped 2026-06-28: colour+diff+detrans cover the science.)
@@ -375,7 +416,10 @@ if getattr(cfg, "privacy", None):
               "sweep-detrans-deep-web.mp4", "thumb.jpg",
               "poster-colour.jpg",
               "poster-diff.jpg", "poster-detrans.jpg",
-              "poster-detrans-deep.jpg"):
+              "poster-detrans-deep.jpg",
+              "sweep-derot.mp4", "sweep-derot-deep.mp4",
+              "sweep-derot-web.mp4", "sweep-derot-deep-web.mp4",
+              "poster-derot.jpg", "poster-derot-deep.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
