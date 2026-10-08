@@ -478,7 +478,7 @@ def main():
     w.add_argument("--window-min", type=float, default=10); w.add_argument("--step-min", type=float, default=1)
     w.add_argument("--fps", type=int, default=60)
     w.add_argument("--max-ratio", type=float, default=1.5)
-    w.add_argument("--erode", type=int, default=2)
+    w.add_argument("--erode", type=int, default=3, help="3, not stack's 2: lit tree edges flicker in a video")
     w.add_argument("--clip", type=float, default=5.0, help="deep: drop samples this many frame-sigma above the median")
     w.add_argument("--min-cov", type=float, default=0.5, help="black where fewer than this fraction of the window's frames see the pixel")
     w.add_argument("--asinh", type=float, default=8.0)
