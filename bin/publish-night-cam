@@ -239,6 +239,22 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
                 --out-max "${night_dir}/sweep-derot.mp4" --out-deep "${night_dir}/sweep-derot-deep.mp4"
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"
+        # glow sweep, in the retired difference sweep's slot: max of each
+        # window of glow-subtracted frames, foreground blacked. Keeps the
+        # polar cap that (max - mean) erased; needs the glow model above.
+        if [[ -s "${night_dir}/skyglow-model.npz" ]]; then
+            echo "--- glow sweep (glow-subtracted, foreground masked)"
+            if "$PY" "$HERE/diff-sweep" --camera "$CAMERA" --night "$NIGHT" \
+                    --sweep-start 22:00 --sweep-end 04:00 \
+                    --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" \
+                    --glow-model "${night_dir}/skyglow-model.npz" --mask-foreground 3 \
+                    --noise-floor-mult 1.0 --out-dir "${night_dir}/sweep-glow"; then
+                cp "${night_dir}/sweep-glow/sweep.mp4" "${night_dir}/sweep-glow.mp4"
+                echo "wrote ${night_dir}/sweep-glow.mp4"
+            else
+                echo "glow sweep FAILED; continuing without it"
+            fi
+        fi
     fi
   fi  # end render block (skipped when WEB_ONLY: reuse existing sweep mp4s)
 
@@ -269,7 +285,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             -vf "select=eq(n\,$n)" -frames:v 1 -q:v 4 "$2" \
             && echo "wrote $2 (mid frame $n of $(basename "$1"))"
     }
-    for s in colour detrans detrans-deep derot derot-deep; do
+    for s in colour glow detrans detrans-deep derot derot-deep; do
         extract_mid "${night_dir}/sweep-${s}.mp4" \
                     "${night_dir}/poster-${s}.jpg"
     done
@@ -298,7 +314,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             echo "web encode FAILED for $(basename "$1"); continuing"
         fi
     }
-    for s in colour detrans detrans-deep derot derot-deep; do
+    for s in colour glow detrans detrans-deep derot derot-deep; do
         make_web "${night_dir}/sweep-${s}.mp4" \
                  "${night_dir}/sweep-${s}-web.mp4"
     done
@@ -363,12 +379,14 @@ names = [
     "poster-detrans.jpg",
     "poster-detrans-deep.jpg",
     "poster-derot.jpg",
+    "poster-glow.jpg",
     "poster-derot-deep.jpg",
     # web-delivery versions (what the website actually serves: loop+fullscreen)
     "sweep-colour-web.mp4",
     "sweep-detrans-web.mp4",
     "sweep-detrans-deep-web.mp4",
     "sweep-derot-web.mp4",
+    "sweep-glow-web.mp4",
     "sweep-derot-deep-web.mp4",
 ]
 # Full-res mp4s are big (30-68MB). In web-only backfill they are ALREADY in
@@ -378,7 +396,7 @@ if not web_only:
     names += [
         "sweep-colour.mp4",
         "sweep-detrans.mp4", "sweep-detrans-deep.mp4",
-        "sweep-derot.mp4", "sweep-derot-deep.mp4",
+        "sweep-derot.mp4", "sweep-derot-deep.mp4", "sweep-glow.mp4",
     ]
 # Deliverables dropped from publishing — delete their stale S3 keys if present.
 # (mono sweep dropped 2026-06-28: colour+diff+detrans cover the science.)
@@ -399,7 +417,8 @@ if getattr(cfg, "privacy", None):
               "poster-detrans-deep.jpg",
               "sweep-derot.mp4", "sweep-derot-deep.mp4",
               "sweep-derot-web.mp4", "sweep-derot-deep-web.mp4",
-              "poster-derot.jpg", "poster-derot-deep.jpg"):
+              "poster-derot.jpg", "poster-derot-deep.jpg",
+              "sweep-glow.mp4", "sweep-glow-web.mp4", "poster-glow.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
 publish_night(cfg, "$NIGHT", files)
