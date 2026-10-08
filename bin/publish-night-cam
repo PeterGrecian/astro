@@ -234,8 +234,16 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
                 rm -f "$cam.try"
                 [[ -s "$cam" ]] || { echo "derot-sky: no clean refine frame"; return 1; }
             fi
+            # per-frame alignment against catalogue stars: removes the focus-
+            # breathing scale pulse (~2.6 px at the edge, 15 min sawtooth on
+            # 10-07) and pointing drift. Optional: without it the sweep runs on
+            # the model alone.
+            local al="${night_dir}/derot-sky-align.npy"
+            [[ -s "$al" ]] || "$PY" "$HERE/derot-sky" align "$cam" "$NIGHT" --glow "$glow" \
+                -j "${DEROT_JOBS:-4}" -o "$al" || { echo "derot-sky align failed; sweeping unaligned"; al=""; }
             "$PY" "$HERE/derot-sky" sweep "$cam" "$NIGHT" --glow "$glow" \
                 --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" -j "${DEROT_JOBS:-4}" \
+                ${al:+--align "$al"} \
                 --out-max "${night_dir}/sweep-derot.mp4" --out-deep "${night_dir}/sweep-derot-deep.mp4"
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"

@@ -425,6 +425,10 @@ def _rot_matrix(axis, ang):
     return c * np.eye(3) + s_ * K + (1 - c) * np.outer(axis, axis)
 
 
+def _ms(path):
+    return int(os.path.basename(path).split(".")[0])
+
+
 class _Sweeper:
     """Per-worker state: the output grid's sky directions, and a cache of
     glow-subtracted, foreground-NaN'd frames (adjacent windows share ~9/10)."""
@@ -438,6 +442,7 @@ class _Sweeper:
         self.mask = None
         self.cache = {}
         self.clip_max = False
+        self.align = {}          # {epoch_ms: (tx, ty, rot, mag)}; empty = model only
 
     def frame(self, path):
         if path not in self.cache:
@@ -466,6 +471,8 @@ class _Sweeper:
         """(max, deep, coverage fraction) for frames [(dt, path)] at reference t_c."""
         import cv2
         H, W = self.shape
+        if self.align:                               # as stack: unmeasured frames are left out
+            frames = [f for f in frames if _ms(f[1]) in self.align]
         if not frames:
             nan = np.full(self.shape, np.nan, np.float32)
             return nan, nan, np.zeros(self.shape, np.float32)
@@ -474,6 +481,8 @@ class _Sweeper:
         for i, (dt, path) in enumerate(frames):
             img, level, sig = self.frame(path)
             mx, my = self.maps((mid(dt) - t_c).total_seconds())
+            if self.align:                           # focus breathing + drift, measured per frame
+                mx, my = (v.astype(np.float32) for v in _apply_align(mx, my, self.cm, self.align[_ms(path)]))
             samp[i] = cv2.remap(img, mx, my, cv2.INTER_LINEAR,
                                 borderMode=cv2.BORDER_CONSTANT, borderValue=float("nan"))
             wts.append(1.0 / max(level, 1e-3)); sigs.append(sig)
@@ -524,6 +533,7 @@ def _sweep_chunk(args):
     wins, cam_path, glow_path, shape, a, stretch, dirs = args
     sw = _Sweeper(cam_path, glow_path, shape, a.erode)
     sw.clip_max = a.clip_max
+    sw.align = load_align(a.align)
     stats = []
     for k, (wi, t_c, frames) in enumerate(wins):
         vmax, deep, cov = sw.window(frames, t_c, a.clip)
@@ -558,6 +568,8 @@ def cmd_sweep(a):
         w0 += step
     if a.max_windows:
         wins = wins[:a.max_windows]
+    if a.align:
+        print(f"per-frame alignment from {a.align}: {len(load_align(a.align))} frames")
     print(f"{len(wins)} windows of {a.window_min} min, step {a.step_min} min, "
           f"{t0:%H:%M}-{t1:%H:%M} UTC; {sum(1 for w in wins if not w[2])} empty")
     shape = load_binned(frames[0][1]).shape
@@ -639,6 +651,8 @@ def main():
     w.add_argument("--no-clip-max", dest="clip_max", action="store_false",
                    help="max over ALL samples; by default the max is taken over the clipped samples, because a plain max\n"
                         "draws everything fixed to the camera (hot pixels, dust, lit tree edges) and every aircraft as arcs")
+    w.add_argument("--align", help="per-frame alignment table from `derot-sky align`: removes the "
+                   "focus-breathing scale pulse and pointing drift between frames")
     w.add_argument("--erode", type=int, default=3, help="3, not stack's 2: lit tree edges flicker in a video")
     w.add_argument("--clip", type=float, default=5.0, help="deep: drop samples this many frame-sigma above the median")
     w.add_argument("--min-cov", type=float, default=0.5, help="black where fewer than this fraction of the window's frames see the pixel")
