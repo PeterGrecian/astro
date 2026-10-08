@@ -181,6 +181,84 @@ def cmd_refine(a):
           f"roll {np.degrees(s.x[2] - cm.p['roll']):+.3f} deg)\n  -> {a.out}")
 
 
+def _align_one(args):
+    """Per-frame similarity (tx, ty, rotation, magnification about the optical
+    centre) between the camera model's predicted catalogue stars and the stars
+    actually in the frame. Absorbs focus breathing (the LENSPOS sawtooth),
+    slow thermal drift of scale and pointing, and timing error in one fit."""
+    path, cam_path, glow_path = args
+    cm, gm = CameraModel(cam_path), GlowModel(glow_path)
+    ms = int(os.path.basename(path).split(".")[0])
+    dt = mid(datetime.fromtimestamp(ms / 1000, timezone.utc))
+    img = gm.subtract(load_binned(path))
+    H, W = img.shape
+    px, py = cm.project(star_enu(cm.p["stars_radec_j2000"], dt))
+    noise = 1.4826 * np.median(np.abs(img[::4, ::4] - np.median(img[::4, ::4])))
+    gy, gx = np.mgrid[-3:4, -3:4]
+    P, M = [], []
+    for x, y in zip(px, py):
+        xi, yi = int(round(x)), int(round(y))
+        if not (10 < xi < W - 10 and 10 < yi < H - 10):
+            continue
+        c = img[yi - 3:yi + 4, xi - 3:xi + 4]
+        j = np.unravel_index(np.argmax(c), c.shape)
+        cy, cx = yi - 3 + j[0], xi - 3 + j[1]
+        st = img[cy - 3:cy + 4, cx - 3:cx + 4].clip(0)
+        if st.shape != (7, 7) or st.max() < 15 * noise:
+            continue
+        P.append((x, y)); M.append((cx + (st * gx).sum() / st.sum(), cy + (st * gy).sum() / st.sum()))
+    P, M = np.array(P), np.array(M)
+    if len(P) < 20:
+        return [ms, np.nan, np.nan, np.nan, np.nan, len(P), np.nan, np.nan]
+    X, Y, d = P[:, 0] - cm.cx, P[:, 1] - cm.cy, M - P
+    raw = float(np.median(np.hypot(*d.T)))
+    keep = np.ones(len(P), bool)
+    for _ in range(2):                                   # one round of 3-sigma rejection
+        A = np.zeros((2 * keep.sum(), 4))
+        A[0::2, 0] = 1; A[1::2, 1] = 1
+        A[0::2, 2] = -Y[keep]; A[1::2, 2] = X[keep]; A[0::2, 3] = X[keep]; A[1::2, 3] = Y[keep]
+        sol = np.linalg.lstsq(A, d[keep].ravel(), rcond=None)[0]
+        rr = np.hypot(*(d[keep].ravel() - A @ sol).reshape(-1, 2).T)
+        cut = max(3 * 1.48 * np.median(rr), 0.5)
+        idx = np.nonzero(keep)[0]
+        keep[idx[rr >= cut]] = False
+    return [ms, *map(float, sol), int(keep.sum()), raw, float(np.median(rr[rr < cut]))]
+
+
+def cmd_align(a):
+    from multiprocessing import Pool
+    frames = night_frames(a.night)
+    if not a.all:
+        frames = clean_frames(a.night, frames, a.glow, a.max_ratio)
+    with Pool(a.jobs) as p:
+        out = np.array(p.map(_align_one, [(f[1], a.camera, a.glow) for f in frames], chunksize=4))
+    out = out[np.argsort(out[:, 0])]
+    ok = np.isfinite(out[:, 1])
+    dst = a.out or f"{BASE}/astrocam-frames/{a.night}/derot-sky-align.npy"
+    np.save(dst, out)
+    print(f"{ok.sum()} of {len(out)} frames aligned (median {np.median(out[ok, 5]):.0f} stars); star offset "
+          f"from the model {np.median(out[ok, 6]):.2f} px -> {np.median(out[ok, 7]):.2f} px after the per-frame fit")
+    for i, n, k in ((1, "tx px", 1), (2, "ty px", 1), (3, "rotation arcmin", 180 / np.pi * 60), (4, "magnification ppm", 1e6)):
+        v = out[ok, i] * k
+        print(f"  {n:18s} p5 {np.percentile(v, 5):+8.2f}  p50 {np.percentile(v, 50):+8.2f}  p95 {np.percentile(v, 95):+8.2f}")
+    print(f"-> {dst}")
+
+
+def load_align(path):
+    """{epoch_ms: (tx, ty, rot, mag)} from `derot-sky align`; empty if no path."""
+    if not path:
+        return {}
+    a = np.load(path)
+    return {int(r[0]): tuple(r[1:5]) for r in a if np.isfinite(r[1])}
+
+
+def _apply_align(x, y, cm, al):
+    """model-predicted frame position -> where the star actually is in that frame."""
+    tx, ty, th, m = al
+    X, Y = x - cm.cx, y - cm.cy
+    return x + tx - th * Y + m * X, y + ty + th * X + m * Y
+
+
 def clean_frames(night, frames, glow_path, max_ratio):
     """Astronomically dark frames whose glow fit is clean (no cloud)."""
     frames = [f for f in frames if sun_alt(f[0]) < -18]
@@ -203,7 +281,7 @@ def clean_frames(night, frames, glow_path, max_ratio):
 
 def _stack_chunk(args):
     import cv2
-    chunk, cam_path, glow_path, t_ref, shape, erode = args
+    chunk, cam_path, glow_path, t_ref, shape, erode, align = args
     cm, gm = CameraModel(cam_path), GlowModel(glow_path)
     H, W = shape
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -220,6 +298,11 @@ def _stack_chunk(args):
         if mask is None:
             mask = gm.sky_mask(img.shape, erode).astype(np.float32)
         x, y = cm.project(cm.sky_motion(Vref, (mid(dt) - t_ref).total_seconds()))
+        ms = int(os.path.basename(path).split(".")[0])
+        if align:
+            if ms not in align:
+                continue
+            x, y = _apply_align(x, y, cm, align[ms])
         mx, my = x.astype(np.float32), y.astype(np.float32)
         samp = cv2.remap(img, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         msk = cv2.remap(mask, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -229,6 +312,59 @@ def _stack_chunk(args):
         Wt += w * msk
         used.append((dt.isoformat(), float(rms), float(level)))
     return S, Wt, used
+
+
+def _drizzle_chunk(args):
+    """Point-kernel drizzle: carry every input pixel CENTRE to the sky at t_ref
+    and drop its value into the nearest pixel of an output grid `scale` x finer.
+    No interpolation, so no smoothing: bilinear resampling convolves every star
+    with a 2-px triangle, and that softening is part of what cost the 10-07
+    stack ~0.4 mag. The night's rotation scatters the drops over all sub-pixel
+    phases, which is what fills the finer grid."""
+    chunk, cam_path, glow_path, t_ref, shape, erode, scale, align = args
+    cm, gm = CameraModel(cam_path), GlowModel(glow_path)
+    H, W = shape
+    Ho, Wo = H * scale, W * scale
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    Vin0 = cm.unproject(xx, yy).reshape(-1, 3).astype(np.float32)
+    P = np.stack([cm.b, cm.ex, cm.ey], 1)
+    S = np.zeros(Ho * Wo, np.float64)
+    Wt = np.zeros(Ho * Wo, np.float64)
+    used = []
+    keep = None
+    for dt, path in chunk:
+        img, amp, rms, level = gm.subtract(load_binned(path), return_fit=True)
+        if level <= 0:
+            continue
+        if keep is None:
+            keep = gm.sky_mask(img.shape, erode).ravel()
+        ms = int(os.path.basename(path).split(".")[0])
+        if align:
+            if ms not in align:
+                continue
+            # a pixel at measured position p sits where the model puts p - d(p)
+            tx, ty, th, m = align[ms]
+            X, Y = xx - cm.cx, yy - cm.cy
+            Vin = cm.unproject(xx - (tx - th * Y + m * X), yy - (ty + th * X + m * Y)).reshape(-1, 3).astype(np.float32)
+        else:
+            Vin = Vin0
+        # frame-time direction -> the same sky direction at t_ref: undo dt of sky motion
+        R = _rot_matrix(cm.pole, +SIDEREAL_RAD_PER_S * (mid(dt) - t_ref).total_seconds())
+        D = Vin[keep] @ (R.T @ P).astype(np.float32)
+        th = np.arctan2(np.hypot(D[:, 1], D[:, 2]), D[:, 0])
+        phi = np.arctan2(D[:, 2], D[:, 1])
+        r = cm.f * (th + cm.k * th ** 3)
+        x = cm.cx + cm.mirror * r * np.cos(phi)
+        y = cm.cy - r * np.sin(phi)
+        iu = np.floor((x + 0.5) * scale).astype(np.int64)      # pixel i spans [i-0.5, i+0.5)
+        iv = np.floor((y + 0.5) * scale).astype(np.int64)
+        ok = (iu >= 0) & (iu < Wo) & (iv >= 0) & (iv < Ho)
+        idx = iv[ok] * Wo + iu[ok]
+        w = 1.0 / level
+        S += np.bincount(idx, weights=w * img.ravel()[keep][ok], minlength=Ho * Wo)
+        Wt += np.bincount(idx, minlength=Ho * Wo) * w
+        used.append((dt.isoformat(), float(rms), float(level)))
+    return S.reshape(Ho, Wo), Wt.reshape(Ho, Wo), used
 
 
 def cmd_stack(a):
@@ -243,8 +379,14 @@ def cmd_stack(a):
     print(f"ref {t_ref.isoformat()}")
     shape = load_binned(frames[0][1]).shape
     chunks = [frames[i::a.jobs] for i in range(a.jobs)]
+    align = load_align(a.align)
+    if a.align:
+        print(f"per-frame alignment from {a.align}: {len(align)} frames")
     with Pool(a.jobs) as p:
-        parts = p.map(_stack_chunk, [(c, a.camera, a.glow, t_ref, shape, a.erode) for c in chunks])
+        if a.drizzle:
+            parts = p.map(_drizzle_chunk, [(c, a.camera, a.glow, t_ref, shape, a.erode, a.drizzle, align) for c in chunks])
+        else:
+            parts = p.map(_stack_chunk, [(c, a.camera, a.glow, t_ref, shape, a.erode, align) for c in chunks])
     S = sum(pt[0] for pt in parts)
     Wt = sum(pt[1] for pt in parts)
     used = sorted(u for pt in parts for u in pt[2])
@@ -256,6 +398,8 @@ def cmd_stack(a):
     hdr["NIGHT"] = a.night; hdr["REFUTC"] = t_ref.isoformat(); hdr["NFRAMES"] = len(used)
     hdr["CAMMODEL"] = os.path.basename(a.camera); hdr["GLOWMODL"] = os.path.basename(a.glow)
     hdr["COMMENT"] = "weighted mean of glow-subtracted frames, re-projected to the sky at REFUTC"
+    hdr["ALIGN"] = (os.path.basename(a.align) if a.align else "none", "per-frame similarity from derot-sky align")
+    hdr["DRIZZLE"] = (a.drizzle or 0, "0 = bilinear resample; N = point drizzle onto an N x finer grid")
     fits.HDUList([fits.PrimaryHDU(mean, hdr),
                   fits.ImageHDU((Wt / nmax).astype(np.float32), name="WEIGHT")]).writeto(out / "derot-sky.fits", overwrite=True)
     json.dump(used, open(out / "derot-sky-frames.json", "w"))
@@ -469,12 +613,20 @@ def main():
     r.add_argument("--glow", required=True); r.add_argument("--search", type=int, default=3)
     r.add_argument("--search-shift", type=int, default=80)
     r.add_argument("-o", "--out", required=True)
+    al = sub.add_parser("align", help="measure each frame's offset from the camera model against catalogue stars")
+    al.add_argument("camera"); al.add_argument("night"); al.add_argument("--glow", required=True)
+    al.add_argument("--max-ratio", type=float, default=1.5); al.add_argument("--all", action="store_true",
+                    help="align every frame, not only the clean ones")
+    al.add_argument("-j", "--jobs", type=int, default=4); al.add_argument("-o", "--out")
     s = sub.add_parser("stack"); s.add_argument("camera"); s.add_argument("night")
     s.add_argument("--glow", required=True); s.add_argument("--ref-utc", required=True)
     s.add_argument("--from", dest="start"); s.add_argument("--to", dest="end")
     s.add_argument("--max-ratio", type=float, default=1.5)
     s.add_argument("--erode", type=int, default=2)
     s.add_argument("--asinh", type=float, default=8.0)
+    s.add_argument("--align", help="per-frame alignment table from `derot-sky align` (corrects breathing and drift)")
+    s.add_argument("--drizzle", type=int, default=0, metavar="N",
+                   help="point-kernel drizzle onto an N x finer grid instead of bilinear resampling")
     s.add_argument("-j", "--jobs", type=int, default=4)
     s.add_argument("-o", "--out", required=True)
     w = sub.add_parser("sweep"); w.add_argument("camera"); w.add_argument("night")
@@ -496,7 +648,7 @@ def main():
     w.add_argument("-j", "--jobs", type=int, default=4)
     w.add_argument("--out-max"); w.add_argument("--out-deep")
     a = ap.parse_args()
-    {"refine": cmd_refine, "stack": cmd_stack, "sweep": cmd_sweep}[a.cmd](a)
+    {"refine": cmd_refine, "align": cmd_align, "stack": cmd_stack, "sweep": cmd_sweep}[a.cmd](a)
 
 
 if __name__ == "__main__":
