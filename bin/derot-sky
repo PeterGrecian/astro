@@ -28,6 +28,16 @@ Steps (both run on muppet, where the frames are):
   derot-sky stack CAM-NIGHT.json NIGHT --glow GLOW.npz --ref-utc HH:MM:SS
       [--from HH:MM --to HH:MM (UTC)] [--max-ratio 1.5] -o OUTDIR
 
+  derot-sky sweep CAM-NIGHT.json NIGHT --glow GLOW.npz
+      [--sweep-start 22:00 --sweep-end 04:00 (UTC)] [--window-min 10 --step-min 1]
+      --out-max sweep-derot.mp4 --out-deep sweep-derot-deep.mp4
+      Sliding-window video, the astrocam pair to eclipticam's detrans sweeps.
+      Each window is re-projected to the sky at ITS OWN centre time, so the
+      video shows the sky turning with point stars. max = per-pixel MAX of the
+      window (streak-free sweep-detrans); deep = weighted mean with a high-side
+      clip (aircraft, satellites). One fixed stretch for the whole video, from
+      a pre-pass over sample windows, so it does not flicker.
+
 Writes OUTDIR/derot-sky.fits (mean, weight extensions) and a preview JPEG.
 """
 from __future__ import annotations
@@ -43,7 +53,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from astro.skyglow import CameraModel, GlowModel, _enu  # noqa: E402
+from astro.skyglow import SIDEREAL_RAD_PER_S, CameraModel, GlowModel, _enu  # noqa: E402
 
 LAT, LON = 51.3948, -0.2923
 BASE = os.environ.get("BIGSTORE", "/mnt/bigstore/astro-data")
@@ -171,6 +181,26 @@ def cmd_refine(a):
           f"roll {np.degrees(s.x[2] - cm.p['roll']):+.3f} deg)\n  -> {a.out}")
 
 
+def clean_frames(night, frames, glow_path, max_ratio):
+    """Astronomically dark frames whose glow fit is clean (no cloud)."""
+    frames = [f for f in frames if sun_alt(f[0]) < -18]
+    # clean-sky selection from the night's block cube (skyglow-model cube), the
+    # same green-calibrated test as `skyglow-model check`: residual of the glow
+    # fit vs the sky-limited block noise (0.276 ADU at G level 29.6, ~sqrt(level))
+    z = np.load(f"{BASE}/astrocam-frames/{night}/skyglow-cube.npz")
+    g = np.load(glow_path)
+    gmodes, gsky = (g["modes"][1] if g["modes"].ndim == 4 else g["modes"]), g["sky"].ravel()
+    M = gmodes.reshape(len(gmodes), -1)[:, gsky].T
+    Xc = z["cube"][:, 1, 0].reshape(len(z["t"]), -1)[:, gsky] - 64.0
+    amp = np.linalg.lstsq(M, Xc.T, rcond=None)[0].T
+    ratio = np.sqrt(np.mean((Xc - amp @ M.T) ** 2, 1)) / (0.276 * np.sqrt(np.clip(Xc.mean(1), 1, None) / 29.6))
+    clean = {int(t) for t, r in zip(z["t"], ratio) if r < max_ratio}
+    n0 = len(frames)
+    frames = [f for f in frames if int(os.path.basename(f[1]).split(".")[0]) in clean]
+    print(f"{n0} astronomically dark frames, {len(frames)} clean (glow-fit ratio < {max_ratio})")
+    return frames
+
+
 def _stack_chunk(args):
     import cv2
     chunk, cam_path, glow_path, t_ref, shape, erode = args
@@ -209,21 +239,8 @@ def cmd_stack(a):
     if a.start:
         t0, t1 = utc_on_night(a.night, a.start), utc_on_night(a.night, a.end)
         frames = [f for f in frames if t0 <= f[0] < t1]
-    frames = [f for f in frames if sun_alt(f[0]) < -18]
-    # clean-sky selection from the night's block cube (skyglow-model cube), the
-    # same green-calibrated test as `skyglow-model check`: residual of the glow
-    # fit vs the sky-limited block noise (0.276 ADU at G level 29.6, ~sqrt(level))
-    z = np.load(f"{BASE}/astrocam-frames/{a.night}/skyglow-cube.npz")
-    g = np.load(a.glow)
-    gmodes, gsky = (g["modes"][1] if g["modes"].ndim == 4 else g["modes"]), g["sky"].ravel()
-    M = gmodes.reshape(len(gmodes), -1)[:, gsky].T
-    Xc = z["cube"][:, 1, 0].reshape(len(z["t"]), -1)[:, gsky] - 64.0
-    amp = np.linalg.lstsq(M, Xc.T, rcond=None)[0].T
-    ratio = np.sqrt(np.mean((Xc - amp @ M.T) ** 2, 1)) / (0.276 * np.sqrt(np.clip(Xc.mean(1), 1, None) / 29.6))
-    clean = {int(t) for t, r in zip(z["t"], ratio) if r < a.max_ratio}
-    n0 = len(frames)
-    frames = [f for f in frames if int(os.path.basename(f[1]).split(".")[0]) in clean]
-    print(f"{n0} astronomically dark frames, {len(frames)} clean (glow-fit ratio < {a.max_ratio}); ref {t_ref.isoformat()}")
+    frames = clean_frames(a.night, frames, a.glow, a.max_ratio)
+    print(f"ref {t_ref.isoformat()}")
     shape = load_binned(frames[0][1]).shape
     chunks = [frames[i::a.jobs] for i in range(a.jobs)]
     with Pool(a.jobs) as p:
@@ -255,6 +272,190 @@ def cmd_stack(a):
     print(f"-> {out}/derot-sky.fits, derot-sky.jpg  (noise sigma {sig:.3f} ADU in the well-covered region)")
 
 
+# --- sweep: sliding-window video ------------------------------------------
+
+def _rot_matrix(axis, ang):
+    """Matrix form of skyglow._rotate: v' = R v (Rodrigues)."""
+    c, s_ = np.cos(ang), np.sin(ang)
+    K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    return c * np.eye(3) + s_ * K + (1 - c) * np.outer(axis, axis)
+
+
+class _Sweeper:
+    """Per-worker state: the output grid's sky directions, and a cache of
+    glow-subtracted, foreground-NaN'd frames (adjacent windows share ~9/10)."""
+
+    def __init__(self, cam_path, glow_path, shape, erode):
+        self.cm, self.gm = CameraModel(cam_path), GlowModel(glow_path)
+        H, W = shape
+        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        self.Vref = self.cm.unproject(xx, yy).reshape(-1, 3).astype(np.float32)
+        self.shape, self.erode = shape, erode
+        self.mask = None
+        self.cache = {}
+
+    def frame(self, path):
+        if path not in self.cache:
+            img, amp, rms, level = self.gm.subtract(load_binned(path), return_fit=True)
+            if self.mask is None:
+                self.mask = self.gm.sky_mask(img.shape, self.erode)
+            img[~self.mask] = np.nan        # NaN spreads through INTER_LINEAR: masked edges go too
+            sig = 1.4826 * np.nanmedian(np.abs(img[::4, ::4] - np.nanmedian(img[::4, ::4])))
+            self.cache[path] = (img, level, sig)
+        return self.cache[path]
+
+    def maps(self, dt_s):
+        """remap grids sampling a frame dt_s after the window's reference time:
+        sky_motion then project, folded into one 3x3 matrix product."""
+        cm = self.cm
+        R = _rot_matrix(cm.pole, -SIDEREAL_RAD_PER_S * dt_s)
+        D = (self.Vref @ (R.T @ np.stack([cm.b, cm.ex, cm.ey], 1)).astype(np.float32))
+        th = np.arctan2(np.hypot(D[:, 1], D[:, 2]), D[:, 0])   # not arccos: float32 loses the axis
+        phi = np.arctan2(D[:, 2], D[:, 1])
+        r = cm.f * (th + cm.k * th ** 3)
+        H, W = self.shape
+        return ((cm.cx + cm.mirror * r * np.cos(phi)).reshape(H, W).astype(np.float32),
+                (cm.cy - r * np.sin(phi)).reshape(H, W).astype(np.float32))
+
+    def window(self, frames, t_c, clip):
+        """(max, deep, coverage fraction) for frames [(dt, path)] at reference t_c."""
+        import cv2
+        H, W = self.shape
+        if not frames:
+            nan = np.full(self.shape, np.nan, np.float32)
+            return nan, nan, np.zeros(self.shape, np.float32)
+        samp = np.empty((len(frames), H, W), np.float32)
+        wts, sigs = [], []
+        for i, (dt, path) in enumerate(frames):
+            img, level, sig = self.frame(path)
+            mx, my = self.maps((mid(dt) - t_c).total_seconds())
+            samp[i] = cv2.remap(img, mx, my, cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=float("nan"))
+            wts.append(1.0 / max(level, 1e-3)); sigs.append(sig)
+        wts = np.array(wts, np.float32)[:, None, None]
+        sigs = np.array(sigs, np.float32)[:, None, None]
+        ok = np.isfinite(samp)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            vmax = np.nanmax(samp, axis=0)
+            if len(frames) >= 3:
+                med = np.nanmedian(samp, axis=0)
+                ok &= ~(samp - med > clip * sigs)   # high side only: aircraft, satellites
+        wsum = (wts * ok).sum(0)
+        deep = np.where(wsum > 0, (wts * np.where(ok, samp, 0)).sum(0) / np.maximum(wsum, 1e-30), np.nan)
+        cov = np.isfinite(samp).sum(0) / float(len(frames))
+        return vmax.astype(np.float32), deep.astype(np.float32), cov.astype(np.float32)
+
+    def prune(self, keep_paths):
+        for k in [k for k in self.cache if k not in keep_paths]:
+            del self.cache[k]
+
+
+def _stretch_stats(img, cov, min_cov):
+    v = img[(cov >= min_cov) & np.isfinite(img)]
+    if v.size < 1000:
+        return None
+    med = np.median(v)
+    sig = 1.4826 * np.median(np.abs(v - med))
+    return med - 1.0 * sig, np.percentile(v, 99.8)
+
+
+def _to_u8(img, cov, lohi, asinh, min_cov):
+    lo, hi = lohi
+    s = np.clip((np.nan_to_num(img, nan=lo) - lo) / (hi - lo), 0, 1)
+    s = np.arcsinh(s * asinh) / np.arcsinh(asinh)
+    s[cov < min_cov] = 0                       # no coverage: off-frame or foreground
+    u = (s * 255).astype(np.uint8)
+    return u[:u.shape[0] // 2 * 2, :u.shape[1] // 2 * 2]   # yuv420p wants even dims
+
+
+def _sweep_chunk(args):
+    import cv2
+    wins, cam_path, glow_path, shape, a, stretch, dirs = args
+    sw = _Sweeper(cam_path, glow_path, shape, a.erode)
+    stats = []
+    for k, (wi, t_c, frames) in enumerate(wins):
+        vmax, deep, cov = sw.window(frames, t_c, a.clip)
+        if stretch is None:
+            stats.append((_stretch_stats(vmax, cov, a.min_cov), _stretch_stats(deep, cov, a.min_cov)))
+        else:
+            if dirs[0]:
+                cv2.imwrite(str(dirs[0] / f"f{wi:04d}.png"), _to_u8(vmax, cov, stretch[0], a.asinh, a.min_cov))
+            if dirs[1]:
+                cv2.imwrite(str(dirs[1] / f"f{wi:04d}.png"), _to_u8(deep, cov, stretch[1], a.asinh, a.min_cov))
+        nxt = {p for _, p in wins[k + 1][2]} if k + 1 < len(wins) else set()
+        sw.prune(nxt)
+        if stretch is not None and k % 30 == 0:
+            print(f"  window {wi} ({t_c:%H:%M} UTC, {len(frames)} frames)", flush=True)
+    return stats
+
+
+def cmd_sweep(a):
+    import shutil
+    import subprocess
+    from multiprocessing import Pool
+    t0, t1 = utc_on_night(a.night, a.sweep_start), utc_on_night(a.night, a.sweep_end)
+    frames = [f for f in night_frames(a.night) if t0 - timedelta(minutes=a.window_min) <= f[0] < t1]
+    frames = clean_frames(a.night, frames, a.glow, a.max_ratio)
+    if not frames:
+        sys.exit("no clean frames in the sweep span")
+    win, step = timedelta(minutes=a.window_min), timedelta(minutes=a.step_min)
+    wins, w0 = [], t0
+    while w0 + win <= t1:
+        fr = [f for f in frames if w0 <= mid(f[0]) < w0 + win]
+        wins.append((len(wins), w0 + win / 2, fr))
+        w0 += step
+    if a.max_windows:
+        wins = wins[:a.max_windows]
+    print(f"{len(wins)} windows of {a.window_min} min, step {a.step_min} min, "
+          f"{t0:%H:%M}-{t1:%H:%M} UTC; {sum(1 for w in wins if not w[2])} empty")
+    shape = load_binned(frames[0][1]).shape
+    # contiguous chunks so each worker's frame cache is reused window to window
+    n = len(wins)
+    chunks = [wins[i * n // a.jobs:(i + 1) * n // a.jobs] for i in range(a.jobs)]
+    chunks = [c for c in chunks if c]
+
+    # 1. fixed stretch from sample windows (median of each window's black/white)
+    busy = [w for w in wins if len(w[2]) >= 0.6 * a.window_min]
+    samp = [busy[int(i)] for i in np.linspace(0, len(busy) - 1, min(a.jobs * 2, len(busy)))] if busy else wins[:1]
+    with Pool(a.jobs) as p:
+        st = [s for part in p.map(_sweep_chunk, [([w], a.camera, a.glow, shape, a, None, None) for w in samp])
+              for s in part]
+    stretch = []
+    for m in (0, 1):
+        v = np.array([s[m] for s in st if s[m] is not None])
+        stretch.append((float(np.median(v[:, 0])), float(np.median(v[:, 1]))))
+    print(f"fixed stretch from {len(samp)} windows: max {stretch[0][0]:.2f}..{stretch[0][1]:.2f}, "
+          f"deep {stretch[1][0]:.2f}..{stretch[1][1]:.2f} ADU")
+
+    # 2. render
+    outs = [Path(a.out_max) if a.out_max else None, Path(a.out_deep) if a.out_deep else None]
+    dirs = []
+    for o in outs:
+        d = None
+        if o:
+            d = o.with_name(o.stem + "-frames")
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True)
+        dirs.append(d)
+    with Pool(a.jobs) as p:
+        p.map(_sweep_chunk, [(c, a.camera, a.glow, shape, a, stretch, dirs) for c in chunks])
+
+    # 3. encode; preset/threads honour publish-night-cam's host-aware env
+    for o, d in zip(outs, dirs):
+        if not o:
+            continue
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
+                        "-threads", os.environ.get("FFMPEG_THREADS", "0"), "-framerate", str(a.fps),
+                        "-i", str(d / "f%04d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-crf", "20", "-preset", os.environ.get("FFMPEG_PRESET", "medium"), str(o)], check=True)
+        if not a.keep_frames:
+            shutil.rmtree(d)
+        print(f"wrote {o} ({o.stat().st_size / 1e6:.0f} MB)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -270,8 +471,23 @@ def main():
     s.add_argument("--asinh", type=float, default=8.0)
     s.add_argument("-j", "--jobs", type=int, default=4)
     s.add_argument("-o", "--out", required=True)
+    w = sub.add_parser("sweep"); w.add_argument("camera"); w.add_argument("night")
+    w.add_argument("--glow", required=True)
+    w.add_argument("--sweep-start", default="22:00", help="UTC")
+    w.add_argument("--sweep-end", default="04:00", help="UTC")
+    w.add_argument("--window-min", type=float, default=10); w.add_argument("--step-min", type=float, default=1)
+    w.add_argument("--fps", type=int, default=60)
+    w.add_argument("--max-ratio", type=float, default=1.5)
+    w.add_argument("--erode", type=int, default=2)
+    w.add_argument("--clip", type=float, default=5.0, help="deep: drop samples this many frame-sigma above the median")
+    w.add_argument("--min-cov", type=float, default=0.5, help="black where fewer than this fraction of the window's frames see the pixel")
+    w.add_argument("--asinh", type=float, default=8.0)
+    w.add_argument("--max-windows", type=int)
+    w.add_argument("--keep-frames", action="store_true")
+    w.add_argument("-j", "--jobs", type=int, default=4)
+    w.add_argument("--out-max"); w.add_argument("--out-deep")
     a = ap.parse_args()
-    {"refine": cmd_refine, "stack": cmd_stack}[a.cmd](a)
+    {"refine": cmd_refine, "stack": cmd_stack, "sweep": cmd_sweep}[a.cmd](a)
 
 
 if __name__ == "__main__":
