@@ -34,7 +34,7 @@ Steps (both run on muppet, where the frames are):
       Sliding-window video, the astrocam pair to eclipticam's detrans sweeps.
       Each window is re-projected to the sky at ITS OWN centre time, so the
       video shows the sky turning with point stars. max = per-pixel MAX of the
-      window (streak-free sweep-detrans); deep = weighted mean with a high-side
+      window's clipped samples (streak-free sweep-detrans, no aircraft or hot-pixel arcs); deep = weighted mean with a high-side
       clip (aircraft, satellites). One fixed stretch for the whole video, from
       a pre-pass over sample windows, so it does not flicker.
 
@@ -293,6 +293,7 @@ class _Sweeper:
         self.shape, self.erode = shape, erode
         self.mask = None
         self.cache = {}
+        self.clip_max = False
 
     def frame(self, path):
         if path not in self.cache:
@@ -342,6 +343,10 @@ class _Sweeper:
             if len(frames) >= 3:
                 med = np.nanmedian(samp, axis=0)
                 ok &= ~(samp - med > clip * sigs)   # high side only: aircraft, satellites
+        if self.clip_max and len(frames) >= 3:      # the max of the clipped samples only
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                vmax = np.nanmax(np.where(ok, samp, np.nan), axis=0)
         wsum = (wts * ok).sum(0)
         deep = np.where(wsum > 0, (wts * np.where(ok, samp, 0)).sum(0) / np.maximum(wsum, 1e-30), np.nan)
         cov = np.isfinite(samp).sum(0) / float(len(frames))
@@ -374,6 +379,7 @@ def _sweep_chunk(args):
     import cv2
     wins, cam_path, glow_path, shape, a, stretch, dirs = args
     sw = _Sweeper(cam_path, glow_path, shape, a.erode)
+    sw.clip_max = a.clip_max
     stats = []
     for k, (wi, t_c, frames) in enumerate(wins):
         vmax, deep, cov = sw.window(frames, t_c, a.clip)
@@ -478,6 +484,9 @@ def main():
     w.add_argument("--window-min", type=float, default=10); w.add_argument("--step-min", type=float, default=1)
     w.add_argument("--fps", type=int, default=60)
     w.add_argument("--max-ratio", type=float, default=1.5)
+    w.add_argument("--no-clip-max", dest="clip_max", action="store_false",
+                   help="max over ALL samples; by default the max is taken over the clipped samples, because a plain max\n"
+                        "draws everything fixed to the camera (hot pixels, dust, lit tree edges) and every aircraft as arcs")
     w.add_argument("--erode", type=int, default=3, help="3, not stack's 2: lit tree edges flicker in a video")
     w.add_argument("--clip", type=float, default=5.0, help="deep: drop samples this many frame-sigma above the median")
     w.add_argument("--min-cov", type=float, default=0.5, help="black where fewer than this fraction of the window's frames see the pixel")
