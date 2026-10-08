@@ -12,6 +12,7 @@ numbers per frame per colour, against the thousands a mesh background spends
 Two steps, because the first reads every frame and must run where they live:
 
     bigstore-run --get cube_astrocam_2026-10-07.npz bin/skyglow-model cube astrocam 2026-10-07
+    bigstore-run bin/skyglow-model cube astrocam 2026-10-07 --to-night   # file it beside the frames
     skyglow-model fit cube_astrocam_2026-10-07.npz [--from 20.5 --to 5.5]
 
 `cube`  -> cube_<cam>_<night>.npz: t (epoch ms), cube [n, RGB, (median,p20), Y, X]
@@ -73,7 +74,8 @@ def cmd_cube(a):
         sys.exit(f"skyglow-model: no frames for {a.camera} {a.night}")
     with Pool(a.jobs) as p:
         res = sorted(p.map(_block_stats, files, chunksize=8), key=lambda r: r[0])
-    out = a.out or f"cube_{a.camera}_{a.night}.npz"
+    out = (os.path.join(frame_root(a.camera, a.night), "skyglow-cube.npz") if a.to_night
+           else a.out or f"cube_{a.camera}_{a.night}.npz")
     np.savez_compressed(out, t=np.array([r[0] for r in res]),
                         cube=np.stack([r[1] for r in res]).astype(np.float32),
                         temp=np.array([r[2] for r in res], float))
@@ -127,20 +129,73 @@ def cmd_fit(a):
               f"{a1[i, 0] / a1[i, 1]:.3f}  {a1[i, 2] / a1[i, 1]:.3f}{'' if use[i] else '   (outside window)'}")
 
 
+def sun_moon_alt(t_ms):
+    """Sun and moon altitude (deg) at the house, per frame."""
+    import warnings
+    from astropy.coordinates import AltAz, EarthLocation, get_body, get_sun
+    from astropy.time import Time
+    import astropy.units as u
+    warnings.filterwarnings("ignore")
+    loc = EarthLocation(lat=51.3948 * u.deg, lon=-0.2923 * u.deg)
+    T = Time(np.asarray(t_ms) / 1000, format="unix")
+    fr = AltAz(obstime=T, location=loc)
+    return get_sun(T).transform_to(fr).alt.deg, get_body("moon", T, loc).transform_to(fr).alt.deg
+
+
+def cmd_check(a):
+    """Fit every frame of each cube with a model's modes; a frame whose residual
+    sits at the noise floor for its sky level is 'clean': clear, unlit by the moon,
+    and seeing the same glow pattern as the model night."""
+    m = np.load(a.model)
+    modes, sky = m["modes"], m["sky"].ravel()
+    # per-block noise at the model night: 2-mode residual 0.276 ADU at G level 29.6,
+    # scaling as sqrt(level) (sky-limited, measured on 2026-10-07)
+    s0, l0 = 0.276, 29.6
+    M = np.stack([modes[1, 0].ravel()[sky], modes[1, 1].ravel()[sky]], 1)
+    print("night        frames  dark  clean  clean-hours  median-ratio  (ratio = resid / expected noise)")
+    rows = []
+    for path in a.cubes:
+        z = np.load(path)
+        t, X = z["t"], z["cube"][:, 1, 0].reshape(len(z["t"]), -1)[:, sky] - BLACK
+        amp = np.linalg.lstsq(M, X.T, rcond=None)[0].T
+        resid = np.sqrt(np.mean((X - amp @ M.T) ** 2, axis=1))
+        level = X.mean(1)
+        ratio = resid / (s0 * np.sqrt(np.clip(level, 1, None) / l0))
+        sun, moon = sun_moon_alt(t)
+        dark = sun < -18
+        clean = dark & (ratio < a.max_ratio)
+        night = os.path.basename(os.path.dirname(path)) if os.path.basename(path) == "skyglow-cube.npz" \
+            else os.path.basename(path)
+        print(f"{night:12s} {len(t):6d} {dark.sum():5d} {clean.sum():6d}  {clean.sum() / 60:9.1f}"
+              f"   {np.median(ratio[dark]) if dark.any() else np.nan:9.2f}")
+        rows.append((night, t, amp, resid, ratio, level, sun, moon, clean))
+    if a.out:
+        np.savez_compressed(a.out, **{f"{r[0]}__{k}": v for r in rows
+                                      for k, v in zip(("t", "amp", "resid", "ratio", "level", "sun", "moon", "clean"), r[1:])})
+        print(f"\nper-frame table -> {a.out}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("cube", help="frames -> block-median cube (run via bigstore-run)")
     c.add_argument("camera"); c.add_argument("night")
     c.add_argument("-j", "--jobs", type=int, default=4); c.add_argument("-o", "--out")
+    c.add_argument("--to-night", action="store_true",
+                   help="write skyglow-cube.npz beside the frames (archive product) instead of cwd")
     f = sub.add_parser("fit", help="cube -> two-mode glow model")
     f.add_argument("cube")
     f.add_argument("--from", dest="start", type=float, default=20.5, help="window start, London hours")
     f.add_argument("--to", dest="end", type=float, default=5.5, help="window end, London hours")
     f.add_argument("--min-corr", type=float, default=0.9)
     f.add_argument("-o", "--out")
+    k = sub.add_parser("check", help="fit each frame of other nights' cubes with a model; count clean frames")
+    k.add_argument("model"); k.add_argument("cubes", nargs="+")
+    k.add_argument("--max-ratio", type=float, default=1.5,
+                   help="clean if residual < this x the expected block noise (default 1.5)")
+    k.add_argument("-o", "--out", help="save the per-frame table (npz)")
     a = ap.parse_args()
-    {"cube": cmd_cube, "fit": cmd_fit}[a.cmd](a)
+    {"cube": cmd_cube, "fit": cmd_fit, "check": cmd_check}[a.cmd](a)
 
 
 if __name__ == "__main__":
