@@ -180,7 +180,7 @@ def close_window(idx, w_start, w_end, recent, rgb_pattern,
                  frames_dir, rotate_180,
                  noise_floor_mult=0.0, mean_mult=1.0,
                  signed=False, neg_blue=False,
-                 line_field=None, line_L=7, glow=False):
+                 line_field=None, line_L=7, glow=False, mask=None):
     """Find the frames in [w_start, w_end), compute (max - k·mean)
     optionally minus a noise floor, render."""
     in_win = [(t, f) for (t, f) in recent if w_start <= t < w_end]
@@ -218,7 +218,7 @@ def close_window(idx, w_start, w_end, recent, rgb_pattern,
     elif rgb_pattern is not None:
         render_asinh_jpeg_rgb(out_img, out_path, rotate_180=rotate_180)
     else:
-        render_asinh_jpeg(out_img, out_path, rotate_180=rotate_180)
+        render_asinh_jpeg(out_img, out_path, rotate_180=rotate_180, mask=mask)
     print(f"  closed window {idx:05d}  ({len(in_win)} frames)")
 
 
@@ -254,6 +254,10 @@ def main() -> int:
     ap.add_argument("--glow-model", type=Path, metavar="NPZ",
                     help="subtract this fitted sky-glow model per frame "
                          "instead of the window mean (grey only)")
+    ap.add_argument("--mask-foreground", type=int, metavar="ERODE", default=None,
+                    help="with --glow-model: black everything outside the model's sky mask, "
+                         "eroded ERODE blocks (3 matches derot-sky's video default), and take "
+                         "the stretch from the sky only")
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--no-mp4", action="store_true")
     ap.add_argument("--synthetic", type=int, default=0, metavar="N")
@@ -278,6 +282,7 @@ def main() -> int:
     windows = list_windows(sweep_start, sweep_end, window, step)
 
     rotate_180 = False
+    fg_mask = [None]   # filled on the first frame (needs its shape)
     if args.synthetic:
         H, W = 200, 200
         cadence_s = (sweep_end - sweep_start).total_seconds() / args.synthetic
@@ -305,6 +310,8 @@ def main() -> int:
         def gen():
             for t, p in all_frames:
                 f = load_fits_binned(p, rgb_pattern)
+                if glow is not None and args.mask_foreground is not None and fg_mask[0] is None:
+                    fg_mask[0] = glow.sky_mask(f.shape, args.mask_foreground)
                 yield t, (glow.subtract(f) if glow is not None else f)
         frames_iter = gen()
 
@@ -355,7 +362,7 @@ def main() -> int:
                          mean_mult=args.mean_mult,
                          signed=args.signed, neg_blue=args.neg_blue,
                          line_field=line_field, line_L=args.line_L,
-                         glow=bool(args.glow_model))
+                         glow=bool(args.glow_model), mask=fg_mask[0])
 
         # Prune deque: drop frames older than the oldest still-open
         # window's start.
@@ -375,7 +382,7 @@ def main() -> int:
                      noise_floor_mult=args.noise_floor_mult,
                      signed=args.signed, neg_blue=args.neg_blue,
                      line_field=line_field, line_L=args.line_L,
-                     glow=bool(args.glow_model))
+                     glow=bool(args.glow_model), mask=fg_mask[0])
 
     print(f"diff-sweep: {n} frames in, {len(windows)} JPEGs written")
 

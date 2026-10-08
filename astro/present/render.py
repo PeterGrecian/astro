@@ -314,8 +314,12 @@ def render_signed_asinh_jpeg_rgb(img, dst_path, hi_pct=JPEG_HI_PCT,
 
 def render_asinh_jpeg(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
                       asinh=JPEG_ASINH, quality=88, ignore_zero=False,
-                      rotate_180=False, area_gain_strength=0.0, sky_frac=0.0):
+                      rotate_180=False, area_gain_strength=0.0, sky_frac=0.0,
+                      mask=None):
     """Asinh-stretched grayscale JPEG. Returns (lo, hi) clip values.
+
+    mask: boolean, True = sky. Stretch percentiles come from the sky only and
+    everything else renders black (foreground: trees, roof).
 
     ignore_zero: compute the stretch percentiles over non-zero pixels
     only — for derot/mosaic images where masked tiles are exactly 0 and
@@ -334,6 +338,8 @@ def render_asinh_jpeg(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
             m = m & (f != 0)
         if m.any():
             sample = f[m]
+    if mask is not None:
+        sample = f[mask]
     if sample.size == 0:
         sample = f
     lo = float(np.percentile(sample, lo_pct))
@@ -343,6 +349,8 @@ def render_asinh_jpeg(img, dst_path, lo_pct=JPEG_LO_PCT, hi_pct=JPEG_HI_PCT,
     s = np.clip((f - lo) / (hi - lo), 0, 1)
     s = np.arcsinh(s * asinh) / np.arcsinh(asinh)
     u8 = (s * 255).astype(np.uint8)
+    if mask is not None:
+        u8[~mask] = 0
     if rotate_180:
         u8 = np.rot90(u8, 2)
     Image.fromarray(u8).save(dst_path, quality=quality)
