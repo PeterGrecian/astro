@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""skyglow-model — model a night's sky glow as a few fixed spatial modes.
+
+The glow is fixed in the camera frame while the stars move, so a star-rejected
+background (block medians) stacked over a clear night factorises: on
+astrocam 2026-10-07 ONE spatial map times ONE time curve held 99.98% of the
+green variance, and two modes reached the block-median noise floor (~0.25 ADU).
+The model per frame is then B(x,y,t) = a1(t) M1(x,y) + a2(t) M2(x,y): two
+numbers per frame per colour, against the thousands a mesh background spends
+(and which eat extended signal: the Milky Way survives this subtraction).
+
+Two steps, because the first reads every frame and must run where they live:
+
+    bigstore-run --get cube_astrocam_2026-10-07.npz bin/skyglow-model cube astrocam 2026-10-07
+    skyglow-model fit cube_astrocam_2026-10-07.npz [--from 20.5 --to 5.5]
+
+`cube`  -> cube_<cam>_<night>.npz: t (epoch ms), cube [n, RGB, (median,p20), Y, X]
+           in 24-superpixel blocks, temp (SENSTEMP).
+`fit`   -> model_<cam>_<night>.npz: modes [RGB, 2, Y, X] in ADU above black for
+           unit amplitude, amp [n, RGB, 2], sky mask; prints the rank, the
+           residual per mode count, and the glow curve with colour ratios.
+
+To subtract: fit the two amplitudes of a frame against the modes on the sky
+blocks (least squares on its own block medians), upsample the modes with a
+cubic spline over block centres, subtract. Window: Europe/London hours; frames
+outside it (twilight) are excluded from the modes but still get amplitudes.
+
+Caveat: modes built from one night absorb the night-averaged Milky Way, which
+rotates through the field. Modes from several nights, or an iterative mask,
+would not.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import os
+import sys
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+import numpy as np
+
+BS = 24          # block size in superpixels
+BLACK = 64.0     # BLACKLVL on imx708 / these cameras
+LONDON = ZoneInfo("Europe/London")
+
+
+def frame_root(cam: str, night: str) -> str:
+    base = os.environ.get("BIGSTORE", "/mnt/muppet/bigstore")
+    return {"astrocam": f"{base}/astrocam-frames/{night}",
+            "eclipticam-v3w": f"{base}/eclipticam-frames/night/{night}/v3w",
+            "ecl": f"{base}/eclipticam-frames/night/{night}/v3w"}[cam]
+
+
+def _block_stats(f: str):
+    from astropy.io import fits
+    with fits.open(f) as h:
+        d = h[1].data.astype(np.float32)
+        temp = h[1].header.get("SENSTEMP", np.nan)
+    planes = (d[0::2, 0::2], 0.5 * (d[0::2, 1::2] + d[1::2, 0::2]), d[1::2, 1::2])
+    out = []
+    for p in planes:
+        hh, ww = p.shape[0] // BS, p.shape[1] // BS
+        q = p[:hh * BS, :ww * BS].reshape(hh, BS, ww, BS).transpose(0, 2, 1, 3).reshape(hh, ww, -1)
+        out.append(np.stack([np.median(q, axis=2), np.percentile(q, 20, axis=2)]))
+    return int(os.path.basename(f).split(".")[0]), np.stack(out), temp
+
+
+def cmd_cube(a):
+    from multiprocessing import Pool
+    files = sorted(glob.glob(frame_root(a.camera, a.night) + "/[0-2][0-9]/*.fits.fz"))
+    if not files:
+        sys.exit(f"skyglow-model: no frames for {a.camera} {a.night}")
+    with Pool(a.jobs) as p:
+        res = sorted(p.map(_block_stats, files, chunksize=8), key=lambda r: r[0])
+    out = a.out or f"cube_{a.camera}_{a.night}.npz"
+    np.savez_compressed(out, t=np.array([r[0] for r in res]),
+                        cube=np.stack([r[1] for r in res]).astype(np.float32),
+                        temp=np.array([r[2] for r in res], float))
+    print(f"{out}: {len(res)} frames")
+
+
+def local_hours(t_ms):
+    return np.array([(lambda d: d.hour + d.minute / 60)(
+        datetime.fromtimestamp(x / 1000, timezone.utc).astimezone(LONDON)) for x in t_ms])
+
+
+def cmd_fit(a):
+    z = np.load(a.cube)
+    t, cube = z["t"], z["cube"]
+    hh = local_hours(t)
+    use = (hh >= a.start) | (hh < a.end) if a.start > a.end else (hh >= a.start) & (hh < a.end)
+    X = cube[:, :, 0] - BLACK                     # medians, above black
+    n, _, ny, nx = X.shape
+    # sky blocks: follow the global sky curve (foreground does not) and sit above black
+    g = X[use, 1].reshape(use.sum(), -1)
+    ref = np.median(g, 1)
+    corr = np.array([np.corrcoef(g[:, j], ref)[0, 1] for j in range(g.shape[1])])
+    sky = (corr > a.min_corr) & (np.median(g, 0) > 5)
+    print(f"{use.sum()} of {n} frames in window, {sky.sum()} of {sky.size} blocks sky")
+    modes = np.zeros((3, 2, ny, nx), np.float32)
+    amp = np.zeros((n, 3, 2), np.float32)
+    for k, name in enumerate("RGB"):
+        A = X[use, k].reshape(use.sum(), -1)
+        U, s, Vt = np.linalg.svd(A[:, sky], full_matrices=False)
+        ev = s ** 2 / np.sum(s ** 2)
+        rr = [np.sqrt(np.mean((A[:, sky] - (U[:, :q] * s[:q]) @ Vt[:q]) ** 2)) for q in (1, 2, 3)]
+        # sign so mode 1 is positive; scale so mode 1 has unit mean on sky
+        sgn = np.sign(Vt[0].mean())
+        T = U[:, :2] * s[:2] * sgn
+        coef, *_ = np.linalg.lstsq(T, A, rcond=None)   # extend to every block
+        m1 = coef[0].reshape(ny, nx); scale = m1.ravel()[sky].mean()
+        modes[k, 0] = m1 / scale
+        modes[k, 1] = coef[1].reshape(ny, nx) / scale
+        M = np.stack([modes[k, 0].ravel()[sky], modes[k, 1].ravel()[sky]], 1)
+        amp[:, k] = np.linalg.lstsq(M, X[:, k].reshape(n, -1)[:, sky].T, rcond=None)[0].T
+        print(f"  {name}: level {A[:, sky].mean():5.1f} ADU  mode-1 share {ev[0]:.5f}  "
+              f"resid rms with 1/2/3 modes {rr[0]:.3f} {rr[1]:.3f} {rr[2]:.3f} ADU")
+    out = a.out or os.path.basename(a.cube).replace("cube_", "model_")
+    np.savez_compressed(out, modes=modes, amp=amp, t=t, sky=sky.reshape(ny, nx), bs=BS, black=BLACK)
+    a1 = amp[:, :, 0]
+    floor = np.median(a1[use, 1][np.argsort(a1[use, 1])[:max(5, use.sum() // 10)]])
+    print(f"\n{out}\n  local   glow G   x floor   R/G    B/G")
+    step = max(1, n // 24)
+    for i in range(0, n, step):
+        print(f"  {hh[i]:5.2f}  {a1[i, 1]:7.2f}   {a1[i, 1] / floor:5.2f}   "
+              f"{a1[i, 0] / a1[i, 1]:.3f}  {a1[i, 2] / a1[i, 1]:.3f}{'' if use[i] else '   (outside window)'}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("cube", help="frames -> block-median cube (run via bigstore-run)")
+    c.add_argument("camera"); c.add_argument("night")
+    c.add_argument("-j", "--jobs", type=int, default=4); c.add_argument("-o", "--out")
+    f = sub.add_parser("fit", help="cube -> two-mode glow model")
+    f.add_argument("cube")
+    f.add_argument("--from", dest="start", type=float, default=20.5, help="window start, London hours")
+    f.add_argument("--to", dest="end", type=float, default=5.5, help="window end, London hours")
+    f.add_argument("--min-corr", type=float, default=0.9)
+    f.add_argument("-o", "--out")
+    a = ap.parse_args()
+    {"cube": cmd_cube, "fit": cmd_fit}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()
