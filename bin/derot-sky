@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""derot-sky — de-rotate a night onto the sky with the fitted camera model.
+
+The astrocam answer to eclipticam's detrans-deep. Instead of rotating the
+image plane about a pole pixel (which smears every star away from the optical
+axis, because the lens distortion is centred on the axis and not the pole),
+each output pixel is a FIXED SKY DIRECTION at a reference time. For every
+frame that direction is turned about the celestial pole by the sidereal angle,
+projected into the frame through the camera model, and sampled. Per frame:
+
+  * the smooth sky glow is subtracted (astro.skyglow.GlowModel, ~3 numbers);
+  * foreground (trees, roof) is masked with the glow model's eroded sky mask;
+  * the frame is weighted by 1 / sky level (sky-limited noise: var ~ sky);
+  * frames whose glow fit is poor (cloud) or that are not astronomically
+    dark are skipped.
+
+Output is the weighted mean and the weight map, so regions seen by fewer
+frames (the sky rotates ~150 deg across a long night, so only the polar cap
+is in view all night) are not dimmed, just noisier.
+
+Steps (both run on muppet, where the frames are):
+
+  derot-sky refine CAM.json NIGHT FRAME_UTC --glow GLOW.npz -o CAM-NIGHT.json
+      Predict the catalogue stars stored in CAM.json for one frame, centroid
+      the real stars near each prediction in the glow-subtracted frame, and
+      refit pointing (az0, alt0, roll). Camera nudges between the solve night
+      and this one are absorbed here.
+  derot-sky stack CAM-NIGHT.json NIGHT --glow GLOW.npz --ref-utc HH:MM:SS
+      [--from HH:MM --to HH:MM (UTC)] [--max-ratio 1.5] -o OUTDIR
+
+Writes OUTDIR/derot-sky.fits (mean, weight extensions) and a preview JPEG.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.skyglow import CameraModel, GlowModel, _enu  # noqa: E402
+
+LAT, LON = 51.3948, -0.2923
+BASE = os.environ.get("BIGSTORE", "/mnt/bigstore/astro-data")
+
+
+def night_frames(night):
+    out = []
+    for p in sorted(glob.glob(f"{BASE}/astrocam-frames/{night}/[0-2][0-9]/*.fits.fz")):
+        ms = int(os.path.basename(p).split(".")[0])
+        out.append((datetime.fromtimestamp(ms / 1000, timezone.utc), p))
+    return sorted(out)
+
+
+EXPTIME_S = 59.9   # astrocam; frame timestamp (filename = DATE-OBS) is exposure START
+
+
+def mid(dt):
+    return dt + timedelta(seconds=EXPTIME_S / 2)
+
+
+def load_binned(path):
+    from astropy.io import fits
+    with fits.open(path) as h:
+        d = h[1].data
+    H, W = d.shape
+    return d[:H // 2 * 2, :W // 2 * 2].reshape(H // 2, 2, W // 2, 2).sum(axis=(1, 3), dtype=np.float32)
+
+
+def utc_on_night(night, hhmmss):
+    nd = datetime.strptime(night, "%Y-%m-%d").date()
+    t = datetime.strptime(hhmmss, "%H:%M:%S" if hhmmss.count(":") == 2 else "%H:%M").time()
+    day = nd if t.hour >= 12 else nd + timedelta(days=1)
+    return datetime.combine(day, t, tzinfo=timezone.utc)
+
+
+def sun_alt(dt):
+    import warnings
+    from astropy.coordinates import AltAz, EarthLocation, get_sun
+    from astropy.time import Time
+    import astropy.units as u
+    warnings.filterwarnings("ignore")
+    T = Time(dt)
+    return get_sun(T).transform_to(AltAz(obstime=T, location=EarthLocation(lat=LAT * u.deg, lon=LON * u.deg))).alt.deg
+
+
+def star_enu(radec, dt):
+    import warnings
+    from astropy.coordinates import AltAz, EarthLocation, SkyCoord
+    from astropy.time import Time
+    import astropy.units as u
+    warnings.filterwarnings("ignore")
+    radec = np.asarray(radec)
+    aa = SkyCoord(radec[:, 0] * u.deg, radec[:, 1] * u.deg).transform_to(
+        AltAz(obstime=Time(dt), location=EarthLocation(lat=LAT * u.deg, lon=LON * u.deg), pressure=0))
+    return _enu(np.radians(aa.az.deg), np.radians(aa.alt.deg))
+
+
+def cmd_refine(a):
+    from scipy.optimize import least_squares
+    cm = CameraModel(a.camera)
+    gm = GlowModel(a.glow)
+    t = utc_on_night(a.night, a.frame_utc)
+    dt, path = min(night_frames(a.night), key=lambda tp: abs((tp[0] - t).total_seconds()))
+    img = gm.subtract(load_binned(path))
+    V = star_enu(cm.p["stars_radec_j2000"], mid(dt))
+    px, py = cm.project(V)
+    H, W = img.shape
+    noise = 1.4826 * np.median(np.abs(img - np.median(img)))
+    # 1. coarse global shift: score = summed (max-filtered, clipped) image at the
+    #    predicted positions, over a +/-search_shift grid. A wrong nearest-peak
+    #    match is common in a dense field; a whole-pattern shift is not.
+    from scipy.ndimage import maximum_filter
+    sm = maximum_filter(np.clip(img / noise, 0, 50), size=3)
+    inb = (px > 90) & (px < W - 90) & (py > 90) & (py < H - 90)
+    xi0, yi0 = np.round(px[inb]).astype(int), np.round(py[inb]).astype(int)
+    R = a.search_shift
+    best = (-1, 0, 0)
+    for dy in range(-R, R + 1, 2):
+        for dx in range(-R, R + 1, 2):
+            sc = sm[yi0 + dy, xi0 + dx].sum()
+            if sc > best[0]:
+                best = (sc, dx, dy)
+    base = sm[yi0, xi0].sum()
+    print(f"  coarse shift ({best[1]:+d},{best[2]:+d}) px: pattern score {best[0]:.0f} vs {base:.0f} unshifted")
+    px, py = px + best[1], py + best[2]
+    meas, keep = [], []
+    r = a.search
+    for i, (x, y) in enumerate(zip(px, py)):
+        xi, yi = int(round(x)), int(round(y))
+        if not (r <= xi < W - r and r <= yi < H - r):
+            continue
+        cut = img[yi - r:yi + r + 1, xi - r:xi + r + 1]
+        j = np.unravel_index(np.argmax(cut), cut.shape)
+        if cut[j] < 8 * noise:
+            continue
+        cy, cx = yi - r + j[0], xi - r + j[1]
+        s = img[cy - 2:cy + 3, cx - 2:cx + 3].clip(0)
+        if s.shape != (5, 5) or s.sum() <= 0:
+            continue
+        gy, gx = np.mgrid[-2:3, -2:3]
+        meas.append((cx + (s * gx).sum() / s.sum(), cy + (s * gy).sum() / s.sum()))
+        keep.append(i)
+    meas, keep = np.array(meas), np.array(keep)
+    print(f"{path}\n  {len(keep)} of {len(V)} catalogue stars found within {r} px")
+    off = np.hypot(px[keep] - meas[:, 0], py[keep] - meas[:, 1])
+    print(f"  before refine: median offset {np.median(off):.2f} px")
+    p0 = dict(cm.p)
+
+    def resid(q):
+        p0.update(az0=q[0], alt0=q[1], roll=q[2])
+        json.dump(p0, open(a.out + ".tmp", "w"))
+        m = CameraModel(a.out + ".tmp")
+        x, y = m.project(V[keep])
+        return np.concatenate([x - meas[:, 0], y - meas[:, 1]])
+
+    s = least_squares(resid, [cm.p["az0"], cm.p["alt0"], cm.p["roll"]], loss="soft_l1", f_scale=1.0)
+    os.remove(a.out + ".tmp")
+    d = np.hypot(*np.split(s.fun, 2))
+    p0.update(az0=float(s.x[0]), alt0=float(s.x[1]), roll=float(s.x[2]),
+              refined_on=f"{a.night} {dt.isoformat()}", refine_median_px=float(np.median(d)),
+              refine_n=int(len(keep)))
+    json.dump(p0, open(a.out, "w"), indent=1)
+    print(f"  after refine:  median offset {np.median(d):.2f} px  (pointing moved "
+          f"{np.degrees(np.arccos(np.clip(_enu(np.array(cm.p['az0']), np.array(cm.p['alt0'])) @ _enu(np.array(s.x[0]), np.array(s.x[1])), -1, 1))):.3f} deg, "
+          f"roll {np.degrees(s.x[2] - cm.p['roll']):+.3f} deg)\n  -> {a.out}")
+
+
+def _stack_chunk(args):
+    import cv2
+    chunk, cam_path, glow_path, t_ref, shape, erode = args
+    cm, gm = CameraModel(cam_path), GlowModel(glow_path)
+    H, W = shape
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    Vref = cm.unproject(xx, yy)
+    S = np.zeros(shape, np.float64)
+    Wt = np.zeros(shape, np.float64)
+    used = []
+    mask = None
+    for dt, path in chunk:
+        raw = load_binned(path)
+        img, amp, rms, level = gm.subtract(raw, return_fit=True)
+        if level <= 0:
+            continue
+        if mask is None:
+            mask = gm.sky_mask(img.shape, erode).astype(np.float32)
+        x, y = cm.project(cm.sky_motion(Vref, (mid(dt) - t_ref).total_seconds()))
+        mx, my = x.astype(np.float32), y.astype(np.float32)
+        samp = cv2.remap(img, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        msk = cv2.remap(mask, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        msk = (msk > 0.999).astype(np.float32)
+        w = 1.0 / level
+        S += w * msk * samp
+        Wt += w * msk
+        used.append((dt.isoformat(), float(rms), float(level)))
+    return S, Wt, used
+
+
+def cmd_stack(a):
+    from multiprocessing import Pool
+    from astropy.io import fits
+    frames = night_frames(a.night)
+    t_ref = utc_on_night(a.night, a.ref_utc)
+    if a.start:
+        t0, t1 = utc_on_night(a.night, a.start), utc_on_night(a.night, a.end)
+        frames = [f for f in frames if t0 <= f[0] < t1]
+    frames = [f for f in frames if sun_alt(f[0]) < -18]
+    # clean-sky selection from the night's block cube (skyglow-model cube), the
+    # same green-calibrated test as `skyglow-model check`: residual of the glow
+    # fit vs the sky-limited block noise (0.276 ADU at G level 29.6, ~sqrt(level))
+    z = np.load(f"{BASE}/astrocam-frames/{a.night}/skyglow-cube.npz")
+    g = np.load(a.glow)
+    gmodes, gsky = (g["modes"][1] if g["modes"].ndim == 4 else g["modes"]), g["sky"].ravel()
+    M = gmodes.reshape(len(gmodes), -1)[:, gsky].T
+    Xc = z["cube"][:, 1, 0].reshape(len(z["t"]), -1)[:, gsky] - 64.0
+    amp = np.linalg.lstsq(M, Xc.T, rcond=None)[0].T
+    ratio = np.sqrt(np.mean((Xc - amp @ M.T) ** 2, 1)) / (0.276 * np.sqrt(np.clip(Xc.mean(1), 1, None) / 29.6))
+    clean = {int(t) for t, r in zip(z["t"], ratio) if r < a.max_ratio}
+    n0 = len(frames)
+    frames = [f for f in frames if int(os.path.basename(f[1]).split(".")[0]) in clean]
+    print(f"{n0} astronomically dark frames, {len(frames)} clean (glow-fit ratio < {a.max_ratio}); ref {t_ref.isoformat()}")
+    shape = load_binned(frames[0][1]).shape
+    chunks = [frames[i::a.jobs] for i in range(a.jobs)]
+    with Pool(a.jobs) as p:
+        parts = p.map(_stack_chunk, [(c, a.camera, a.glow, t_ref, shape, a.erode) for c in chunks])
+    S = sum(pt[0] for pt in parts)
+    Wt = sum(pt[1] for pt in parts)
+    used = sorted(u for pt in parts for u in pt[2])
+    mean = np.where(Wt > 0, S / np.maximum(Wt, 1e-30), np.nan).astype(np.float32)
+    nmax = Wt.max()
+    print(f"{len(used)} frames stacked (glow-fit ratio <= {a.max_ratio})")
+    out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
+    hdr = fits.Header()
+    hdr["NIGHT"] = a.night; hdr["REFUTC"] = t_ref.isoformat(); hdr["NFRAMES"] = len(used)
+    hdr["CAMMODEL"] = os.path.basename(a.camera); hdr["GLOWMODL"] = os.path.basename(a.glow)
+    hdr["COMMENT"] = "weighted mean of glow-subtracted frames, re-projected to the sky at REFUTC"
+    fits.HDUList([fits.PrimaryHDU(mean, hdr),
+                  fits.ImageHDU((Wt / nmax).astype(np.float32), name="WEIGHT")]).writeto(out / "derot-sky.fits", overwrite=True)
+    json.dump(used, open(out / "derot-sky-frames.json", "w"))
+    # preview: asinh stretch over well-covered sky, black just below zero
+    from PIL import Image
+    good = Wt > 0.3 * nmax
+    v = mean[good]
+    sig = 1.4826 * np.median(np.abs(v - np.median(v)))
+    lo, hi = np.median(v) - 1.0 * sig, np.percentile(v, 99.8)
+    s = np.clip((np.nan_to_num(mean, nan=lo) - lo) / (hi - lo), 0, 1)
+    s = np.arcsinh(s * a.asinh) / np.arcsinh(a.asinh)
+    s[Wt < 0.05 * nmax] = 0
+    Image.fromarray((s * 255).astype(np.uint8)).save(out / "derot-sky.jpg", quality=92)
+    print(f"-> {out}/derot-sky.fits, derot-sky.jpg  (noise sigma {sig:.3f} ADU in the well-covered region)")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("refine"); r.add_argument("camera"); r.add_argument("night"); r.add_argument("frame_utc")
+    r.add_argument("--glow", required=True); r.add_argument("--search", type=int, default=3)
+    r.add_argument("--search-shift", type=int, default=80)
+    r.add_argument("-o", "--out", required=True)
+    s = sub.add_parser("stack"); s.add_argument("camera"); s.add_argument("night")
+    s.add_argument("--glow", required=True); s.add_argument("--ref-utc", required=True)
+    s.add_argument("--from", dest="start"); s.add_argument("--to", dest="end")
+    s.add_argument("--max-ratio", type=float, default=1.5)
+    s.add_argument("--erode", type=int, default=2)
+    s.add_argument("--asinh", type=float, default=8.0)
+    s.add_argument("-j", "--jobs", type=int, default=4)
+    s.add_argument("-o", "--out", required=True)
+    a = ap.parse_args()
+    {"refine": cmd_refine, "stack": cmd_stack}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

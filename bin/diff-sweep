@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 from astro.frames import list_night_frames
 from astro.process import bayer
+from astro.skyglow import GlowModel
 from astro.present.render import (
     render_asinh_jpeg, render_asinh_jpeg_rgb,
     render_signed_asinh_jpeg, render_signed_asinh_jpeg_rgb,
@@ -173,39 +174,6 @@ def load_fits_binned(path, rgb_pattern):
     if rgb_pattern is not None:
         return bayer.bin2x2_rgb(d, rgb_pattern)
     return bayer.bin2x2(d)
-
-
-class GlowModel:
-    """Smooth sky-glow model from `skyglow-model fit` (or a pooled basis):
-    green modes [q, Y, X] in 24-superpixel blocks over the binned frame.
-    The R, G, B glow maps agree in shape to ~2% (2026-10-07), so the green
-    modes serve the grey 2x2-sum frame too; only the amplitudes are fitted."""
-
-    def __init__(self, path):
-        z = np.load(path)
-        modes = z["modes"][1] if z["modes"].ndim == 4 else z["modes"]
-        self.bs = int(z["bs"]) if "bs" in z else 24
-        self.black = 4.0 * float(z["black"]) if "black" in z else 256.0
-        self.sky = z["sky"].astype(bool)
-        ny, nx = self.sky.shape
-        self.M = modes.reshape(len(modes), -1)[:, self.sky.ravel()].T
-        from scipy.interpolate import RectBivariateSpline
-        self._splines = [RectBivariateSpline((np.arange(ny) + 0.5) * self.bs,
-                                             (np.arange(nx) + 0.5) * self.bs, m)
-                         for m in modes]
-        self._full = None
-
-    def subtract(self, frame):
-        f = frame.astype(np.float32) - self.black
-        h, w = f.shape
-        if self._full is None:
-            self._full = np.stack([sp(np.arange(h), np.arange(w)) for sp in self._splines]).astype(np.float32)
-        b = self.bs
-        ny, nx = self.sky.shape
-        blk = np.median(f[:ny * b, :nx * b].reshape(ny, b, nx, b)
-                        .transpose(0, 2, 1, 3).reshape(ny, nx, -1), axis=2)
-        amp = np.linalg.lstsq(self.M, blk[self.sky], rcond=None)[0]
-        return f - np.tensordot(amp, self._full, axes=1)
 
 
 def close_window(idx, w_start, w_end, recent, rgb_pattern,
