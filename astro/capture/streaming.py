@@ -279,6 +279,34 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
     legacy_fh.close()
 
 
+# A day-side process can still hold the sensor when the night stream starts:
+# on eclipticam the gardencam daemon takes ~80 s captures every 3 min around
+# sunset on the same imx708. Crashing out made systemd restart-loop the unit
+# ~6 times per dusk, which tripped logwatch. Wait for the camera instead.
+CAMERA_WAIT_S = 300
+CAMERA_POLL_S = 10
+
+
+def _open_camera(Picamera2, cam_idx: int, log: logging.Logger):
+    deadline = time.monotonic() + CAMERA_WAIT_S
+    waited = False
+    while True:
+        try:
+            cam = Picamera2(camera_num=cam_idx)
+        except RuntimeError as e:
+            if time.monotonic() >= deadline:
+                raise
+            if not waited:
+                log.info(f"camera {cam_idx} busy ({e}); waiting up to "
+                         f"{CAMERA_WAIT_S}s for it to be released")
+                waited = True
+            time.sleep(CAMERA_POLL_S)
+            continue
+        if waited:
+            log.info(f"camera {cam_idx} acquired after waiting")
+        return cam
+
+
 def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
     """Open the camera, stream frames until SIGTERM or saturation.
 
@@ -290,7 +318,7 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
     # Lazy import: Picamera2 only exists on the Pi.
     from picamera2 import Picamera2
 
-    cam = Picamera2(camera_num=cfg.cam_idx)
+    cam = _open_camera(Picamera2, cfg.cam_idx, log)
     cfgp = cam.create_video_configuration(
         raw={"size": cfg.sensor_size, "format": cfg.bayer_format},
         buffer_count=4,
