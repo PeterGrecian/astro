@@ -74,11 +74,14 @@ def load_curve(csv_path: Path, pedestal=None):
 
 
 def night_exptime(csv_path: Path):
-    """EXPTIME of the night's frames, from the header of the first frame the
-    CSV names (the CSV itself has no exposure column). None if unreadable."""
+    """EXPTIME of the night's frames: the CSV's exptime column (nightly-cam
+    writes it from 2026-10-09), else the header of the first frame the CSV
+    names (older nights). None if neither is readable."""
     try:
         with open(csv_path, newline="") as f:
             first = next(csv.DictReader(f))
+        if first.get("exptime"):
+            return float(first["exptime"])
         from astropy.io import fits
         return float(fits.getheader(first["filename"], 1)["EXPTIME"])
     except Exception:
@@ -200,11 +203,13 @@ def main():
     # Exposure: the curves are mean ADU per FRAME, so a night shot with a
     # different exposure plots stops away from the rest for no sky reason
     # (astrocam 2026-10-09: 15 s subs, 1/4 the counts, -2 stops). Scale every
-    # night to the most common exposure among those plotted; a run of
-    # identical nights is untouched.
+    # night to the camera's reference exposure (or the most common one
+    # plotted); nights already at it are untouched.
     exps = {n: night_exptime(c) for n, c in nights}
     known = [round(e, 1) for e in exps.values() if e]
-    ref_exp = max(set(known), key=known.count) if known else None
+    # camera.json's sky_clear_ref_exptime is the basis nightly-cam's verdict
+    # uses, so the chart and the verdict agree; else the commonest exposure
+    ref_exp = cfg.get("sky_clear_ref_exptime") or (max(set(known), key=known.count) if known else None)
 
     plotted = 0
     x_seen = []          # anchor-axis extent actually drawn, for set_xlim
