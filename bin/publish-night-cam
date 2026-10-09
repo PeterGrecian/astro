@@ -171,12 +171,22 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     # near-uniform translation; undistort + shift each frame by -v*dt and
     # max-stack so the 60s streaks register into one sharp high-SNR streak
     # per window). Self-skips (exit 0) for other cameras.
+    # Background for the detrans pair: a per-pixel running median in the
+    # camera frame (glare, glass reflections, lit foreground), split at glare
+    # switches, plus a fixed foreground mask if the camera has one. Built for
+    # eclipticam 2026-10-09; DETRANS_BG_MEDIAN=0 restores the old mesh.
+    detrans_bg=()
+    if [[ "${DETRANS_BG_MEDIAN:-21}" -gt 0 ]]; then
+        detrans_bg=(--bg-median "${DETRANS_BG_MEDIAN:-21}")
+        [[ -s "$REPO/${CAMERA}/foreground-mask.png" ]] \
+            && detrans_bg+=(--fg-mask "$REPO/${CAMERA}/foreground-mask.png")
+    fi
     echo "--- detrans-sweep (registered-streak animation)"
     if "$PY" "$HERE/detrans-sweep" \
             --camera "$CAMERA" --night "$NIGHT" --mode max \
             --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" \
             --bin "$DETRANS_BIN" --fps "$FPS" \
-            --out "${night_dir}/sweep-detrans.mp4"; then
+            "${detrans_bg[@]}" --out "${night_dir}/sweep-detrans.mp4"; then
         [[ -s "${night_dir}/sweep-detrans.mp4" ]] \
             && echo "wrote ${night_dir}/sweep-detrans.mp4"
     else
@@ -198,7 +208,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             --camera "$CAMERA" --night "$NIGHT" --mode deep \
             --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" \
             --bin "$DETRANS_BIN" --fps "$FPS" \
-            --out "${night_dir}/sweep-detrans-deep.mp4"; then
+            "${detrans_bg[@]}" --out "${night_dir}/sweep-detrans-deep.mp4"; then
         [[ -s "${night_dir}/sweep-detrans-deep.mp4" ]] \
             && echo "wrote ${night_dir}/sweep-detrans-deep.mp4"
     else

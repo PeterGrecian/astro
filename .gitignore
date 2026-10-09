@@ -6,6 +6,8 @@ __pycache__/
 *.npy
 *.jpg
 *.png
+# a camera's foreground mask is configuration (bin/detrans-sweep --build-fg-mask), not a render
+!*/foreground-mask.png
 *.log
 tmp/
 

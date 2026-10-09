@@ -136,11 +136,25 @@ def stretch_u8(img, lo_pct=50, hi_pct=99.6, linear=False):
     own stretch (fits_array_to_surface) tuned for the deep mean-bg
     image — black at the noise floor, white at p97.4, so the faint
     stars span the full range."""
-    lo, hi = np.percentile(img, lo_pct), np.percentile(img, hi_pct)
-    x = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1 if linear else None)
+    ok = np.isfinite(img)              # NaN = masked foreground -> black
+    lo, hi = np.percentile(img[ok], lo_pct), np.percentile(img[ok], hi_pct)
+    x = np.clip((np.where(ok, img, lo) - lo) / max(hi - lo, 1e-6), 0, 1 if linear else None)
     if linear:
         return (x * 255).astype(np.uint8)
     return np.clip(np.arcsinh(x * 12) / np.arcsinh(12) * 255, 0, 255).astype(np.uint8)
+
+
+def stretch_signed_u8(img, hi_pct=99.8, asinh=8.0, sig_below=1.0):
+    """For background-subtracted (signed, zero-centred) images: black
+    sig_below noise-sigmas below the median, white at hi_pct, asinh between.
+    A max of N frames sits above zero, so it takes a negative sig_below."""
+    v = img[::4, ::4]
+    v = v[np.isfinite(v)]              # NaN = masked foreground -> black
+    med = float(np.median(v))
+    sig = 1.4826 * float(np.median(np.abs(v - med)))
+    lo, hi = med - sig_below * sig, float(np.percentile(v, hi_pct))
+    x = np.clip((np.where(np.isfinite(img), img, lo) - lo) / max(hi - lo, 1e-6), 0, 1)
+    return (np.arcsinh(x * asinh) / np.arcsinh(asinh) * 255).astype(np.uint8)
 
 
 def local_bg_subtract(img, down=4, med=13):
@@ -155,6 +169,139 @@ def local_bg_subtract(img, down=4, med=13):
     bg = cv2.resize(bg_small, (img.shape[1], img.shape[0]),
                     interpolation=cv2.INTER_LINEAR)
     return np.clip(img - bg, 0, None)
+
+
+def block_levels(f, g=8):
+    """g x g grid of block medians (every 7th pixel): the frame's level map."""
+    H, W = f.shape
+    h, w = H // g, W // g
+    b = f[:h * g, :w * g].reshape(g, h, g, w).transpose(0, 2, 1, 3).reshape(g, g, -1)
+    return np.median(b[:, :, ::7], axis=2)
+
+
+class RunningMedian:
+    """Per-pixel temporal median background, in the CAMERA frame.
+
+    eclipticam points far from the pole, so stars drift ~5 px/min against a
+    2-3 px FWHM: across N=21 one-minute frames a pixel holds a star for about
+    one frame, and the median is the static scene alone (glare, glass
+    reflections, dust donuts, lit houses) at full resolution and any shape.
+    Subtract it BEFORE undistort/registration, where that scene is fixed.
+
+    Glare that SWITCHES (a house light, 2026-10-07 03:13-03:56 UTC: 500-900
+    ADU across the whole frame) breaks a median that straddles the switch.
+    So a level pass splits the night into segments wherever at least
+    `step_blocks` of the 8x8 blocks jump by more than `step_adu` between
+    consecutive frames (10 and 10 at bin 2: glare flicker while the light is
+    on moves at most 7 blocks, a passing headlight is a one-frame blip the
+    median already absorbs). Each frame's median uses only its own segment;
+    frames in a segment shorter than `min_seg` (the ramp of a switch) return
+    None and are left out of the sweep. The level map is cached as
+    `levels_path` so the max and deep runs share one pass.
+
+    Raw frames are held as uint16 (2x2 sums fit), ~6 MB each binned, and the
+    median runs in row strips, so 21 frames peak ~480 MB: sized for the 1 GB
+    eclipticam Pi."""
+
+    def __init__(self, fs, n_bin, n, levels_path=None, step_adu=10.0, step_blocks=10, min_seg=5):
+        self.fs, self.bin, self.n, self.min_seg = fs, n_bin, max(3, n | 1), min_seg
+        self.raw = {}
+        names = [Path(f).name for f in fs]
+        L = None
+        if levels_path and Path(levels_path).exists():
+            z = np.load(levels_path)
+            if list(z["names"]) == names:
+                L = z["L"]
+        if L is None:
+            print(f"background: level pass over {len(fs)} frames", flush=True)
+            L = np.array([block_levels(load_bin(f, n_bin)) for f in fs])
+            if levels_path:
+                np.savez(levels_path, L=L, names=np.array(names))
+        thr = step_adu * (n_bin / 2.0) ** 2
+        jumps = (np.abs(np.diff(L, axis=0)) > thr).reshape(len(L) - 1, -1).sum(1) >= step_blocks
+        self.seg = np.concatenate([[0], np.cumsum(jumps)])
+        self.bounds = {}
+        for sid in np.unique(self.seg):
+            k = np.nonzero(self.seg == sid)[0]
+            self.bounds[sid] = (int(k[0]), int(k[-1]) + 1)
+        short = sum(b - a for a, b in self.bounds.values() if b - a < min_seg)
+        print(f"background: {len(self.bounds)} segments ({int(jumps.sum())} glare switches); "
+              f"{short} frames in switch ramps left out")
+
+    def _get(self, i):
+        if i not in self.raw:
+            self.raw[i] = np.clip(load_bin(self.fs[i], self.bin), 0, 65535).astype(np.uint16)
+        return self.raw[i]
+
+    def subtracted(self, i):
+        a, b = self.bounds[self.seg[i]]
+        if b - a < self.min_seg:
+            return None
+        h = self.n // 2
+        lo = min(max(a, i - h), max(a, b - self.n))
+        idx = range(lo, min(b, lo + self.n))
+        for k in [k for k in self.raw if k < lo]:      # windows advance monotonically
+            del self.raw[k]
+        frames = [self._get(k) for k in idx]
+        out = self._get(i).astype(np.float32)
+        H = out.shape[0]
+        for r0 in range(0, H, 128):          # row strips: the median's copy stays ~1/10 of the stack
+            r1 = min(H, r0 + 128)
+            out[r0:r1] -= np.median(np.stack([f[r0:r1] for f in frames]), axis=0)
+        # coarse residual sky: whatever the median could not follow within the
+        # minute (glare settling after a switch, dawn, moonlight) is smooth, so
+        # 48-px block medians, upsampled, take it without touching stars
+        b = 48
+        h, w = H // b, out.shape[1] // b
+        blk = np.median(out[:h * b, :w * b].reshape(h, b, w, b).transpose(0, 2, 1, 3).reshape(h, w, -1)[:, :, ::3], axis=2)
+        out -= cv2.resize(cv2.GaussianBlur(blk.astype(np.float32), (3, 3), 0), (out.shape[1], H),
+                          interpolation=cv2.INTER_CUBIC)
+        return out
+
+def build_fg_mask(fs, n_bin, out, n_med=21, step=6):
+    """Foreground mask for a fixed camera, from one clear night (no glare
+    switches in the frames given). Two maps:
+      S = static scene (median of a frame sample): roofs and trees are dark
+          silhouettes against the glowing sky, so the horizon in each column
+          is the first point, going down the lower part of the frame, where S
+          drops below 0.8 of the brightest sky above it;
+      V = typical |running-median residual| per pixel: the sky sits at the
+          noise floor, flickering glare well above it, so glare is the
+          edge-connected region where V > 1.8x its median.
+    Everything below the horizon, plus the glare, is foreground. Written as a
+    binary PNG at the binned frame size (255 = foreground). 2026-10-07: 21.6%."""
+    from scipy import ndimage as ndi
+    rm = RunningMedian(fs, n_bin, n_med)
+    V = []
+    for i in range(n_med // 2, len(fs) - n_med // 2, step):
+        r = rm.subtracted(i)
+        if r is not None:
+            V.append(np.abs(r))
+    V = np.median(np.stack(V), axis=0)
+    S = np.median(np.stack([load_bin(fs[i], n_bin) for i in range(0, len(fs), 2 * step)]), axis=0)
+    H, W = S.shape
+    Ss = cv2.blur(S.astype(np.float32), (7, 7)) - 64.0 * n_bin * n_bin
+    top = np.maximum.accumulate(Ss, axis=0)
+    dark = (Ss < 0.8 * top) & (np.arange(H)[:, None] > H * 0.45)
+    hz = np.array([np.argmax(dark[:, x]) if dark[:, x].any() else H for x in range(W)])
+    hz = ndi.minimum_filter1d(ndi.median_filter(hz, 15), 9) - 6
+    m = np.arange(H)[:, None] >= hz[None, :]
+    Vs = cv2.blur(V.astype(np.float32), (15, 15))
+    lab, _ = ndi.label(ndi.binary_dilation(Vs > 1.8 * np.median(Vs), iterations=6))
+    edge = np.unique(np.concatenate([lab[-1], lab[:, -1], lab[:, 0]]))
+    m |= np.isin(lab, edge[edge > 0])
+    cv2.imwrite(str(out), (m * 255).astype(np.uint8))
+    print(f"foreground mask -> {out}: {100 * m.mean():.1f}% masked, horizon rows "
+          f"p10/50/90 {np.percentile(hz, [10, 50, 90]).astype(int).tolist()}")
+
+
+def load_fg_mask(path, H, W):
+    m = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if m is None:
+        raise SystemExit(f"cannot read foreground mask {path}")
+    if m.shape != (H, W):
+        m = cv2.resize(m, (W, H), interpolation=cv2.INTER_NEAREST)
+    return m > 127
 
 
 def main():
@@ -188,6 +335,17 @@ def main():
     ap.add_argument("--allow-mosaic-warp", action="store_true",
                     help="permit --bin 1 (warps the raw Bayer mosaic — "
                          "checkerboard artifacts). For debugging only.")
+    ap.add_argument("--bg-median", type=int, default=0, metavar="N",
+                    help="subtract a per-pixel running median of N frames (odd, e.g. 21) "
+                         "in the camera frame before registering: removes glare, glass "
+                         "reflections and the lit foreground; residuals kept signed. "
+                         "0 = off (the old behaviour)")
+    ap.add_argument("--fg-mask", type=Path, default=None,
+                    help="binary PNG (255 = foreground) in the camera frame: those pixels go "
+                         "black in the output, carried through undistort and registration")
+    ap.add_argument("--build-fg-mask", type=Path, default=None, metavar="PNG",
+                    help="build the foreground mask from this night's frames (a clear night, "
+                         "no glare switches; restrict with --frames-glob) and exit")
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--max-windows", type=int, default=None,
                     help="process only the first N output frames (slice)")
@@ -281,8 +439,13 @@ def main():
     print(f"{len(starts)} output frames "
           f"(window {args.window_min}min, step {args.step_min}min)")
 
+    if args.build_fg_mask:
+        build_fg_mask(fs, args.bin, args.build_fg_mask, n_med=args.bg_median or 21)
+        return 0
+
     # peek one frame for geometry + map
     H, W = load_bin(fs[0], args.bin).shape
+    fg = load_fg_mask(args.fg_mask, H, W) if args.fg_mask else None
     mapx, mapy = undistort_map(H, W, k1, k2)
     a = np.radians(angle)
     dv = np.array([np.cos(a), np.sin(a)])
@@ -311,10 +474,18 @@ def main():
     # NEXT window's first frame is dead — evict it (see prune_cache below).
     cache = {}
 
+    rmed = (RunningMedian(fs, args.bin, args.bg_median,
+                          levels_path=args.out.parent / f"bg-levels-bin{args.bin}.npz")
+            if args.bg_median else None)
+    if rmed:
+        print(f"background: running median of {rmed.n} frames (camera frame)")
+
     def get_und(i):
         if i not in cache:
-            cache[i] = cv2.remap(load_bin(fs[i], args.bin), mapx, mapy,
-                                 cv2.INTER_LINEAR)
+            f = rmed.subtracted(i) if rmed else load_bin(fs[i], args.bin)
+            if f is not None and fg is not None:
+                f[fg] = np.nan     # NaN spreads through remap/warp/max/mean: the union stays black
+            cache[i] = None if f is None else cv2.remap(f, mapx, mapy, cv2.INTER_LINEAR)
         return cache[i]
 
     def prune_cache(min_keep_idx):
@@ -326,6 +497,8 @@ def main():
     for wi, w0 in enumerate(starts):
         w1 = w0 + win_s
         idx = np.where((ts >= w0) & (ts < w1))[0]
+        if rmed:              # frames in a glare switch's ramp have no clean background
+            idx = np.array([i for i in idx if get_und(i) is not None], dtype=int)
         if len(idx) == 0:
             continue
         wt0 = ts[idx[0]]
@@ -339,8 +512,13 @@ def main():
                 M = np.float32([[1, 0, sh[0]], [0, 1, sh[1]]])
                 acc += cv2.warpAffine(get_und(i), M, (W, H),
                                       flags=cv2.INTER_LINEAR)
-            deep = local_bg_subtract((acc / len(idx)).astype(np.float32))
-            out8 = stretch_u8(deep, lo_pct=13.0, hi_pct=97.4, linear=True)
+            deep = (acc / len(idx)).astype(np.float32)
+            if not rmed:      # the running median already took the background
+                deep = local_bg_subtract(deep)
+            if rmed:          # signed residuals: black just below zero, asinh as derot-sky
+                out8 = stretch_signed_u8(deep)
+            else:
+                out8 = stretch_u8(deep, lo_pct=13.0, hi_pct=97.4, linear=True)
         else:
             # MAX: overlap the 60s streaks into one bright streak.
             acc = None
@@ -350,7 +528,9 @@ def main():
                 w = cv2.warpAffine(get_und(i), M, (W, H),
                                    flags=cv2.INTER_LINEAR)
                 acc = w if acc is None else np.maximum(acc, w)
-            out8 = stretch_u8(acc)
+            # a max of ~10 noise samples sits ~1.5 sigma up: black one sigma above
+            # its median clears that floor, as diff-sweep's --noise-floor-mult does
+            out8 = stretch_signed_u8(acc, sig_below=-1.0, hi_pct=99.9) if rmed else stretch_u8(acc)
         # Crop the barrel-undistort black border (per-edge, mode-specific —
         # see CROP_FRAC). Undistorting k1=-0.636 leaves a lens-shaped valid
         # region inside black wedges; a full black-free crop would discard
