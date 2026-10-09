@@ -73,6 +73,18 @@ def load_curve(csv_path: Path, pedestal=None):
     return np.array([r[0] for r in rows]), vals
 
 
+def night_exptime(csv_path: Path):
+    """EXPTIME of the night's frames, from the header of the first frame the
+    CSV names (the CSV itself has no exposure column). None if unreadable."""
+    try:
+        with open(csv_path, newline="") as f:
+            first = next(csv.DictReader(f))
+        from astropy.io import fits
+        return float(fits.getheader(first["filename"], 1)["EXPTIME"])
+    except Exception:
+        return None
+
+
 def to_anchor_axis(times, night_str: str):
     """Map real datetimes to a shared 21:00 → 05:00 axis anchored at
     a single reference date. A time of 23:00 on night N becomes the
@@ -185,6 +197,15 @@ def main():
     # "not a recent night") but coloured, not black.
     latest_night = nights[-1][0] if nights else None
 
+    # Exposure: the curves are mean ADU per FRAME, so a night shot with a
+    # different exposure plots stops away from the rest for no sky reason
+    # (astrocam 2026-10-09: 15 s subs, 1/4 the counts, -2 stops). Scale every
+    # night to the most common exposure among those plotted; a run of
+    # identical nights is untouched.
+    exps = {n: night_exptime(c) for n, c in nights}
+    known = [round(e, 1) for e in exps.values() if e]
+    ref_exp = max(set(known), key=known.count) if known else None
+
     plotted = 0
     x_seen = []          # anchor-axis extent actually drawn, for set_xlim
     for i, (night_str, csv_p) in enumerate(nights):
@@ -202,13 +223,17 @@ def main():
             pedestal = float(np.percentile(vals, 1))
         # Use small positive floor for the log: signal at or below
         # pedestal becomes ~0 stops, not a -10 clip artefact.
-        signal = np.maximum(vals - pedestal, 0.5)
+        e = exps.get(night_str)
+        scale = ref_exp / e if (ref_exp and e and abs(e - ref_exp) > 0.5) else 1.0
+        signal = np.maximum((vals - pedestal) * scale, 0.5)
         # Per-night dark-trough index, shown in the legend. Replaces the
         # clear/cloudy threshold line that used to be drawn here: the line
         # was the cut, this is the measurement it was cutting on, graded
         # rather than binary and readable straight off the y-axis.
         trough = dark_trough_stops(times, signal)
         idx = f"  {trough:5.2f}" if trough is not None else "      -"
+        if scale != 1.0:
+            idx += f"  ({e:g} s, x{scale:.1f})"
         xs = to_anchor_axis(times, night_str)
         is_latest = night_str == latest_night
         is_ref = night_str in ref_set

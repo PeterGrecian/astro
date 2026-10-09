@@ -59,15 +59,24 @@ LAT, LON = 51.3948, -0.2923
 BASE = os.environ.get("BIGSTORE", "/mnt/bigstore/astro-data")
 
 
+EXPTIME_S = 59.9   # astrocam default; night_frames() replaces it from the night's own header
+                   # (15 s subs from 2026-10-09). Frame timestamp (filename = DATE-OBS) is
+                   # exposure START. Set before any Pool forks, so workers inherit it.
+
+
 def night_frames(night):
+    global EXPTIME_S
     out = []
     for p in sorted(glob.glob(f"{BASE}/astrocam-frames/{night}/[0-2][0-9]/*.fits.fz")):
         ms = int(os.path.basename(p).split(".")[0])
         out.append((datetime.fromtimestamp(ms / 1000, timezone.utc), p))
+    if out:
+        from astropy.io import fits
+        try:
+            EXPTIME_S = float(fits.getheader(out[len(out) // 2][1], 1).get("EXPTIME", EXPTIME_S))
+        except Exception:
+            pass
     return sorted(out)
-
-
-EXPTIME_S = 59.9   # astrocam; frame timestamp (filename = DATE-OBS) is exposure START
 
 
 def mid(dt):
@@ -281,10 +290,12 @@ def clean_frames(night, frames, glow_path, max_ratio):
 
 
 def cmd_clean(a):
-    """Exit 0 when the night has at least --min clean dark frames (pipeline gate)."""
+    """Exit 0 when the night has at least --min-minutes of clean dark exposure (pipeline gate)."""
     n = len(clean_frames(a.night, night_frames(a.night), a.glow, a.max_ratio))
-    ok = n >= a.min
-    print(f"{a.night}: {n} clean frames ({'enough' if ok else 'too few'}; need {a.min})")
+    mins = n * EXPTIME_S / 60.0                    # minutes, not frames: subs went 60 s -> 15 s
+    ok = mins >= a.min_minutes
+    print(f"{a.night}: {n} clean frames of {EXPTIME_S:g} s = {mins:.0f} min "
+          f"({'enough' if ok else 'too few'}; need {a.min_minutes:g})")
     sys.exit(0 if ok else 1)
 
 def _stack_chunk(args):
@@ -581,6 +592,21 @@ def cmd_sweep(a):
     print(f"{len(wins)} windows of {a.window_min} min, step {a.step_min} min, "
           f"{t0:%H:%M}-{t1:%H:%M} UTC; {sum(1 for w in wins if not w[2])} empty")
     shape = load_binned(frames[0][1]).shape
+    # Memory: a worker holds a window's registered samples plus its frame cache,
+    # ~2 x frames-per-window binned float32 frames, + ~300 MB of grids. 60 s subs:
+    # 10 frames, ~600 MB; 15 s subs (2026-10-09): 40 frames, ~2.7 GB. Cap the
+    # job count to 70% of available memory rather than swapping muppet.
+    per_win = max(len(w[2]) for w in wins) or 1
+    per_job = 2 * per_win * shape[0] * shape[1] * 4 + 300e6
+    try:
+        avail = int(next(l for l in open("/proc/meminfo") if l.startswith("MemAvailable")).split()[1]) * 1024
+        cap = max(1, int(0.7 * avail // per_job))
+        if cap < a.jobs:
+            print(f"jobs {a.jobs} -> {cap}: ~{per_job / 1e9:.1f} GB per worker at {per_win} frames per window, "
+                  f"{avail / 1e9:.1f} GB available")
+            a.jobs = cap
+    except (OSError, StopIteration):
+        pass
     # contiguous chunks so each worker's frame cache is reused window to window
     n = len(wins)
     chunks = [wins[i * n // a.jobs:(i + 1) * n // a.jobs] for i in range(a.jobs)]
@@ -633,9 +659,10 @@ def main():
     r.add_argument("--glow", required=True); r.add_argument("--search", type=int, default=3)
     r.add_argument("--search-shift", type=int, default=80)
     r.add_argument("-o", "--out", required=True)
-    c = sub.add_parser("clean", help="gate: exit 1 when the night has fewer than --min clean dark frames (cloud)")
+    c = sub.add_parser("clean", help="gate: exit 1 when the night has under --min-minutes of clean dark frames (cloud)")
     c.add_argument("night"); c.add_argument("--glow", required=True)
-    c.add_argument("--max-ratio", type=float, default=1.5); c.add_argument("--min", type=int, default=30)
+    c.add_argument("--max-ratio", type=float, default=1.5)
+    c.add_argument("--min-minutes", type=float, default=30, help="clean exposure needed, minutes")
     al = sub.add_parser("align", help="measure each frame's offset from the camera model against catalogue stars")
     al.add_argument("camera"); al.add_argument("night"); al.add_argument("--glow", required=True)
     al.add_argument("--max-ratio", type=float, default=1.5); al.add_argument("--all", action="store_true",
