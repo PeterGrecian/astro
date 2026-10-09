@@ -89,9 +89,17 @@ def main() -> int:
                                     (focus_dither or {}).get("step", 0.02)))
         focus_dither = {"base": base, "top": top, "step": step}
 
+    # Focus sweep (hold each position until the lens has arrived; see
+    # StreamingConfig.focus_sweep). On from camera.json capture.focus_sweep;
+    # ASTROCAM_FOCUS_SWEEP=0 pins lens_position instead.
+    focus_sweep = cap.get("focus_sweep")
+    if os.environ.get("ASTROCAM_FOCUS_SWEEP") == "0":
+        focus_sweep = None
+
     logging.info(f"capture params: exposure_us={exposure_us} gain={gain} "
                  f"lens_position={lens_position} pedestal={pedestal} "
-                 f"focus_dither={focus_dither} position_index={position_index}")
+                 f"focus_dither={focus_dither} focus_sweep={focus_sweep} "
+                 f"position_index={position_index}")
 
     cfg = StreamingConfig(
         cam_idx=CAM_IDX,
@@ -113,6 +121,7 @@ def main() -> int:
         frames_root=frames_root,
         mode="night",
         focus_dither=focus_dither,
+        focus_sweep=focus_sweep,
         position_index=position_index,
     )
     reason = run(cfg)

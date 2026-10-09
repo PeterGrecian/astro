@@ -81,6 +81,15 @@ class StreamingConfig:
     # written to the FITS header (LENSPOS / LENSPREP). Sweeps focus for
     # star-focus discovery + VCM mechanics + super-resolution radial dither.
     focus_dither: Optional[dict] = None
+    # Focus sweep: hold each position until the lens has demonstrably
+    # ARRIVED (LENSACT == target) for `frames` frames, then step.
+    # {"positions": [1.10, 1.15, ...], "frames": 8, "serpentine": true}.
+    # Self-timing: no assumption about the command-to-image lag, which is
+    # ~9 frames on astrocam at buffer_count 4 (2026-10-09). Cycling all
+    # night rather than one pass is what survives broken cloud: a cloudy
+    # spell costs every position equally. Takes precedence over
+    # focus_dither.
+    focus_sweep: Optional[dict] = None
     # Sensor bit depth of a raw sample, independent of the uint16
     # container it arrives in. Full scale is (1 << sample_bits) - 1.
     sample_bits: int = 10
@@ -126,19 +135,46 @@ def _capture_thread(cfg: StreamingConfig, picam2, q: queue.Queue,
                     stop: threading.Event,
                     log: logging.Logger, focus_dither: Optional[dict] = None):
     """Pull frames as fast as the camera will deliver; drop nothing
-    here. Each item is (epoch_ms, bayer, lens_cmd, lens_rep, sensor_temp_c).
+    here. Each item is (epoch_ms, bayer, lens_cmd, lens_rep, lens_act,
+    sensor_temp_c).
+
+    lens_act is where the lens was DURING this exposure: the LensPosition
+    metadata reported with the PREVIOUS frame (astro-science 2026-10-09,
+    breathing magnification r 0.99 at k-1 vs 0.63 at k). Computed here, in
+    the one process that sees every frame in order, so it needs no
+    neighbouring files at read time and survives restarts and gaps.
 
     focus_dither {"base","top","step"}: step LensPosition each frame in a
     sawtooth before capturing (settle briefly), and tag the frame with the
     commanded + reported focus. None = fixed focus (lens_cmd/lens_rep None)."""
     i = 0
-    lp_cmd = lp_rep = temp_c = None
+    lp_cmd = cfg.lens_position
+    lp_rep = temp_c = None
+    lp_act = cfg.lens_position   # first frame of a run: the opening position
+    sweep = None
+    if cfg.focus_sweep:
+        pos = [round(float(p), 3) for p in cfg.focus_sweep["positions"]]
+        if cfg.focus_sweep.get("serpentine", True) and len(pos) > 2:
+            pos = pos + pos[-2:0:-1]
+        sweep = {"pos": pos, "j": 0, "good": 0, "waited": 0,
+                 "need": int(cfg.focus_sweep.get("frames", 8)),
+                 "give_up": int(cfg.focus_sweep.get("give_up", 30))}
+        focus_dither = None
+        lp_cmd = None   # forces the first set_controls below
     if focus_dither:
         base = focus_dither["base"]; top = focus_dither["top"]
         step = focus_dither["step"]
         n = max(1, int(round((top - base) / step)))
     while not stop.is_set():
-        if focus_dither:
+        if sweep:
+            target = sweep["pos"][sweep["j"]]
+            if lp_cmd != target:
+                try:
+                    picam2.set_controls({"AfMode": 0, "LensPosition": target})
+                    lp_cmd = target
+                except Exception as e:
+                    log.error(f"lens step failed: {e}")
+        elif focus_dither:
             lp_cmd = round(base + (i % n) * step, 3)
             try:
                 # AfMode 0 = Manual; re-assert each frame in case of glitch.
@@ -166,13 +202,25 @@ def _capture_thread(cfg: StreamingConfig, picam2, q: queue.Queue,
             # One metadata fetch serves both the focus dither and the
             # thermal reading the nightly health gate needs.
             meta = req.get_metadata()
-            if focus_dither:
-                lp_rep = meta.get("LensPosition")
+            lp_rep = meta.get("LensPosition")
             temp_c = meta.get("SensorTemperature")
         finally:
             req.release()
         epoch_ms = int(time.time() * 1000)
-        q.put((epoch_ms, bayer, lp_cmd, lp_rep, temp_c))
+        q.put((epoch_ms, bayer, lp_cmd, lp_rep, lp_act, temp_c))
+        if sweep:
+            arrived = lp_act is not None and abs(lp_act - lp_cmd) < 0.005
+            sweep["good"] += arrived
+            sweep["waited"] += 1
+            if sweep["good"] >= sweep["need"] or sweep["waited"] >= sweep["give_up"]:
+                if not arrived:
+                    log.warning(f"focus sweep: lens never reached {lp_cmd} in "
+                                f"{sweep['waited']} frames; moving on")
+                sweep["j"] = (sweep["j"] + 1) % len(sweep["pos"])
+                sweep["good"] = sweep["waited"] = 0
+        # This frame's report describes the NEXT exposure.
+        if lp_rep is not None:
+            lp_act = round(float(lp_rep), 3)
         i += 1
 
 
@@ -196,7 +244,7 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
 
     while not (stop.is_set() and q.empty()):
         try:
-            epoch_ms, bayer, lp_cmd, lp_rep, temp_c = q.get(timeout=1.0)
+            epoch_ms, bayer, lp_cmd, lp_rep, lp_act, temp_c = q.get(timeout=1.0)
         except queue.Empty:
             continue
         # Saturation guard: if the frame is bright enough to be daylight
@@ -270,10 +318,16 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         h["ROWORDER"] = ("TOP-DOWN", "row 0 is sky-top / right-side up")
         h["MEAN"] = mean
         h["PER_S"] = per_s
-        if lp_cmd is not None:   # focus-dither run: record the per-frame focus
-            h["LENSPOS"] = (lp_cmd, "commanded VCM dioptre (focus-dither)")
-            h["LENSPREP"] = (float(lp_rep) if lp_rep is not None else -1.0,
-                             "reported LensPosition (metadata)")
+        # Every frame, whatever the focus mode (until 2026-10-09 only dither
+        # runs were tagged, so pinned nights carried no focus record).
+        # LENSPOS/LENSPREP keep their historical meanings; LENSACT is the
+        # one to use. Frames without LENSACT: see camera.json lens_tag_rule.
+        if lp_cmd is not None:
+            h["LENSPOS"] = (lp_cmd, "commanded VCM dioptre")
+        if lp_rep is not None:
+            h["LENSPREP"] = (float(lp_rep), "reported LensPosition (metadata)")
+        if lp_act is not None:
+            h["LENSACT"] = (lp_act, "lens DURING this exposure (prev report)")
         fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp_path, overwrite=True)
         tmp_path.rename(out_path)
     legacy_fh.close()
@@ -359,14 +413,18 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
         cap_t.start(); comp_t.start()
         log.info(f"streaming: cam={cfg.cam_idx} exp={cfg.exposure_us}us "
                  f"gain={cfg.gain} lp={cfg.lens_position} buf={cfg.buffer_dir} "
-                 f"focus_dither={cfg.focus_dither}")
+                 f"focus_dither={cfg.focus_dither} focus_sweep={cfg.focus_sweep}")
         while not stop.is_set():
             time.sleep(1.0)
             # A capture thread that dies (bad control, driver wedge, a
             # NameError in this file) used to leave run() sleeping here
             # forever: service "running", queue empty, zero frames, and
             # Restart=on-failure never triggered because nothing failed.
-            if not cap_t.is_alive():
+            # Checked after the sleep, so a SIGTERM that lands mid-sleep has
+            # already let the thread exit normally: that is a stop, not a
+            # death (seen with sub-second test frames, 2026-10-09; shorter
+            # night frames make it likelier).
+            if not cap_t.is_alive() and not stop.is_set():
                 log.error("capture thread died; ending the stream")
                 capture_failed = True
                 stop.set()
