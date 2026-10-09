@@ -16,7 +16,8 @@ Scope (v1, run on muppet):
     frame's focus is only knowable from its NEIGHBOURS' headers (camera.json
     lens_tag_rule: lens in frame k = LENSPREP of k-1 = LENSPOS of k-9) and a
     Deep Archive restore is the wrong price for that. FOCUSPOS is xoverpi's
-    focuser. Skipped when no frame carries a focus key (starcam).
+    focuser (lens tables only: xoverpi itself is refused, see NEVER_COLD).
+    Skipped when no frame carries a focus key (starcam).
   `--lens-only` backfills the sidecar for a night already in the archive.
 
 Idempotent: if the S3 object already exists with matching size, skips upload.
@@ -49,6 +50,10 @@ REGION = "eu-west-1"
 CHUNK = 8 * 1024 * 1024  # 8 MiB streaming chunk
 MULTIPART_THRESHOLD = 64 * 1024 * 1024
 MULTIPART_CHUNKSIZE = 64 * 1024 * 1024
+# Never Deep Archive: Peter, 2026-10-09, "I don't want data from firstscope
+# to go to glacier. it's of very low value". xoverpi = the Celestron
+# FirstScope 76/300. Its retention is thinning on bigstore, not cold storage.
+NEVER_COLD = {"xoverpi"}
 
 
 def die(msg: str, code: int = 1) -> None:
@@ -357,6 +362,10 @@ def main() -> int:
                          "night already in Deep Archive (needs the frames "
                          "still on disk; dry-run without --go)")
     args = ap.parse_args()
+
+    if args.camera in NEVER_COLD:
+        die(f"{args.camera} is never cold-archived (low value, Peter "
+            f"2026-10-09); thin it on bigstore instead")
 
     if args.src:
         night_dir = Path(args.src).expanduser()
