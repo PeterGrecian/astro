@@ -110,7 +110,8 @@ SKY_CLEAR_MAX_STOPS = 10.0
 def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
                       band_tol=BAND_TOL, pedestal=None,
                       sky_clear_max_stops=SKY_CLEAR_MAX_STOPS,
-                      brightness_roi=None, bayer_pattern=None):
+                      brightness_roi=None, bayer_pattern=None,
+                      sky_clear_ref_exptime=None, black_level=None):
     """Two passes over (t, path):
       pass 1 — measure brightness on the RAW Bayer frame, compute
         per_s = mean / (EXPTIME * GAIN), tag saturated frames
@@ -121,6 +122,14 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
       (the band-gate metric only, not the stack) over just the top
       `f` of each frame. Lets a camera with ground-level light pollution
       low in the frame gate on sky brightness instead of whole-frame.
+
+    sky_clear_ref_exptime: the exposure (s) sky_clear_max_stops was
+      calibrated at. Stops are log2(mean - pedestal) of a per-FRAME mean,
+      so a shorter sub reads darker for no sky reason (astrocam 59.9 s ->
+      15 s on 2026-10-09 is ~2 stops). The anchor mean is first rescaled
+      to that exposure about black_level (the electronic zero, which does
+      not scale), then put on the usual pedestal axis, so the verdict and
+      the stack cap mean the same sky as before. None = no rescale.
 
     Deliverables are always derived from binned data, never the raw
     mosaic (starcam pipeline convention; stacking the mosaic leaves a
@@ -150,12 +159,13 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         if brightness_roi and brightness_roi.get("top_fraction"):
             top = max(1, int(d.shape[0] * float(brightness_roi["top_fraction"])))
             d_measure = d[:top]
-        row = brightness.measure(d_measure, t, f)
+        exp = float(hdr.get("EXPTIME", 1.0) or 1.0)
+        gain = float(hdr.get("GAIN", 1.0) or 1.0)
+        row = brightness.measure(d_measure, t, f,
+                                 exptime=hdr.get("EXPTIME"))
         rows.append(row)
         mean = float(row[3])
         median = float(row[4])
-        exp = float(hdr.get("EXPTIME", 1.0) or 1.0)
-        gain = float(hdr.get("GAIN", 1.0) or 1.0)
         per_s = mean / (exp * gain) if exp * gain > 0 else mean
         per_s_by_path[f] = per_s
         t_per_s.append((t, per_s))
@@ -190,11 +200,19 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         # let bright frames into the stack just because the whole
         # night was bright.
         if pedestal is not None:
+            # Exposure scale to the calibration exposure, about the
+            # electronic zero (see docstring). 1.0 when not configured.
+            zero = float(black_level if black_level is not None
+                         else pedestal)
+            k = float(sky_clear_ref_exptime) / _exp \
+                if sky_clear_ref_exptime and _exp > 0 else 1.0
             sky_clear_mean = float(pedestal) + 2 ** sky_clear_max_stops
+            sky_clear_mean = zero + (sky_clear_mean - zero) / k
             sky_clear_hi = sky_clear_mean / (_exp * _gain) \
                 if _exp * _gain > 0 else sky_clear_mean
             hi = min(hi, sky_clear_hi)
             anchor_mean = anchor_per_s * _exp * _gain
+            anchor_mean = zero + (anchor_mean - zero) * k
             import math as _math
             anchor_stops = _math.log2(max(anchor_mean - pedestal, 0.5))
             verdict = "cloudy" if anchor_stops > sky_clear_max_stops \
@@ -208,6 +226,8 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
             "window_utc": [a_start.isoformat(), a_end.isoformat()],
             "window_s": anchor_window_s, "tol": band_tol,
             "sky_clear_max_stops": sky_clear_max_stops,
+            "exptime": _exp,
+            "stops_ref_exptime": sky_clear_ref_exptime or _exp,
             "stops": round(anchor_stops, 2) if anchor_stops is not None else None,
             "verdict": verdict,
         }
@@ -470,7 +490,9 @@ def main() -> int:
             sky_clear_max_stops=cfg.get("sky_clear_max_stops")
                 or SKY_CLEAR_MAX_STOPS,
             brightness_roi=cfg.get("brightness_roi"),
-            bayer_pattern=bayer_pat)
+            bayer_pattern=bayer_pat,
+            sky_clear_ref_exptime=cfg.get("sky_clear_ref_exptime"),
+            black_level=cfg.get("black_level"))
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:
         # Cloudy / no-usable-sky night: clear out any stale stack

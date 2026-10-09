@@ -23,7 +23,7 @@ from matplotlib.ticker import FuncFormatter
 LONDON = ZoneInfo("Europe/London")
 
 HEADER = ["epoch_ms", "iso_utc", "filename",
-          "mean", "median", "p95", "max", "bright_pixels"]
+          "mean", "median", "p95", "max", "bright_pixels", "exptime"]
 
 BRIGHT_PIXEL_THRESHOLD = 500
 
@@ -171,12 +171,19 @@ def lsb_align(vals, pedestal=None):
     return vals / MSB_ALIGN_FACTOR, True
 
 
-def measure(arr, t_utc: datetime, path: Path):
-    """One CSV row for a frame already in memory."""
+def measure(arr, t_utc: datetime, path: Path, exptime: float | None = None):
+    """One CSV row for a frame already in memory.
+
+    exptime (s, from the frame's EXPTIME) is the last column so the series
+    says what exposure its ADU are per: mean is per FRAME, and astrocam went
+    from 59.9 s to 15 s subs on 2026-10-09. Empty when unknown. Readers
+    index positionally up to mean/median only, so appending is safe.
+    """
     return [int(t_utc.timestamp() * 1000), t_utc.isoformat(), str(path),
             f"{float(arr.mean()):.3f}", f"{float(np.median(arr)):.1f}",
             f"{float(np.percentile(arr, 95)):.1f}", int(arr.max()),
-            int((arr >= BRIGHT_PIXEL_THRESHOLD).sum())]
+            int((arr >= BRIGHT_PIXEL_THRESHOLD).sum()),
+            "" if exptime is None else f"{float(exptime):g}"]
 
 
 def write_csv(rows, csv_path: Path):
