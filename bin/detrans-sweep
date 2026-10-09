@@ -194,7 +194,9 @@ class RunningMedian:
     `step_blocks` of the 8x8 blocks jump by more than `step_adu` between
     consecutive frames (10 and 10 at bin 2: glare flicker while the light is
     on moves at most 7 blocks, a passing headlight is a one-frame blip the
-    median already absorbs). Each frame's median uses only its own segment;
+    median already absorbs). If under `min_stable` of the frames sit in runs
+    of at least `min_seg` between steps, it is cloud, and segmentation is off.
+    Each frame's median uses only its own segment;
     frames in a segment shorter than `min_seg` (the ramp of a switch) return
     None and are left out of the sweep. The level map is cached as
     `levels_path` so the max and deep runs share one pass.
@@ -203,7 +205,8 @@ class RunningMedian:
     median runs in row strips, so 21 frames peak ~480 MB: sized for the 1 GB
     eclipticam Pi."""
 
-    def __init__(self, fs, n_bin, n, levels_path=None, step_adu=10.0, step_blocks=10, min_seg=5):
+    def __init__(self, fs, n_bin, n, levels_path=None, step_adu=10.0, step_blocks=10, min_seg=5,
+                 min_stable=0.5):
         self.fs, self.bin, self.n, self.min_seg = fs, n_bin, max(3, n | 1), min_seg
         self.raw = {}
         names = [Path(f).name for f in fs]
@@ -219,6 +222,17 @@ class RunningMedian:
                 np.savez(levels_path, L=L, names=np.array(names))
         thr = step_adu * (n_bin / 2.0) ** 2
         jumps = (np.abs(np.diff(L, axis=0)) > thr).reshape(len(L) - 1, -1).sum(1) >= step_blocks
+        seg = np.concatenate([[0], np.cumsum(jumps)])
+        stable = sum(c for c in np.bincount(seg) if c >= min_seg) / len(seg)
+        if jumps.any() and stable < min_stable:
+            # Steps everywhere, no long stable stretches between them: drifting
+            # CLOUD, not a light switching (10-08 overcast: 59 steps in 60
+            # frames, 0% stable, would have dropped every frame). A switch
+            # leaves long stable runs either side (10-07 03 UTC: ~80%).
+            # Fall back to the plain running median; the night shows cloud.
+            print(f"background: {int(jumps.sum())} level steps, only {stable:.0%} of frames in "
+                  f"stable runs: cloud, not glare switches; no segmentation")
+            jumps[:] = False
         self.seg = np.concatenate([[0], np.cumsum(jumps)])
         self.bounds = {}
         for sid in np.unique(self.seg):
