@@ -9,6 +9,14 @@ Scope (v1, run on muppet):
     to it (the sidecar is the canonical hash record; we upload straight to
     the final key — no copy_object, which caps source at 5 GiB).
   - Updates ~/astro/whereisallthedata.csv (upsert the aws row).
+  - Writes a per-night LENS TABLE as a STANDARD-class sidecar,
+    <tar>.lens.csv: one row per frame (epoch_ms, LENSPOS, LENSPREP, LENSACT,
+    SENSTEMP, EXPTIME) read from the FITS headers. It stays online after the
+    tar goes cold, because a pre-2026-10-09 frame's focus is only knowable
+    from its NEIGHBOURS' headers (camera.json lens_tag_rule: lens in frame k
+    = LENSPREP of k-1 = LENSPOS of k-9) and a Deep Archive restore is the
+    wrong price for that. Skipped when no frame carries a lens key (starcam).
+    `--lens-only` backfills the sidecar for a night already in the archive.
 
 Idempotent: if the S3 object already exists with matching size, skips upload.
 Dry-run by default. Pass --go to actually upload.
@@ -78,6 +86,58 @@ def tar_stream_to_sha_and_size(night_dir: Path, parent: Path) -> tuple[str, int]
     with tarfile.open(fileobj=Counter(), mode="w|", bufsize=CHUNK) as tf:
         tf.add(str(night_dir), arcname=arcname, recursive=True)
     return h.hexdigest(), size
+
+
+LENS_KEYS = ("LENSPOS", "LENSPREP", "LENSACT", "SENSTEMP", "EXPTIME")
+
+
+def frame_paths(night_dir: Path) -> list[Path]:
+    """Per-frame FITS under the night: named <epoch_ms>.fits[.fz]. Night-level
+    products (stacks etc.) at other names are not frames and are skipped."""
+    out = []
+    for p in night_dir.rglob("*.fits*"):
+        stem = p.name.split(".")[0]
+        if p.is_file() and stem.isdigit() and len(stem) == 13:
+            out.append(p)
+    return sorted(out, key=lambda p: int(p.name.split(".")[0]))
+
+
+def lens_table_csv(night_dir: Path) -> tuple[bytes, int]:
+    """CSV of the lens keys for every frame, in epoch order. Returns
+    (body, rows_with_any_lens_key); 0 means there is nothing worth keeping."""
+    from astropy.io import fits
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["epoch_ms", "file", *LENS_KEYS])
+    with_lens = 0
+    for p in frame_paths(night_dir):
+        try:
+            with fits.open(p, lazy_load_hdus=True) as hl:
+                h = hl[1].header if p.name.endswith(".fz") else hl[0].header
+        except Exception as e:
+            print(f"warning: no header from {p}: {e}", file=sys.stderr)
+            continue
+        vals = [h.get(k, "") for k in LENS_KEYS]
+        if any(h.get(k) is not None for k in ("LENSPOS", "LENSPREP", "LENSACT")):
+            with_lens += 1
+        w.writerow([p.name.split(".")[0], str(p.relative_to(night_dir)), *vals])
+    return buf.getvalue().encode(), with_lens
+
+
+def write_lens_sidecar(s3, bucket: str, key: str, night_dir: Path,
+                       go: bool) -> None:
+    body, with_lens = lens_table_csv(night_dir)
+    rows = body.count(b"\n") - 1
+    sidecar_key = key + ".lens.csv"
+    if with_lens == 0:
+        print(f"lens table: {rows} frames, none with a lens key; no sidecar")
+        return
+    print(f"lens table: {rows} frames, {with_lens} with lens keys, "
+          f"{len(body):,} bytes -> s3://{bucket}/{sidecar_key} (STANDARD)")
+    if go:
+        s3.put_object(Bucket=bucket, Key=sidecar_key, Body=body,
+                      ContentType="text/csv", StorageClass="STANDARD")
 
 
 def head_object(s3, bucket: str, key: str):
@@ -277,6 +337,10 @@ def main() -> int:
     ap.add_argument("--region", default=REGION)
     ap.add_argument("--go", action="store_true", help="actually upload (default is dry-run)")
     ap.add_argument("--skip-verify", action="store_true", help="skip MANIFEST.sha256 check")
+    ap.add_argument("--lens-only", action="store_true",
+                    help="only (re)write the .lens.csv sidecar, e.g. for a "
+                         "night already in Deep Archive (needs the frames "
+                         "still on disk; dry-run without --go)")
     args = ap.parse_args()
 
     if args.src:
@@ -291,6 +355,12 @@ def main() -> int:
     s3_uri = f"s3://{args.bucket}/{key}"
 
     s3 = boto3.client("s3", region_name=args.region)
+    if args.lens_only:
+        write_lens_sidecar(s3, args.bucket, key, night_dir, args.go)
+        if not args.go:
+            print("\nDRY RUN — pass --go to upload.")
+        return 0
+
     existing = head_object(s3, args.bucket, key)
     if existing is not None:
         print(
@@ -316,6 +386,7 @@ def main() -> int:
 
     sha, size = upload_tar(s3, args.bucket, key, night_dir)
     write_sha_sidecar(s3, args.bucket, key, sha, args.night)
+    write_lens_sidecar(s3, args.bucket, key, night_dir, go=True)
     upsert_csv_row(args.night, s3_uri, size, sha, camera=args.camera)
     upsert_inventory_row(args.night, args.camera, args.mode, s3_uri, size,
                          sha, args.region)
