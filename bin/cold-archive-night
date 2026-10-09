@@ -10,13 +10,14 @@ Scope (v1, run on muppet):
     the final key — no copy_object, which caps source at 5 GiB).
   - Updates ~/astro/whereisallthedata.csv (upsert the aws row).
   - Writes a per-night LENS TABLE as a STANDARD-class sidecar,
-    <tar>.lens.csv: one row per frame (epoch_ms, LENSPOS, LENSPREP, LENSACT,
-    SENSTEMP, EXPTIME) read from the FITS headers. It stays online after the
-    tar goes cold, because a pre-2026-10-09 frame's focus is only knowable
-    from its NEIGHBOURS' headers (camera.json lens_tag_rule: lens in frame k
-    = LENSPREP of k-1 = LENSPOS of k-9) and a Deep Archive restore is the
-    wrong price for that. Skipped when no frame carries a lens key (starcam).
-    `--lens-only` backfills the sidecar for a night already in the archive.
+    <tar>.lens.csv: one row per frame (epoch_ms, LENSPOS, LENSPREP,
+    LENSACT, FOCUSPOS, SENSTEMP, EXPTIME, MEAN) read from the FITS headers.
+    It stays online after the tar goes cold, because a pre-2026-10-09
+    frame's focus is only knowable from its NEIGHBOURS' headers (camera.json
+    lens_tag_rule: lens in frame k = LENSPREP of k-1 = LENSPOS of k-9) and a
+    Deep Archive restore is the wrong price for that. FOCUSPOS is xoverpi's
+    focuser. Skipped when no frame carries a focus key (starcam).
+  `--lens-only` backfills the sidecar for a night already in the archive.
 
 Idempotent: if the S3 object already exists with matching size, skips upload.
 Dry-run by default. Pass --go to actually upload.
@@ -31,9 +32,11 @@ import csv
 import hashlib
 import io
 import os
+import re
 import subprocess
 import sys
 import tarfile
+from datetime import datetime
 from pathlib import Path
 
 import boto3
@@ -88,18 +91,21 @@ def tar_stream_to_sha_and_size(night_dir: Path, parent: Path) -> tuple[str, int]
     return h.hexdigest(), size
 
 
-LENS_KEYS = ("LENSPOS", "LENSPREP", "LENSACT", "SENSTEMP", "EXPTIME")
+LENS_KEYS = ("LENSPOS", "LENSPREP", "LENSACT", "FOCUSPOS", "SENSTEMP",
+             "EXPTIME", "MEAN")
+FOCUS_KEYS = ("LENSPOS", "LENSPREP", "LENSACT", "FOCUSPOS")  # FOCUSPOS: xoverpi
+
+
+FRAME_RE = re.compile(r"^(\d{13}|\d{8}T\d{6}Z-\d+)\.fits(\.fz)?$")
 
 
 def frame_paths(night_dir: Path) -> list[Path]:
-    """Per-frame FITS under the night: named <epoch_ms>.fits[.fz]. Night-level
-    products (stacks etc.) at other names are not frames and are skipped."""
-    out = []
-    for p in night_dir.rglob("*.fits*"):
-        stem = p.name.split(".")[0]
-        if p.is_file() and stem.isdigit() and len(stem) == 13:
-            out.append(p)
-    return sorted(out, key=lambda p: int(p.name.split(".")[0]))
+    """Per-frame FITS under the night, named <epoch_ms>.fits[.fz] (astrocam,
+    eclipticam) or <RUNTAG>-<seq>.fits[.fz] (xoverpi). Night-level products
+    (max/sum/min stacks etc.) at other names are not frames and are skipped."""
+    out = [p for p in night_dir.rglob("*.fits*")
+           if p.is_file() and FRAME_RE.match(p.name)]
+    return sorted(out, key=lambda p: p.name)
 
 
 def lens_table_csv(night_dir: Path) -> tuple[bytes, int]:
@@ -119,9 +125,18 @@ def lens_table_csv(night_dir: Path) -> tuple[bytes, int]:
             print(f"warning: no header from {p}: {e}", file=sys.stderr)
             continue
         vals = [h.get(k, "") for k in LENS_KEYS]
-        if any(h.get(k) is not None for k in ("LENSPOS", "LENSPREP", "LENSACT")):
+        if any(h.get(k) is not None for k in FOCUS_KEYS):
             with_lens += 1
-        w.writerow([p.name.split(".")[0], str(p.relative_to(night_dir)), *vals])
+        stem = p.name.split(".")[0]
+        if stem.isdigit():
+            epoch_ms = stem
+        else:  # xoverpi names carry a run tag, not the time: use DATE-OBS
+            try:
+                epoch_ms = str(round(datetime.fromisoformat(
+                    h["DATE-OBS"]).timestamp() * 1000))
+            except Exception:
+                epoch_ms = ""
+        w.writerow([epoch_ms, str(p.relative_to(night_dir)), *vals])
     return buf.getvalue().encode(), with_lens
 
 
