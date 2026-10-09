@@ -223,6 +223,9 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             [[ -s "$cube" ]] || BIGSTORE="${BIGSTORE:-/mnt/bigstore/astro-data}" \
                 "$PY" "$HERE/skyglow-model" cube "$CAMERA" "$NIGHT" --to-night -j "$JOBS" || return 1
             [[ -s "$glow" ]] || "$PY" "$HERE/skyglow-model" fit "$cube" -o "$glow" || return 1
+            # cloud gate: under half an hour of clean frames, no derot (the
+            # refine finds no stars anyway; 10-08 had 1 of 370)
+            "$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "$glow" || return 1
             if [[ ! -s "$cam" ]]; then
                 # pointing refine on a frame near local midnight; first one that
                 # fits (a cloudy frame finds too few stars) wins
@@ -250,7 +253,10 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         # glow sweep, in the retired difference sweep's slot: max of each
         # window of glow-subtracted frames, foreground blacked. Keeps the
         # polar cap that (max - mean) erased; needs the glow model above.
-        if [[ -s "${night_dir}/skyglow-model.npz" ]]; then
+        # same cloud gate: a cloudy night's glow fit is meaningless and the
+        # sweep shows only the cloud's banding (10-08)
+        if [[ -s "${night_dir}/skyglow-model.npz" ]] \
+                && "$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "${night_dir}/skyglow-model.npz"; then
             echo "--- glow sweep (glow-subtracted, foreground masked)"
             if "$PY" "$HERE/diff-sweep" --camera "$CAMERA" --night "$NIGHT" \
                     --sweep-start 22:00 --sweep-end 04:00 \

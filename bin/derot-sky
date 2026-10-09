@@ -279,6 +279,14 @@ def clean_frames(night, frames, glow_path, max_ratio):
     return frames
 
 
+
+def cmd_clean(a):
+    """Exit 0 when the night has at least --min clean dark frames (pipeline gate)."""
+    n = len(clean_frames(a.night, night_frames(a.night), a.glow, a.max_ratio))
+    ok = n >= a.min
+    print(f"{a.night}: {n} clean frames ({'enough' if ok else 'too few'}; need {a.min})")
+    sys.exit(0 if ok else 1)
+
 def _stack_chunk(args):
     import cv2
     chunk, cam_path, glow_path, t_ref, shape, erode, align = args
@@ -625,6 +633,9 @@ def main():
     r.add_argument("--glow", required=True); r.add_argument("--search", type=int, default=3)
     r.add_argument("--search-shift", type=int, default=80)
     r.add_argument("-o", "--out", required=True)
+    c = sub.add_parser("clean", help="gate: exit 1 when the night has fewer than --min clean dark frames (cloud)")
+    c.add_argument("night"); c.add_argument("--glow", required=True)
+    c.add_argument("--max-ratio", type=float, default=1.5); c.add_argument("--min", type=int, default=30)
     al = sub.add_parser("align", help="measure each frame's offset from the camera model against catalogue stars")
     al.add_argument("camera"); al.add_argument("night"); al.add_argument("--glow", required=True)
     al.add_argument("--max-ratio", type=float, default=1.5); al.add_argument("--all", action="store_true",
@@ -662,7 +673,7 @@ def main():
     w.add_argument("-j", "--jobs", type=int, default=4)
     w.add_argument("--out-max"); w.add_argument("--out-deep")
     a = ap.parse_args()
-    {"refine": cmd_refine, "align": cmd_align, "stack": cmd_stack, "sweep": cmd_sweep}[a.cmd](a)
+    {"refine": cmd_refine, "clean": cmd_clean, "align": cmd_align, "stack": cmd_stack, "sweep": cmd_sweep}[a.cmd](a)
 
 
 if __name__ == "__main__":
