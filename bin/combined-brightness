@@ -273,6 +273,21 @@ def main():
     # human-facing times are Europe/London, so "local" added nothing.
     ax.set_xlabel("BST")
     ax.set_ylabel(f"stops above {zero_label}")
+    # Right axis in sky surface brightness where camera.json calibrates it
+    # (sky_mag: astro-science's Gaia G zero point). Stops are log2 of the
+    # 60 s-equivalent sky flux, so mag is linear in them.
+    sm = cfg.get("sky_mag")
+    if sm and zero_label == "black level":
+        m0, s0, k = float(sm["mag"]), float(sm["at_stops"]), float(sm["mag_per_stop"])
+        sec = ax.secondary_yaxis(
+            "right",
+            functions=(lambda y: m0 - k * (np.log2(np.clip(y, 1e-9, None)) - s0),
+                       lambda m: np.power(2.0, s0 + (m0 - np.asarray(m)) / k)))
+        from matplotlib.ticker import FormatStrFormatter, MultipleLocator, NullLocator
+        sec.yaxis.set_major_locator(MultipleLocator(0.5))
+        sec.yaxis.set_minor_locator(NullLocator())
+        sec.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
+        sec.set_ylabel(f"mag/arcsec\u00b2 ({sm.get('band', '')}, approx.)")
     # The title says what the reader is looking at, not what the pipeline
     # did. "v3w — 7 nights, 1 of them reference" named the camera the page
     # already names and a curve count the reader can see; it told a visitor
@@ -305,7 +320,7 @@ def main():
     ax.set_xlim(lo, hi)
     # Outside the axes: with 7 entries plus a title the box is tall enough
     # to sit on top of the dawn rise if left inside the plot.
-    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9,
+    ax.legend(loc="upper left", bbox_to_anchor=(1.12 if sm else 1.01, 1.0), fontsize=9,
               title="dark trough\n(stops, lower = darker)",
               title_fontsize=8, borderaxespad=0.0)
     fig.autofmt_xdate()
