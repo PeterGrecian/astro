@@ -107,11 +107,34 @@ BAND_TOL = 0.30
 SKY_CLEAR_MAX_STOPS = 10.0
 
 
+# The darkest-window anchor is searched in astronomical darkness only.
+# On an overcast night, cloud lit by the town is BRIGHTER than twilight,
+# so an unrestricted search lands in dusk and reads the twilight sky as
+# the night's floor: astrocam 2026-10-08, overcast all night, anchored at
+# 18:25 UTC and was called clear. At 51.4 N the sun never reaches -18 in
+# midsummer, so the cut relaxes to within ANCHOR_SUN_SLACK_DEG of the
+# night's deepest sun.
+ANCHOR_SUN_MAX_DEG = -18.0
+ANCHOR_SUN_SLACK_DEG = 2.0
+
+
+def anchor_candidates(t_per_s, location):
+    """The (t, per_s) points the darkest-window anchor may come from."""
+    if not location or not t_per_s:
+        return t_per_s
+    from astro.state import sun_altitude_deg
+    lat, lon = location["lat_deg"], location["lon_deg"]
+    alts = [sun_altitude_deg(lat, lon, t) for t, _ in t_per_s]
+    cut = max(ANCHOR_SUN_MAX_DEG, min(alts) + ANCHOR_SUN_SLACK_DEG)
+    return [p for p, a in zip(t_per_s, alts) if a <= cut]
+
+
 def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
                       band_tol=BAND_TOL, pedestal=None,
                       sky_clear_max_stops=SKY_CLEAR_MAX_STOPS,
                       brightness_roi=None, bayer_pattern=None,
-                      sky_clear_ref_exptime=None, black_level=None):
+                      sky_clear_ref_exptime=None, black_level=None,
+                      location=None):
     """Two passes over (t, path):
       pass 1 — measure brightness on the RAW Bayer frame, compute
         per_s = mean / (EXPTIME * GAIN), tag saturated frames
@@ -130,6 +153,11 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
       to that exposure about black_level (the electronic zero, which does
       not scale), then put on the usual pedestal axis, so the verdict and
       the stack cap mean the same sky as before. None = no rescale.
+
+    location: {"lat_deg", "lon_deg"} (camera's location.json). When
+      given, the darkest-window anchor is searched only where the sun is
+      at or below ANCHOR_SUN_MAX_DEG (see anchor_candidates). Without it,
+      the whole night, as before.
 
     Deliverables are always derived from binned data, never the raw
     mosaic (starcam pipeline convention; stacking the mosaic leaves a
@@ -174,7 +202,8 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         if i % 200 == 0:
             print(f"  measure {i}/{len(frames)}", flush=True)
 
-    anchor = brightness.darkest_anchor(t_per_s, window_s=anchor_window_s)
+    anchor = brightness.darkest_anchor(
+        anchor_candidates(t_per_s, location), window_s=anchor_window_s)
     verdict = "no-data"
     if anchor is None:
         anchor_info = None
@@ -492,7 +521,8 @@ def main() -> int:
             brightness_roi=cfg.get("brightness_roi"),
             bayer_pattern=bayer_pat,
             sky_clear_ref_exptime=cfg.get("sky_clear_ref_exptime"),
-            black_level=cfg.get("black_level"))
+            black_level=cfg.get("black_level"),
+            location=cfg.location)
     print(f"stacked {len(stacked)}/{len(frames)} in {time.monotonic()-t0:.1f}s")
     if not stacked:
         # Cloudy / no-usable-sky night: clear out any stale stack
