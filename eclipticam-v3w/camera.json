@@ -71,5 +71,123 @@
   "quality_file": "quality.json",
   "location_file": "location.json",
   "privacy_file": "privacy.json",
-  "occlusion_file": "occlusion.json"
+  "occlusion_file": "occlusion.json",
+  "position_index": 6,
+  "position_index_notes": "Which physical pointing setup the camera is in. INCREMENT whenever the camera is moved, nudged or remounted. Unlike astrocam, eclipticam is NOT clamped: moves of 0.2-2 deg happen without notice and most are recorded nowhere, so the registry was built from the data (astro-science, 2026-10-10, for the Saturn walk): a pointing fit per night (scratch/saturn-walk/scan-epochs.py, epochs-scan.csv) and every 20 min through the nights around each step (scan-within.py, within-scan.csv), confirmed by red/cyan roofline overlays (look/boundaries/). The pointing given per epoch is a STARTING POINT, not a calibration: within one night the fit wanders 0.1-0.3 deg in alt (fixed lens centre and k, a changing star field), and epoch 6 creeps in roll, so every use still needs a per-night or per-frame refine. Lens model: cammodel-2026-10-07.json (equidistant + cubic, binned 2304x1296 grid). NOT YET STAMPED as POSINDEX: v3w_night_daemon.py does not read position_index (astrocam's does).",
+  "position_registry": {
+    "1": {
+      "label": "rosebush",
+      "sensor": "imx708",
+      "camera": "Pi Camera Module 3 Wide, behind a window",
+      "bayer": "RGGB",
+      "resolution": [
+        4608,
+        2592
+      ],
+      "dates": "..2026-08-22",
+      "pointing": {
+        "az0_deg": 200.44,
+        "alt0_deg": 31.62,
+        "roll_deg": 3.78,
+        "f_px": 977.4,
+        "solved_night": "2026-08-12"
+      },
+      "notes": "Looking south over the rose bush. One physical setup from the first frames to night 2026-08-22: the 06-21/06-24 roofline overlay is grey, and so is 07-05/07-07. Nights 06-24..07-05 fit 0.2-0.4 deg higher in az with roll 2.9-3.4 rather than 3.5-3.9 (settling, or the fit; the roofline shows no move). Before 2026-06-22 the readout was 2304x1296 native-binned with sequence-numbered files (time in DATE-OBS) and focus 0.0, so the 06-09..06-21 frames need their own solve even though the camera did not move."
+    },
+    "2": {
+      "label": "08-23 move",
+      "sensor": "imx708",
+      "camera": "Pi Camera Module 3 Wide, behind a window",
+      "bayer": "RGGB",
+      "resolution": [
+        4608,
+        2592
+      ],
+      "dates": "2026-08-23..2026-08-24",
+      "pointing": {
+        "az0_deg": 199.73,
+        "alt0_deg": 30.01,
+        "roll_deg": 2.65,
+        "f_px": 976.1,
+        "solved_night": "2026-08-24"
+      },
+      "notes": "Moved after night 08-22 (no frames on 08-23; 'eclipticam has a new epoc', session #286). Houses shift about a roof height and the rose bush leaves the view. Only one clear night, 08-24."
+    },
+    "3": {
+      "label": "08-25 move",
+      "sensor": "imx708",
+      "camera": "Pi Camera Module 3 Wide, behind a window",
+      "bayer": "RGGB",
+      "resolution": [
+        4608,
+        2592
+      ],
+      "dates": "2026-08-25..2026-09-06",
+      "pointing": {
+        "az0_deg": 199.22,
+        "alt0_deg": 29.87,
+        "roll_deg": -0.37,
+        "f_px": 978.8,
+        "solved_night": "2026-08-30"
+      },
+      "notes": "1.9 deg move between 08-24 and 08-25 (see astrometry note; session #339 also reports a small rotation on 08-26). Nights 08-25 and 08-26 are cloudy all night and 08-27 has no frames, so the 08-26 rotation cannot be checked; the first solved frame is 08-28 00:34 UTC. Stable from 08-28 to 09-06."
+    },
+    "4": {
+      "label": "09-07 move",
+      "sensor": "imx708",
+      "camera": "Pi Camera Module 3 Wide, behind a window",
+      "bayer": "RGGB",
+      "resolution": [
+        4608,
+        2592
+      ],
+      "dates": "2026-09-07..2026-09-15T20:50Z",
+      "pointing": {
+        "az0_deg": 199.86,
+        "alt0_deg": 30.35,
+        "roll_deg": -0.7,
+        "f_px": 976.0,
+        "solved_night": "2026-09-08"
+      },
+      "notes": "Moved between the end of night 09-06 (04:03 UTC) and the start of 09-08 (20:17 UTC); 09-07 is cloudy all night. Not in any session. az +0.6, alt +0.5 deg against epoch 3. Ends mid-evening on 09-15."
+    },
+    "5": {
+      "label": "09-15 nudge",
+      "sensor": "imx708",
+      "camera": "Pi Camera Module 3 Wide, behind a window",
+      "bayer": "RGGB",
+      "resolution": [
+        4608,
+        2592
+      ],
+      "dates": "2026-09-15T20:50Z..2026-09-17T22:30Z",
+      "pointing": {
+        "az0_deg": 199.64,
+        "alt0_deg": 30.53,
+        "roll_deg": 0.63,
+        "f_px": 978.3,
+        "solved_night": "2026-09-16"
+      },
+      "notes": "A step between frames at 20:42 and 21:03 UTC on 09-15: roll -0.43 to +0.15 deg. By 09-16 roll is 0.6, so it moved again during the day of 09-16 or kept settling. Not in any session."
+    },
+    "6": {
+      "label": "09-17 nudge",
+      "sensor": "imx708",
+      "camera": "Pi Camera Module 3 Wide, behind a window",
+      "bayer": "RGGB",
+      "resolution": [
+        4608,
+        2592
+      ],
+      "dates": "2026-09-17T22:30Z..",
+      "pointing": {
+        "az0_deg": 199.21,
+        "alt0_deg": 30.68,
+        "roll_deg": 1.75,
+        "f_px": 976.9,
+        "solved_night": "2026-10-05"
+      },
+      "notes": "A step between frames at 22:21 and 22:42 UTC on 09-17: roll 0.6 to 1.0, az -0.23 deg. Not in any session. After it roll CREEPS with no single step: 1.0 (09-17) to 1.45 (09-22), 1.4 (09-24..09-27), 1.6 (09-30), 1.75 (10-06), with az 199.8 to 199.2. 09-24 and 09-27 overlap, so the small 09-24/09-30 roofline fringe is this creep, not a move. Night 10-07 fits 0.25 deg higher in alt than 10-06 and 10-09 (alt 30.8-31.1); left inside this epoch. Lens position pinned at 3.30 from 10-09 (it was a 3.5-4.5 sawtooth), so f differs before and after."
+    }
+  }
 }
