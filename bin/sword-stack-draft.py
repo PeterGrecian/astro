@@ -16,7 +16,7 @@ frame counts for little instead of diluting the good ones. Pixels more than
 satellite and aircraft trails. The equal-weight mean is kept alongside for
 comparison. The night ends when the sun climbs above --sun-max degrees.
 
-    bigstore-run sword-stack-draft.py NIGHT REF_EPOCH_MS CX CY [--out PATH] (REF may be predicted: nearest frame)
+    bigstore-run sword_stack.py NIGHT REF_EPOCH_MS CX CY [--half 120]
 """
 import argparse, glob, os, sys
 import numpy as np
@@ -33,6 +33,8 @@ ap.add_argument("--ymax", type=float, default=1900, help="stop when sword below 
 ap.add_argument("--sun-max", type=float, default=-12.0, help="stop when the sun is above this altitude (deg)")
 ap.add_argument("--t-min", type=float, default=0.3, help="skip frames with transparency below")
 ap.add_argument("--res-max", type=float, default=1.2, help="use frame only if median fit residual (superpixels) below")
+ap.add_argument("--pre", help="2x3 affine as 6 comma-separated numbers, output grid index -> this night's grid index (one-step resampling onto another night's grid)")
+ap.add_argument("--order", type=int, default=3, help="interpolation order (1 bilinear widens these undersampled stars ~25%%)")
 ap.add_argument("--out", help="output .npz (default: the night's sword-stack.npz)")
 ap.add_argument("--sky-max", type=float, default=150.0, help="skip frames with header MEAN above")
 a = ap.parse_args()
@@ -126,7 +128,10 @@ ref_st = stars(lum0, cx, cy, a.track)
 print(f"ref {a.ref}  {len(ref_st)} stars in track box", flush=True)
 
 yy, xx = np.mgrid[-a.half:a.half, -a.half:a.half].astype(np.float32)
-grid = np.column_stack([(xx + cx).ravel(), (yy + cy).ravel()])   # reference superpixel coords
+gi = np.column_stack([(xx + a.half).ravel(), (yy + a.half).ravel()])   # output grid index
+if a.pre:
+    gi = apply(np.array([float(v) for v in a.pre.split(",")]).reshape(2, 3), gi)
+grid = gi - a.half + (cx, cy)                                       # this night's reference superpixel coords
 samples = {"R": [], "G": [], "B": []}
 frames = []      # (epoch, utc, t, sigma, res, sun) per used frame
 log = []
@@ -139,7 +144,7 @@ def sample(P, A):
     out = {}
     for k in "RGB":
         pl = P[k]
-        v = ndi.map_coordinates(pl, [z[:, 1], z[:, 0]], order=1, mode="nearest").reshape(xx.shape)
+        v = ndi.map_coordinates(pl, [z[:, 1], z[:, 0]], order=a.order, mode="nearest").reshape(xx.shape)
         box = pl[max(Y - 250, 0):Y + 250, max(X - 250, 0):X + 250]   # local sky
         out[k] = v - np.median(box)
     return out

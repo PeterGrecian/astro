@@ -8,7 +8,8 @@ import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
 ROOT = "/mnt/muppet/bigstore/eclipticam-frames/night"
 REF = "2026-10-09"
 NAME = sys.argv[2] if len(sys.argv) > 2 else "sword-stack"
-SUF = sys.argv[3] if len(sys.argv) > 3 else ""          # "_eq": the equal-weight means saved beside the weighted ones
+SUF = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "aligned" else ""
+ALIGNED = "aligned" in sys.argv[3:]                       # per-night stacks already resampled onto the 10-09 grid          # "_eq": the equal-weight means saved beside the weighted ones
 files = sorted(glob.glob(f"{ROOT}/*/{NAME}.npz"))
 
 def lum(z): return z["R" + SUF] + z["G" + SUF] + z["B" + SUF]
@@ -37,14 +38,14 @@ fr0 = flat(Lr); n0r = noise(Lr)
 lab0, nl = ndi.label(ndi.binary_dilation(ndi.gaussian_filter(fr0, 1.5) > 10 * n0r, iterations=3))
 idx0 = np.arange(1, nl + 1); f0 = ndi.sum(fr0, lab0, idx0); Ts = []
 hw = Lr.shape[0]; yy, xx = np.mgrid[0:hw, 0:hw].astype(float)
-W = []; rows = []
+W = []; rows = []; AFF = {}
 for f in files:
     night = f.split("/")[-2]; z = np.load(f, allow_pickle=True)
     L = lum(z); n = int(z["n"])
     if n < 10:
         rows.append((night, n, "skip: too few frames")); continue
     s = stars(L)
-    if night == REF:
+    if night == REF or ALIGNED:
         A = np.array([[1.0, 0, 0], [0, 1, 0]]); res = 0.0
     else:
         # coarse shift by cross-correlation (the camera's aim creeps ~0.5 superpixel/day), then affine on star matches
@@ -65,7 +66,7 @@ for f in files:
     # transparency against 10-09: median star-flux ratio in apertures fixed on the 10-09 stack
     T = 1.0 if night == REF else float(np.median(ndi.sum(flat(sum(warped.values())), lab0, idx0) / f0))
     warped = {k: v / T for k, v in warped.items()}
-    W.append((night, n, res, warped)); Ts.append(T)
+    W.append((night, n, res, warped)); Ts.append(T); AFF[night] = A
 # Noise per night from pairwise differences: real sky (faint stars, nebula) cancels, noise adds.
 # var(i - j) = s_i^2 + s_j^2, solved by least squares over all pairs.
 Ls = [sum(w[3].values()) for w in W]; m = len(W)
@@ -82,6 +83,7 @@ for r in rows: print(*r)
 Ld = sum(deep.values())
 print(f"noise: 10-09 alone {s2[iref] ** .5:.3f}  deep {wts.sum() ** -.5:.3f}  gain {(wts.sum() / wts[iref]) ** .5:.2f}x  "
       f"(equal-weight frames would give {(sum(w[1] for w in W) / W[iref][1]) ** .5:.2f}x)")
+import json; json.dump({k: v.tolist() for k, v in AFF.items()}, open(sys.argv[1] + "-affines.json", "w"), indent=1)
 np.save(sys.argv[1] + "-lum.npy", Ld); np.save(sys.argv[1] + "-ref.npy", Lr)
 np.savez_compressed(sys.argv[1] + ".npz", **deep, rows=np.array(rows, dtype=object))
 
