@@ -8,6 +8,7 @@ __pycache__/
 *.png
 # a camera's foreground mask is configuration (bin/detrans-sweep --build-fg-mask), not a render
 !*/foreground-mask.png
+!*/skyglow-ref.npz
 *.log
 tmp/
 

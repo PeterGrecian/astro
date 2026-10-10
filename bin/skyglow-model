@@ -98,8 +98,29 @@ def cmd_fit(a):
     g = X[use, 1].reshape(use.sum(), -1)
     ref = np.median(g, 1)
     corr = np.array([np.corrcoef(g[:, j], ref)[0, 1] for j in range(g.shape[1])])
-    sky = (corr > a.min_corr) & (np.median(g, 0) > 5)
+    # "above black" relative to the sky, not 5 ADU flat: at 15 s the darker
+    # corners sit under 5 ADU and were dropped (5 ADU was 0.18 of 60 s sky)
+    sky = (corr > a.min_corr) & (np.median(g, 0) > 0.18 * np.median(g))
     print(f"{use.sum()} of {n} frames in window, {sky.sum()} of {sky.size} blocks sky")
+    # Sky blocks are found on the whole window above (they need the dusk and
+    # cloud swings to show they track the sky); the modes on clear sky only.
+    # Clear dark sky only. An unweighted SVD is ruled by its brightest frames,
+    # so a cloud spell inside the window (2026-10-09, 20:28-21:15, up to 15x
+    # the clear level) made the "glow" modes cloud-shaped and every clear frame
+    # was then subtracted wrongly. Keep astronomically dark frames whose sky
+    # sits within --max-stops of the night's dark floor (10th percentile).
+    lev = np.median(X[:, 1].reshape(len(t), -1), 1)
+    dark = sun_moon_alt(t)[0] < -18
+    if dark.sum() >= 10:
+        floor = np.percentile(lev[use & dark], 10) if (use & dark).any() else np.inf
+        keep = use & dark & (lev <= floor * 2 ** a.max_stops)
+        mins = keep.sum() * np.median(np.diff(np.sort(t))) / 60000
+        print(f"{(use & dark).sum()} dark frames in window, {keep.sum()} within "
+              f"{a.max_stops:g} stop of the floor ({floor:.1f} ADU) = {mins:.0f} min")
+        if mins < a.min_minutes:
+            sys.exit(f"too little clear dark sky to fit a glow model "
+                     f"({mins:.0f} min < {a.min_minutes:g}); use a reference model")
+        use = keep
     modes = np.zeros((3, 2, ny, nx), np.float32)
     amp = np.zeros((n, 3, 2), np.float32)
     for k, name in enumerate("RGB"):
@@ -188,6 +209,11 @@ def main():
     f.add_argument("--from", dest="start", type=float, default=20.5, help="window start, London hours")
     f.add_argument("--to", dest="end", type=float, default=5.5, help="window end, London hours")
     f.add_argument("--min-corr", type=float, default=0.9)
+    f.add_argument("--max-stops", type=float, default=0.6,
+                   help="fit only frames within this many stops of the night's dark floor (default 0.6)")
+    f.add_argument("--min-minutes", type=float, default=60,
+                   help="refuse (exit 1) with less clear dark sky than this; the pipeline then "
+                        "falls back to <camera>/skyglow-ref.npz (default 60)")
     f.add_argument("-o", "--out")
     k = sub.add_parser("check", help="fit each frame of other nights' cubes with a model; count clean frames")
     k.add_argument("model"); k.add_argument("cubes", nargs="+")

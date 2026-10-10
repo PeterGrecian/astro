@@ -269,7 +269,7 @@ def _apply_align(x, y, cm, al):
 
 
 # clear-sky glow-fit residual (ADU) at G level (ADU above black), per sub length
-CLEAN_NOISE_REF = {59.9: (0.276, 29.6), 14.9: (0.66, 7.6)}
+CLEAN_NOISE_REF = {59.9: (0.276, 29.6), 14.9: (0.197, 7.35)}
 
 
 def clean_frames(night, frames, glow_path, max_ratio):
@@ -284,8 +284,9 @@ def clean_frames(night, frames, glow_path, max_ratio):
     M = gmodes.reshape(len(gmodes), -1)[:, gsky].T
     Xc = z["cube"][:, 1, 0].reshape(len(z["t"]), -1)[:, gsky] - 64.0
     amp = np.linalg.lstsq(M, Xc.T, rcond=None)[0].T
-    # the noise floor is per exposure, not a scaled 60 s one: 15 s subs sit at
-    # 0.66 ADU at G level 7.6 (clear 2026-10-09), ~3x what sqrt-scaling 60 s gives
+    # the noise floor per exposure: 15 s subs sit at 0.197 ADU at G level 7.35
+    # (clear 2026-10-09, median frame, clear-frame glow model). The 0.66 first
+    # entered here was the residual of a cloud-shaped model, not noise.
     e = min(CLEAN_NOISE_REF, key=lambda k: abs(k - EXPTIME_S))
     s0, l0 = CLEAN_NOISE_REF[e]
     ratio = np.sqrt(np.mean((Xc - amp @ M.T) ** 2, 1)) / (s0 * np.sqrt(np.clip(Xc.mean(1), 1, None) / l0))

@@ -104,14 +104,16 @@ echo "=== publish-night-cam ${CAMERA} ${NIGHT} ==="
 # WEB_ONLY (backfill): the stacks + full-res sweep mp4s already exist on disk;
 # only the web mp4s are new. Skip nightly-cam AND the sweep render entirely;
 # just transcode existing sweep-*.mp4 -> sweep-*-web.mp4 + publish. ~1min/night.
-if [[ "$WEB_ONLY" -eq 0 ]]; then
+# SKIP_NIGHTLY=1: keep the night's existing stacks/summary and redo only the
+# sweeps (a derot or glow re-run; nightly-cam is ~1.5 h on a 15 s night).
+if [[ "$WEB_ONLY" -eq 0 && "${SKIP_NIGHTLY:-0}" -ne 1 ]]; then
     echo "--- nightly-cam"
     if ! "$PY" "$HERE/nightly-cam" --camera "$CAMERA" --night "$NIGHT" --no-derot; then
         echo "nightly-cam produced nothing for ${CAMERA} $NIGHT; skipping sweep + publish"
         exit 0
     fi
 else
-    echo "--- web-only: skipping nightly-cam (reuse existing deliverables)"
+    echo "--- skipping nightly-cam (reuse existing deliverables)"
 fi
 
 # Locate the night dir from the config so the sweeper + publish find
@@ -232,7 +234,14 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             local cam="${night_dir}/skyglow-cammodel.json" t
             [[ -s "$cube" ]] || BIGSTORE="${BIGSTORE:-/mnt/bigstore/astro-data}" \
                 "$PY" "$HERE/skyglow-model" cube "$CAMERA" "$NIGHT" --to-night -j "$JOBS" || return 1
-            [[ -s "$glow" ]] || "$PY" "$HERE/skyglow-model" fit "$cube" -o "$glow" || return 1
+            # the fit uses the night's clear dark frames only; with under an hour
+            # of them it refuses, and a reference model from a clear night stands in
+            if [[ ! -s "$glow" ]]; then
+                "$PY" "$HERE/skyglow-model" fit "$cube" -o "$glow" \
+                    || { [[ -s "$REPO/$CAMERA/skyglow-ref.npz" ]] \
+                         && echo "glow model: using reference $CAMERA/skyglow-ref.npz" \
+                         && cp "$REPO/$CAMERA/skyglow-ref.npz" "$glow"; } || return 1
+            fi
             # cloud gate: under half an hour of clean frames, no derot (the
             # refine finds no stars anyway; 10-08 had 1 of 370)
             "$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "$glow" || return 1
