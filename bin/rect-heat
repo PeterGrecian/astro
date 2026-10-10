@@ -78,6 +78,7 @@ def main(argv=None) -> int:
     x0 = max(0, x0 - a.pad); y0 = max(0, y0 - a.pad)
     x1 = min(w, x1 + a.pad); y1 = min(h, y1 + a.pad)
     x0 -= x0 % 2; y0 -= y0 % 2          # keep the Bayer phase
+    x1 -= (x1 - x0) % 2; y1 -= (y1 - y0) % 2   # whole 2x2 cells, or G1/G2 differ in shape
     sub = data[y0:y1, x0:x1].astype(np.float32)
 
     print(f"frame     {a.frame}")
