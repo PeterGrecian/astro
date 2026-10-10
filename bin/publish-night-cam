@@ -263,9 +263,15 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             local al="${night_dir}/derot-sky-align.npy"
             [[ -s "$al" ]] || "$PY" "$HERE/derot-sky" align "$cam" "$NIGHT" --glow "$glow" \
                 -j "${DEROT_JOBS:-4}" -o "$al" || { echo "derot-sky align failed; sweeping unaligned"; al=""; }
+            # camera-fixed pattern left after the glow (interference rings from
+            # the window glass, sensor column offsets): a 10 min window turns
+            # only 2.5 deg, so it survives into the deep sweep unless removed
+            local rs="${night_dir}/derot-sky-residual.npy"
+            [[ -s "$rs" ]] || "$PY" "$HERE/derot-sky" residual "$NIGHT" --glow "$glow" -o "$rs" \
+                || { echo "derot-sky residual failed; sweeping without it"; rs=""; }
             "$PY" "$HERE/derot-sky" sweep "$cam" "$NIGHT" --glow "$glow" \
                 --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" -j "${DEROT_JOBS:-4}" \
-                ${al:+--align "$al"} \
+                ${al:+--align "$al"} ${rs:+--residual "$rs"} \
                 --out-max "${night_dir}/sweep-derot.mp4" --out-deep "${night_dir}/sweep-derot-deep.mp4"
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"

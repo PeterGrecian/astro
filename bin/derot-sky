@@ -298,6 +298,33 @@ def clean_frames(night, frames, glow_path, max_ratio):
 
 
 
+def cmd_residual(a):
+    """The camera-fixed pattern left after glow subtraction, per unit sky level:
+    the median of --n clean frames spread through the night, each glow-subtracted
+    and divided by its sky level. Stars move between frames minutes apart and
+    drop out of the median; what stays is fixed to the camera: concentric rings
+    (centred near (950, 880) on 2026-10-09, not the pole or the lens axis; the
+    glass window?) and sensor column offsets. A 10 min derot window turns only
+    2.5 deg, so without this both survive into the deep sweep."""
+    gm = GlowModel(a.glow)
+    fr = clean_frames(a.night, night_frames(a.night), a.glow, a.max_ratio)
+    if len(fr) < 10:
+        sys.exit(f"{len(fr)} clean frames: too few for a residual map")
+    pick = [fr[i] for i in np.linspace(0, len(fr) - 1, min(a.n, len(fr))).astype(int)]
+    stack = []
+    for _, path in pick:
+        img, amp, rms, level = gm.subtract(load_binned(path), return_fit=True)
+        stack.append((img / max(level, 1e-3)).astype(np.float32))
+    R = np.median(np.stack(stack), axis=0)
+    del stack
+    sky = gm.sky_mask(R.shape, 1)
+    R -= np.median(R[sky])                        # pattern only; the glow model owns the level
+    R[~sky] = 0
+    np.save(a.out, R.astype(np.float32))
+    print(f"residual map from {len(pick)} of {len(fr)} clean frames: rms {np.std(R[sky]):.4f} of sky "
+          f"-> {a.out}")
+
+
 def cmd_clean(a):
     """Exit 0 when the night has at least --min-minutes of clean dark exposure (pipeline gate)."""
     n = len(clean_frames(a.night, night_frames(a.night), a.glow, a.max_ratio))
@@ -471,10 +498,13 @@ class _Sweeper:
         self.cache = {}
         self.clip_max = False
         self.align = {}          # {epoch_ms: (tx, ty, rot, mag)}; empty = model only
+        self.resid = None        # camera-frame residual per unit sky (`derot-sky residual`)
 
     def frame(self, path):
         if path not in self.cache:
             img, amp, rms, level = self.gm.subtract(load_binned(path), return_fit=True)
+            if self.resid is not None:
+                img -= level * self.resid    # camera-fixed pattern, per unit sky
             if self.mask is None:
                 self.mask = self.gm.sky_mask(img.shape, self.erode)
             img[~self.mask] = np.nan        # NaN spreads through INTER_LINEAR: masked edges go too
@@ -562,6 +592,8 @@ def _sweep_chunk(args):
     sw = _Sweeper(cam_path, glow_path, shape, a.erode)
     sw.clip_max = a.clip_max
     sw.align = load_align(a.align)
+    if a.residual:
+        sw.resid = np.load(a.residual).astype(np.float32)
     stats = []
     for k, (wi, t_c, frames) in enumerate(wins):
         vmax, deep, cov = sw.window(frames, t_c, a.clip)
@@ -672,6 +704,11 @@ def main():
     c.add_argument("night"); c.add_argument("--glow", required=True)
     c.add_argument("--max-ratio", type=float, default=1.5)
     c.add_argument("--min-minutes", type=float, default=30, help="clean exposure needed, minutes")
+    rs = sub.add_parser("residual", help="camera-fixed residual map (rings, column offsets) per unit sky")
+    rs.add_argument("night"); rs.add_argument("--glow", required=True)
+    rs.add_argument("--max-ratio", type=float, default=1.5)
+    rs.add_argument("--n", type=int, default=61, help="frames in the median (default 61)")
+    rs.add_argument("-o", "--out", required=True)
     al = sub.add_parser("align", help="measure each frame's offset from the camera model against catalogue stars")
     al.add_argument("camera"); al.add_argument("night"); al.add_argument("--glow", required=True)
     al.add_argument("--max-ratio", type=float, default=1.5); al.add_argument("--all", action="store_true",
@@ -700,6 +737,7 @@ def main():
                         "draws everything fixed to the camera (hot pixels, dust, lit tree edges) and every aircraft as arcs")
     w.add_argument("--align", help="per-frame alignment table from `derot-sky align`: removes the "
                    "focus-breathing scale pulse and pointing drift between frames")
+    w.add_argument("--residual", help="camera-fixed residual map from `derot-sky residual`, subtracted before derotation")
     w.add_argument("--erode", type=int, default=3, help="3, not stack's 2: lit tree edges flicker in a video")
     w.add_argument("--clip", type=float, default=5.0, help="deep: drop samples this many frame-sigma above the median")
     w.add_argument("--min-cov", type=float, default=0.5, help="black where fewer than this fraction of the window's frames see the pixel")
@@ -709,7 +747,7 @@ def main():
     w.add_argument("-j", "--jobs", type=int, default=4)
     w.add_argument("--out-max"); w.add_argument("--out-deep")
     a = ap.parse_args()
-    {"refine": cmd_refine, "clean": cmd_clean, "align": cmd_align, "stack": cmd_stack, "sweep": cmd_sweep}[a.cmd](a)
+    {"refine": cmd_refine, "clean": cmd_clean, "residual": cmd_residual, "align": cmd_align, "stack": cmd_stack, "sweep": cmd_sweep}[a.cmd](a)
 
 
 if __name__ == "__main__":
