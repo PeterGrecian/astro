@@ -106,6 +106,7 @@ yy, xx = np.mgrid[-a.half:a.half, -a.half:a.half].astype(np.float32)
 grid = np.column_stack([(xx + cx).ravel(), (yy + cy).ravel()])   # reference superpixel coords
 samples = {"R": [], "G": [], "B": []}
 log = []
+As = {}          # epoch -> affine (ref superpixels -> frame superpixels), for per-frame kernels
 
 
 def sample(P, A):
@@ -155,6 +156,7 @@ for direction in (+1, -1):
                 smp = sample(P, A2)
                 for k in "RGB":
                     samples[k].append(smp[k])
+            As[eps[i]] = A2.copy()
             log.append((eps[i], utc, len(pairs), float(np.median(res)), rot_deg(A2), used))
             print(f"  {utc} n={len(pairs):2d} res={np.median(res):.2f} rot={rot_deg(A2):+.2f} used={used}", flush=True)
             A = A2; misses = 0
@@ -178,5 +180,6 @@ for k in "RGB":
     out[k + "_med"] = med
 dest = f"{BASE}/eclipticam-frames/night/{a.night}/sword-stack.npz"
 np.savez_compressed(dest, **out, n=n, cx=a.cx, cy=a.cy, ref=a.ref,
+                    A_eps=np.array(sorted(As)), A_mats=np.array([As[k] for k in sorted(As)]),
                     log=np.array(log, dtype=object))
 print("wrote", dest)
