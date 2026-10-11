@@ -1,6 +1,6 @@
 ---
 id: 2026-10-11-sharpest-resolved
-title: Sharpest thing resolved, by each camera
+title: Sharpest thing resolved by each camera
 instrument: eclipticam
 date: 2026-10-11
 night: 2026-10-09
