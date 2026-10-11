@@ -18,17 +18,18 @@ arcminutes (1′), and an arcminute is 60 arcseconds (1″).
 
 - **A fist at arm's length:** about 10 degrees.
 - **Orion's belt,** end to end: 2.7 degrees.
+- **Saturn moved about 1.8 degrees a month** this autumn, three and a half
+  Moons, going backwards (westwards) through the stars. This is retrograde
+  motion: near opposition we orbit much faster, so as Earth catches it up and
+  overtakes, it seems to slip back.
 - **Orion's sword,** from c Ori down to iota Ori at its tip: about 1 degree,
   two Moons, with the Orion Nebula in the middle.
-- **The Moon, and the Sun:** each about **half a degree**, which is 30
-  arcminutes.
+- **Neptune moved about 44 arcminutes a month,** a Moon and a half, also
+  retrograde.
 - **Polaris to the true pole:** 38 arcminutes this year, a little more than a
   Moon.
-- **Neptune moved about 44 arcminutes a month** this autumn, a Moon and a half.
-  **Saturn moved about 1.8 degrees a month,** three and a half Moons. Both
-  were near opposition, going backwards (westwards) through the stars. This
-  is retrograde motion: we orbit much faster, so as Earth catches them up and
-  overtakes, they seem to slip back.
+- **The Moon, and the Sun:** each about **half a degree**, which is 30
+  arcminutes.
 - **15 arcminutes:** how far the sky turns in one minute, on the celestial
   equator. Half a Moon.
 - **11 by 7 arcminutes:** the Whirlpool Galaxy, M51, about a third of the
