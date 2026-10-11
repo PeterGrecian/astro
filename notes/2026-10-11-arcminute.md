@@ -39,7 +39,7 @@ arcminutes (1′), and an arcminute is 60 arcseconds (1″).
 - **One arcsecond:** a sixtieth of an arcminute, 3 thousandths of a millimetre at
   arm's length.
 
-## Arc hours
+## Hours of right ascension
 
 Astronomers give a star's east-west position, its right ascension, in
 **hours**, because the sky turns once a day: 24 hours make the full circle.
@@ -47,6 +47,10 @@ Astronomers give a star's east-west position, its right ascension, in
 - 1 hour of right ascension = 15 degrees.
 - 1 minute of right ascension = 15 arcminutes.
 - 1 second of right ascension = 15 arcseconds.
+
+Confusingly, but funnily, a minute of right ascension is not an arcminute:
+it is a minute of time, the turn of the sky in one minute by the clock, and
+it is 15 arcminutes wide. There is no such thing as an arc hour.
 
 That holds on the celestial equator. Away from it the circles of right
 ascension crowd together towards the pole, like lines of longitude: at
