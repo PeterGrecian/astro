@@ -71,8 +71,9 @@ arcseconds every second, 15 arcminutes in a one-minute exposure.
 - The whole frame is about **104 x 68 degrees**.
 - **Wide angle means low resolving.** A pixel covers about **1.8 arcminutes**
   at the centre of the frame, shrinking to about 1 near the edges, because the
-  lens squeezes the edge of its view. Most of our work bins pixels 2 x 2, so
-  3.5 arcminutes at the centre and about 2 at the edges.
+  lens squeezes the edge of its view. Most of our work bins pixels 2 x 2: a
+  binned pixel is one RGBG set of photosites, so 3.5 arcminutes at the centre
+  and about 2 at the edges.
 - A one-minute exposure smears a star near the equator into a dash 15
   arcminutes long: about 8 full pixels, or 4 binned, at the centre.
 - The Moon is about 17 pixels across at the centre of the frame, and the
