@@ -17,6 +17,7 @@ source:
     rebuilt from the night's frames first. Measurements by astro-capture.
 figures:
   - src: ~/tmp/derot/mean-2026-09-20-00-0-600.fits
+    field: "1.0° × 0.9°"
     caption: >
       600 frames — half an hour — de-rotated about the celestial
       pole and coadded. The slanted edges are the footprint of the field
@@ -29,6 +30,7 @@ figures:
       of those three points is this crop.
     stretch: {fn: asinh, gain: 6.0, lo_pct: 50, hi_pct: 99.9}
   - src: ~/tmp/derot/mean-2026-09-20-00-0-600.fits
+    field: "26′ × 11′"
     caption: >
       The full-depth centre of the same stack, close up. The brightest star
       carries the annulus of a defocused Newtonian; the faint diagonal weave
@@ -36,6 +38,7 @@ figures:
     crop: [632, 1428, 1443, 1756]
     stretch: {fn: asinh, gain: 6.0, lo_pct: 50, hi_pct: 99.9}
   - src: ~/tmp/derot/preview-max.fits
+    field: "polar strip, 52′ of radius by 149° of position angle"
     caption: >
       The whole night as one pole-centred polar strip, 4x reduced. In polar
       coordinates de-rotation is a pure shift along the position-angle axis,

@@ -19,6 +19,7 @@ source:
     Measurements and solve by astro-capture, 2026-09-22.
 figures:
   - src: ~/tmp/platesolve/crop_centre.fits
+    field: "9.8° × 9.8°"
     caption: >
       One 600-pixel crop of the green channel, as the solver saw it. The
       circles are the 18 stars it matched to the catalogue — that match is

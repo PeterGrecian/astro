@@ -19,6 +19,7 @@ source:
     2026-09-22.
 figures:
   - src: ~/tmp/derot/mean-2026-09-20-00-0-600.fits
+    field: "1.0° × 0.9°"
     caption: >
       The de-rotated field, with the 19 sources counted for this estimate
       circled. Every circle is one star; the detector originally found 35

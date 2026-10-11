@@ -14,6 +14,7 @@ source:
   method: sensor column offsets removed, 3 px smoothing, ring centre found by maximising the contrast of the profile averaged around it; scratch/fringes/rings.py, fig.py
 figures:
   - src: astro/notes/figs/2026-10-10-astrocam-rings/rings.png
+    field: "75° × 42° (left panel, the whole frame)"
     caption: >
       Left: the part of astrocam's 10-09 sky that stays fixed to the camera
       while the stars turn, as a percentage of the sky's brightness. Houses

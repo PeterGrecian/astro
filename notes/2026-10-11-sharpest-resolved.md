@@ -15,6 +15,7 @@ source:
   method: "Richardson-Lucy, 30 iterations, top-hat line kernel 6.0 superpixels at 9.3 deg. Predicted offset from a quadratic tangent-plane fit to 10 Orion stars (residual 0.1-0.2 superpixel near the sword). Peaks by 3x3 local maximum, positions by 3x3 centroid. Scripts ~/astro/scratch/orion/knot/knot.py, fig.py"
 figures:
   - src: astro/notes/figs/2026-10-11-sharpest-resolved/iota-stf747.png
+    field: "each panel 40′ × 40′"
     caption: >
       iota Ori close up. Stacked, it is one smeared dash with a bump on it.
       Deconvolved, a second star separates out exactly where the catalogue
