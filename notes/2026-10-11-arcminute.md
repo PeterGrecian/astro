@@ -29,10 +29,10 @@ arcminutes (1′), and an arcminute is 60 arcseconds (1″).
   were near opposition, going backwards (westwards) through the stars. This
   is retrograde motion: we orbit much faster, so as Earth catches them up and
   overtakes, they seem to slip back.
-- **11 by 7 arcminutes:** the Whirlpool Galaxy, M51, about a third of the
-  Moon across, though only its bright core shows in a small telescope.
 - **15 arcminutes:** how far the sky turns in one minute, on the celestial
   equator. Half a Moon.
+- **11 by 7 arcminutes:** the Whirlpool Galaxy, M51, about a third of the
+  Moon across, though only its bright core shows in a small telescope.
 - **8.2 arcminutes:** iota Ori and Struve 747, the closest pair eclipticam v3w
   has split, a quarter of the Moon.
 - **5 arcminutes:** a small ant's head at arm's length.
