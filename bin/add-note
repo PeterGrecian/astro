@@ -176,12 +176,23 @@ def build_entry(card_path: Path, root: Path):
     for i, (fig, img) in enumerate(rendered, 1):
         key = f"{PREFIX}/figures/{item_id}-{i}.jpg"
         uploads.append((key, encode_full(img)))
-        figures.append({
+        figure = {
             "key": key,
             "caption": str(fig.get("caption") or ""),
             "width": img.width,
             "height": img.height,
-        })
+        }
+        # An optional `video:` (an mp4) makes the figure an animation; the
+        # rendered still becomes its poster. Uploaded as-is, not re-encoded.
+        if fig.get("video"):
+            vpath = Path(str(fig["video"])).expanduser()
+            if not vpath.is_absolute():
+                vpath = root / vpath
+            if vpath.suffix.lower() != ".mp4":
+                raise SystemExit(f"{card_path}: video must be an .mp4, got {vpath}")
+            figure["video_key"] = f"{PREFIX}/figures/{item_id}-{i}.mp4"
+            uploads.append((figure["video_key"], vpath.read_bytes()))
+        figures.append(figure)
     thumb_key = None
     if rendered:
         thumb_key = f"{PREFIX}/thumbs/{item_id}.jpg"
@@ -256,7 +267,8 @@ def cmd_remove(s3, item_id, publish):
     if victim is None:
         print(f"no entry with id {item_id!r}", file=sys.stderr)
         return 1
-    keys = [f["key"] for f in (victim.get("figures") or [])]
+    keys = [k for f in (victim.get("figures") or [])
+            for k in (f["key"], f.get("video_key")) if k]
     if victim.get("thumb_key"):
         keys.append(victim["thumb_key"])
     if not publish:
@@ -323,7 +335,8 @@ def main() -> int:
     for entry, uploads in built:
         for key, body in uploads:
             s3.put_object(Bucket=BUCKET, Key=key, Body=body,
-                          ContentType="image/jpeg")
+                          ContentType=("video/mp4" if key.endswith(".mp4")
+                                       else "image/jpeg"))
             print(f"uploaded s3://{BUCKET}/{key}")
         index["items"] = [e for e in index["items"]
                           if e.get("id") != entry["id"]]
