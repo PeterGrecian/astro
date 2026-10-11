@@ -34,9 +34,9 @@ arcminutes (1′), and an arcminute is 60 arcseconds (1″).
 - **8.2 arcminutes:** iota Ori and Struve 747, the closest pair eclipticam v3w
   has split, a quarter of the Moon.
 - **5 arcminutes:** a small ant's head at arm's length.
-- **1.8 arcminutes:** one eclipticam v3w pixel at the centre of the frame,
+- **1.8 arcminutes:** one eclipticam v3w photosite at the centre of the frame,
   about 1 near the edges.
-- **One arcminute:** one astrocam v3 pixel. A fifth of a millimetre at arm's length, two or three
+- **One arcminute:** one astrocam v3 photosite. A fifth of a millimetre at arm's length, two or three
   hairs side by side. About the finest detail a sharp eye can see.
 - **45 arcseconds:** Saturn's rings, end to end, this autumn.
 - **2 arcseconds:** about the finest detail the FirstScope's 76 mm mirror can
@@ -69,12 +69,15 @@ arcseconds every second, 15 arcminutes in a one-minute exposure.
 ## Eclipticam v3w in these units
 
 - The whole frame is about **104 x 68 degrees**.
-- **Wide angle means low resolving.** A pixel covers about **1.8 arcminutes**
-  at the centre of the frame, shrinking to about 1 near the edges, because the
-  lens squeezes the edge of its view. Most of our work bins pixels 2 x 2: a
-  binned pixel is one RGBG set of photosites, so 3.5 arcminutes at the centre
-  and about 2 at the edges.
+- The sensor is a grid of **photosites**, each behind a red, green or blue
+  filter, laid out in repeating 2 x 2 sets: one red, two green, one blue
+  (RGBG). Most of our work **bins** each set into one colour pixel, so a
+  **binned pixel** is 2 x 2 photosites.
+- **Wide angle means low resolving.** A photosite covers about **1.8
+  arcminutes** at the centre of the frame, shrinking to about 1 near the
+  edges, because the lens squeezes the edge of its view. A binned pixel is
+  twice that: 3.5 arcminutes at the centre and about 2 at the edges.
 - A one-minute exposure smears a star near the equator into a dash 15
-  arcminutes long: about 8 full pixels, or 4 binned, at the centre.
-- The Moon is about 17 pixels across at the centre of the frame, and the
-  whole of Orion fits in about 400 by 550 binned pixels.
+  arcminutes long: about 8 photosites, or 4 binned pixels, at the centre.
+- The Moon is about 17 photosites (8 binned pixels) across at the centre of
+  the frame, and the whole of Orion fits in about 400 by 550 binned pixels.
