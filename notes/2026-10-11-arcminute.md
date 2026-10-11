@@ -8,7 +8,7 @@ tags: [scale, units, arcminutes, right-ascension, eclipticam]
 source:
   scale: eclipticam-v3w/cammodel-2026-10-07.json (equidistant + cubic, f 975.9 binned px, k 0.366); pixel size and field of view computed from it
   motion: Saturn from scratch/saturn-walk/walk-nights.csv (29 nights), Neptune from nep-find.json (27 nights), 2026-08-07 to 10-09
-  other: Polaris precessed to 2026-10-11; Neptune's disc at 29 AU; arm's length taken as 65 cm, a hair as 0.07 mm, a small ant's head as 1 mm; M51 from SIMBAD/NED (11.2' x 6.9'); sword 42 Ori -4 50' to iota Ori -5 54'
+  other: Polaris precessed to 2026-10-11; Neptune's disc at 29 AU; arm's length taken as 65 cm, a hair as 0.07 mm, a small ant's head as 1 mm; M51 from SIMBAD/NED (11.2' x 6.9'); astrocam v3 58.9"/px from its plate solve; sword 42 Ori -4 50' to iota Ori -5 54'
 ---
 
 Sizes on the sky are angles. A circle is 360 degrees, a degree is 60
@@ -34,6 +34,9 @@ arcminutes (1′), and an arcminute is 60 arcseconds (1″).
 - **8.2 arcminutes:** iota Ori and Struve 747, the closest pair eclipticam has
   split, a quarter of the Moon.
 - **5 arcminutes:** a small ant's head at arm's length.
+- **1.8 arcminutes:** one eclipticam v3w pixel at the centre of the frame,
+  about 1 near the edges.
+- **59 arcseconds:** one astrocam v3 pixel, just under an arcminute.
 - **One arcminute:** a fifth of a millimetre at arm's length, two or three
   hairs side by side. About the finest detail a sharp eye can see.
 - **45 arcseconds:** Saturn's rings, end to end, this autumn.
