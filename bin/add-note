@@ -172,6 +172,7 @@ def provenance(fig: dict, meta: dict, card_path: Path) -> dict:
         taken: 2026-10-09               # a night (the evening it began)
         taken: [2026-09-17, 2026-10-09] # or a span of nights
         nights: 9                       # optional, how many in the span
+        field: 4.2° × 2.6°              # field of view, per figure only
 
     Any of them set at the top of the card applies to every figure that
     does not set its own. The site falls back to the card's instrument, with
@@ -196,6 +197,11 @@ def provenance(fig: dict, meta: dict, card_path: Path) -> dict:
     nights = fig.get("nights", meta.get("nights"))
     if nights:
         out["nights"] = int(nights)
+    # Field of view as a plain statement ("4.2° × 2.6°"), never a scale bar
+    # (Peter 2026-10-11). Per figure only: a card's figures are crops of
+    # different sizes, and a chart has none.
+    if fig.get("field"):
+        out["field"] = str(fig["field"])
     return out
 
 
@@ -364,7 +370,8 @@ def main() -> int:
             when = " to ".join(x for x in (fig.get("taken_start"),
                                             fig.get("taken_end")) if x)
             print(f"      camera {fig.get('camera') or '(instrument)'}, "
-                  f"taken {when or 'NOT SET: add taken: to the card'}")
+                  f"taken {when or 'NOT SET: add taken: to the card'}, "
+                  f"field {fig.get('field') or '(none)'}")
         built.append((entry, uploads))
 
     if not built:
