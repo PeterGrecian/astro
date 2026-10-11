@@ -36,8 +36,7 @@ arcminutes (1′), and an arcminute is 60 arcseconds (1″).
 - **5 arcminutes:** a small ant's head at arm's length.
 - **1.8 arcminutes:** one eclipticam v3w pixel at the centre of the frame,
   about 1 near the edges.
-- **59 arcseconds:** one astrocam v3 pixel, just under an arcminute.
-- **One arcminute:** a fifth of a millimetre at arm's length, two or three
+- **One arcminute:** one astrocam v3 pixel. A fifth of a millimetre at arm's length, two or three
   hairs side by side. About the finest detail a sharp eye can see.
 - **45 arcseconds:** Saturn's rings, end to end, this autumn.
 - **2 arcseconds:** about the finest detail the FirstScope's 76 mm mirror can
