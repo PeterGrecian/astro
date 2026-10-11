@@ -36,7 +36,9 @@ def shape(img, X, Y, h, r=8):
 STARS = [(1027, 904), (959, 924), (1076, 875), (986, 1016)]
 R = "/mnt/muppet/bigstore/eclipticam-frames/night"
 out = {}
-for name, path in [("10-09", f"{R}/2026-10-09/sword-stack-w.npz"), ("deep", "weighted.npz")]:
+import sys
+RUNS = [a.split("=") for a in sys.argv[1:]] or [("10-09", f"{R}/2026-10-09/sword-stack-w.npz"), ("deep", "weighted.npz")]
+for name, path in RUNS:
     Lb, h = prep(np.load(path, allow_pickle=True))
     s = 1.4826 * np.median(np.abs(Lb[20:-20, 20:-20] - np.median(Lb[20:-20, 20:-20])))
     res = {0: Lb}
