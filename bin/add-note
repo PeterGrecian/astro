@@ -162,6 +162,43 @@ def encode_full(img):
     return buf.getvalue()
 
 
+def provenance(fig: dict, meta: dict, card_path: Path) -> dict:
+    """camera / taken_start / taken_end / nights for one figure.
+
+    Every astro image says which camera took it and when (Peter
+    2026-10-11), so a figure carries:
+
+        camera: eclipticam-v3w          # an instrument slug or S3 sub-camera
+        taken: 2026-10-09               # a night (the evening it began)
+        taken: [2026-09-17, 2026-10-09] # or a span of nights
+        nights: 9                       # optional, how many in the span
+
+    Any of them set at the top of the card applies to every figure that
+    does not set its own. The site falls back to the card's instrument, with
+    no date, when a figure has none: a wrong date is worse than none.
+    """
+    out = {}
+    cam = fig.get("camera") or meta.get("camera")
+    if cam:
+        out["camera"] = str(cam)
+    taken = fig.get("taken", meta.get("taken"))
+    if taken:
+        span = taken if isinstance(taken, list) else [taken]
+        if len(span) not in (1, 2):
+            raise SystemExit(f"{card_path}: taken must be a date or [start, end]")
+        span = [str(d) for d in span]
+        for d in span:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+                raise SystemExit(f"{card_path}: taken date must be YYYY-MM-DD, got {d!r}")
+        out["taken_start"] = span[0]
+        if len(span) == 2 and span[1] != span[0]:
+            out["taken_end"] = span[1]
+    nights = fig.get("nights", meta.get("nights"))
+    if nights:
+        out["nights"] = int(nights)
+    return out
+
+
 def build_entry(card_path: Path, root: Path):
     """(entry, [(key, bytes)]) for one card, ready to upload."""
     meta = parse_card(card_path)
@@ -184,6 +221,7 @@ def build_entry(card_path: Path, root: Path):
             "width": img.width,
             "height": img.height,
         }
+        figure.update(provenance(fig, meta, card_path))
         # An optional `video:` (an mp4) makes the figure an animation; the
         # rendered still becomes its poster. Uploaded as-is, not re-encoded.
         if fig.get("video"):
@@ -323,6 +361,10 @@ def main() -> int:
                   + (f"  ({tables})" if tables else ""))
         for fig in entry["figures"]:
             print(f"    {fig['width']}x{fig['height']}  {fig['caption']}")
+            when = " to ".join(x for x in (fig.get("taken_start"),
+                                            fig.get("taken_end")) if x)
+            print(f"      camera {fig.get('camera') or '(instrument)'}, "
+                  f"taken {when or 'NOT SET: add taken: to the card'}")
         built.append((entry, uploads))
 
     if not built:

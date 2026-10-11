@@ -4,6 +4,8 @@ title: De-rotation recovers 88 percent of a perfect stack
 instrument: firstscope
 date: 2026-09-20
 night: 2026-09-20
+camera: firstscope
+taken: 2026-09-20
 tags: [de-rotation, stacking, pole, focus]
 source:
   frames: 11911 frames at 3 s, night 2026-09-20, xoverpi

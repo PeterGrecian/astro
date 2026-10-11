@@ -5,6 +5,8 @@ subtitle: TL;DR 18.1 magnitudes/arcsec²
 instrument: astrocam
 date: 2026-09-22
 night: 2026-09-21
+camera: astrocam
+taken: 2026-09-21
 tags: [sky-brightness, plate-solve, photometry, light-pollution, calibration]
 source:
   frames: 598 frames at 59.9 s, night 2026-09-21, astrocam (imx708, POSINDEX 3)

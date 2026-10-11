@@ -4,6 +4,8 @@ title: Newton's rings on astrocam, the glass cover shows itself
 instrument: astrocam
 date: 2026-10-10
 night: 2026-10-09
+camera: astrocam
+taken: 2026-10-09
 tags: [astrocam, interference, newtons-rings, flat-field, glow-model, derotation]
 source:
   frames: astrocam, night 2026-10-09; 61 clean dark frames spread through the night

@@ -4,6 +4,9 @@ title: Sharpest thing resolved by each camera
 instrument: eclipticam
 date: 2026-10-11
 night: 2026-10-09
+camera: eclipticam-v3w
+taken: [2026-09-17, 2026-10-09]
+nights: 9
 tags: [resolution, deconvolution, double star, orion, record]
 source:
   frames: "eclipticam v3w, 9 nights 2026-09-17 to 10-09, 672 frames of 60 s, stacked on the 03:13 UTC 2026-10-10 frame (see note 2026-10-10-orion-m42)"

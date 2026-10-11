@@ -4,6 +4,8 @@ title: How faint does the FirstScope actually see
 instrument: firstscope
 date: 2026-09-22
 night: 2026-09-20
+camera: firstscope
+taken: 2026-09-20
 tags: [limiting-magnitude, star-counts, photometry, de-rotation, psf]
 source:
   frames: 600 of 11,911 frames at 3 s, night 2026-09-20, xoverpi

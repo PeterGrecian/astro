@@ -4,6 +4,8 @@ title: The camera works out which stars it is looking at
 instrument: astrocam
 date: 2026-09-22
 night: 2026-09-21
+camera: astrocam
+taken: 2026-09-21
 tags: [plate-solve, astrometry, photometry, calibration, gaia]
 source:
   frames: one 59.9 s frame, night 2026-09-21, astrocam (imx708, POSINDEX 3)
