@@ -66,7 +66,7 @@ of the declination).
 It is also why a camera that does not move sees every star drift: 15
 arcseconds every second, 15 arcminutes in a one-minute exposure.
 
-## Eclipticam in these units
+## Eclipticam v3w in these units
 
 - The whole frame is about **104 x 68 degrees**.
 - **Wide angle means low resolving.** A pixel covers about **1.8 arcminutes**
