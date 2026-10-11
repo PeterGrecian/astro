@@ -114,6 +114,13 @@ def split_body(text: str):
                 para.clear()
 
         for ln in lines:
+            # An indented line under a list item continues that item; without
+            # this, a hard-wrapped bullet broke into a bullet plus a paragraph.
+            if (out and ln.strip() and ln[:1] in " \t" and not ln.startswith("    ")
+                    and re.match(r"^\s*([-*]|\d+\.) ", out[-1])
+                    and not re.match(r"^\s*([-*]|\d+\.) ", ln)):
+                out[-1] = out[-1] + " " + ln.strip()
+                continue
             structured = (not ln.strip() or ln.startswith("|")
                           or ln.startswith("- ") or ln.startswith("* ")
                           or ln.startswith("    ") or ln.startswith("\t")

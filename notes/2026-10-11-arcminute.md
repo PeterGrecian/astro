@@ -8,7 +8,7 @@ tags: [scale, units, arcminutes, right-ascension, eclipticam]
 source:
   scale: eclipticam-v3w/cammodel-2026-10-07.json (equidistant + cubic, f 975.9 binned px, k 0.366); pixel size and field of view computed from it
   motion: Saturn from scratch/saturn-walk/walk-nights.csv (29 nights), Neptune from nep-find.json (27 nights), 2026-08-07 to 10-09
-  other: Polaris precessed to 2026-10-11; Neptune's disc at 29 AU; the 1p coin is 20.3 mm across
+  other: Polaris precessed to 2026-10-11; Neptune's disc at 29 AU; arm's length taken as 65 cm, a hair as 0.07 mm, a small ant's head as 1 mm
 ---
 
 Sizes on the sky are angles. A circle is 360 degrees, a degree is 60
@@ -19,21 +19,25 @@ arcminutes (1′), and an arcminute is 60 arcseconds (1″).
 - **A fist at arm's length:** about 10 degrees.
 - **Orion's belt,** end to end: 2.7 degrees.
 - **The Moon, and the Sun:** each about **half a degree**, which is 30
-  arcminutes. Not half an arcminute, as I first guessed: two full Moons side
-  by side make a degree.
+  arcminutes.
 - **Polaris to the true pole:** 38 arcminutes this year, a little more than a
   Moon.
 - **Neptune moved about 44 arcminutes a month** this autumn, a Moon and a half.
   **Saturn moved about 1.8 degrees a month,** three and a half Moons. Both
-  were near opposition, going backwards (westwards) through the stars.
-- **One arcminute:** a 1p coin seen from 70 metres.
+  were near opposition, going backwards (westwards) through the stars. This
+  is retrograde motion: we orbit much faster, so as Earth catches them up and
+  overtakes, they seem to slip back.
 - **8.2 arcminutes:** iota Ori and Struve 747, the closest pair eclipticam has
   split, a quarter of the Moon.
+- **5 arcminutes:** a small ant's head at arm's length.
+- **One arcminute:** a fifth of a millimetre at arm's length, two or three
+  hairs side by side. About the finest detail a sharp eye can see.
 - **45 arcseconds:** Saturn's rings, end to end, this autumn.
-- **One arcsecond:** the same 1p coin from 4.2 kilometres.
 - **2 arcseconds:** about the finest detail the FirstScope's 76 mm mirror can
   show, and about what London's air allows on a good night. Neptune's whole
   disc is 2.4 arcseconds.
+- **One arcsecond:** a sixtieth of an arcminute, 3 thousandths of a millimetre at
+  arm's length.
 
 ## Arc hours
 
