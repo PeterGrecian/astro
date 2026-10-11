@@ -31,8 +31,8 @@ arcminutes (1′), and an arcminute is 60 arcseconds (1″).
   overtakes, they seem to slip back.
 - **11 by 7 arcminutes:** the Whirlpool Galaxy, M51, about a third of the
   Moon across, though only its bright core shows in a small telescope.
-- **8.2 arcminutes:** iota Ori and Struve 747, the closest pair eclipticam has
-  split, a quarter of the Moon.
+- **8.2 arcminutes:** iota Ori and Struve 747, the closest pair eclipticam v3w
+  has split, a quarter of the Moon.
 - **5 arcminutes:** a small ant's head at arm's length.
 - **1.8 arcminutes:** one eclipticam v3w pixel at the centre of the frame,
   about 1 near the edges.
