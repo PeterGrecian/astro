@@ -1,6 +1,6 @@
 ---
 id: 2026-10-11-sharpest-resolved
-title: Sharpest thing resolved, iota Ori and Struve 747
+title: Sharpest thing resolved, by each camera
 instrument: eclipticam
 date: 2026-10-11
 night: 2026-10-09
@@ -23,7 +23,11 @@ figures:
 Peter: *"we should have a field note for sharpest thing resolved."* This is
 it, and it will be updated whenever the record falls.
 
-## The record: 8.2 arcminutes
+## Eclipticam v3w
+
+Wide angle means low resolving.
+
+### The record: iota Ori and Struve 747, 8.2 arcminutes
 
 **iota Ori**, the bright star at the tip of Orion's sword, and **Struve 747**,
 a fainter pair of hot young stars just south-west of it, **8.2 arcminutes
@@ -39,7 +43,7 @@ Orion note): Struve 747 then stands clear of iota Ori.
 Struve 747 is itself a double, 36 arcseconds apart. That is well inside one
 pixel, so here it counts as one star.
 
-## Why it is real and not an artefact
+### Why it is real and not an artefact
 
 Undoing a smear can invent things. The usual fake is a single bright star
 split into two peaks along its trail. So the second peak had to pass three
@@ -69,7 +73,7 @@ about 2.6 arcminutes here.)
 Peter had already clicked on both stars when he probed the sword on 10
 October, at the two positions this note confirms.
 
-## What would beat it
+### What would beat it
 
 The trails are the limit. Undoing a smear of fixed length cannot recover
 fine detail along the trail, so pairs lined up east-west are harder than

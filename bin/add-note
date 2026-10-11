@@ -95,7 +95,9 @@ def split_body(text: str):
     summary_lines, sections = [], []
     cur = None
     for line in body.splitlines():
-        h = re.match(r"^(#+)\s+(.+?)\s*$", line)
+        # Only # and ## start a section; ### and deeper stay in its Markdown,
+        # where the site renders them as sub-headings.
+        h = re.match(r"^(##?)\s+(.+?)\s*$", line)
         if h:
             cur = {"heading": h.group(2).strip(), "lines": []}
             sections.append(cur)
