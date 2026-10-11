@@ -37,8 +37,9 @@ Wide angle means low resolving.
 a fainter pair of hot young stars just south-west of it, **8.2 arcminutes
 apart**: about a quarter of the Moon's width.
 
-That sounds wide, and for an eye it is. For this camera it is not. Each pixel
-covers about 1.3 arcminutes of sky, and in a one-minute frame every star is
+That sounds wide, and for an eye it is. For this camera it is not. Out at Orion,
+45 degrees from the centre of the frame, each pixel covers about 1.3
+arcminutes of sky (1.8 at the centre), and in a one-minute frame every star is
 smeared into a dash about 12 pixels long. The two stars are 6 pixels apart,
 so their dashes overlap and in the stack they are one blob with a bump on
 it. They only come apart when the smear is undone (the deconvolution in the
