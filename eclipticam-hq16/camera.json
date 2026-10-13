@@ -11,8 +11,8 @@
   "cam_idx_notes": "CSI port cam1 on the Pi 5, beside v3w (imx708_wide) on cam0. Pinned in /boot/firmware/config.txt with camera_auto_detect=0, dtoverlay=imx708,cam0 and dtoverlay=imx477,cam1,rotation=0 (hand-set 2026-10-13; ansible to own it).",
   "lens": {"focal_length_mm": 16, "mount": "C", "focus": "manual, set by hand 2026-10-13", "aperture": null},
   "lens_notes": "Manual 16 mm C-mount lens, fixed focus and iris: neither is under software control, so lens_position is null and the FITS carry no LENSPOS. MOUNT IS INCOMPLETE: the C-CS adapter ring was missing, so the lens is screwed straight into a back-focus ring wound out ~6 turns and grips only a couple of threads. 2x 5 mm C-CS adapters due 2026-10-14; refitting (ring fully in, adapter, lens) disturbs focus and possibly pointing, so it ends epoch 1. Focus 2026-10-13 was 'will have to do' at dusk, not a star-verified best; aperture setting not recorded.",
-  "plate_scale_deg_px": 0.00555,
-  "plate_scale_notes": "NOMINAL, not solved: 1.55 um photosite / 16 mm = 19.98 arcsec per photosite at full res (40.0 per 2x2 binned pixel). FOV 22.2 x 16.7 deg. Replace with a star solve.",
+  "plate_scale_deg_px": 0.005528,
+  "plate_scale_notes": "SOLVED 2026-10-13 by astro-deliverables (astrometry.net on muppet, binned frame 1791927010433, ~22:30 BST): 39.8 arcsec per 2x2 binned pixel = 19.9 per photosite at full res (0.005528 deg); field 22.41 x 16.85 deg; centre RA 332.47 Dec -9.98 at that moment; up is -162.2 deg E of N. WCS at muppet ~/tmp/hqsolve/hqbin.wcs. Nominal was 19.98 (1.55 um / 16 mm). Epoch 1 only: refitting the lens with the C-CS adapter may shift it slightly.",
   "position_index": 1,
   "position_index_notes": "Calibration epoch, same convention as astrocam and eclipticam-v3w: INCREMENT whenever the camera, lens or mounting changes. Stamped as POSINDEX.",
   "position_registry": {
