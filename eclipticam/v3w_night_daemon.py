@@ -7,8 +7,10 @@ night mode; exits when:
   - frame mean crosses the dawn saturation threshold → exit 0
   - camera error → exit non-zero (systemd Restart=on-failure)
 
-Writes Rice-compressed FITS to /var/lib/eclipticam-buffer/v3w/. The
-eclipticam-v3w-uploader.service drains that dir to NFS asynchronously.
+Writes Rice-compressed FITS to /mnt/ssd/eclipticam-buffer/v3w/ on the local
+SSD (moved off the 50M RAM tmpfs 2026-10-13), behind streaming.py's mount
+guard. eclipticam-v3w-uploader.service renames them into the night tree
+on the same disk.
 """
 import logging
 import os
@@ -30,7 +32,8 @@ CAM_V3W = 0
 # from camera_name (which is the FITS CAMERA header / sensor model).
 CAMERA = "eclipticam-v3w"
 BUFFER_DIR = Path(os.environ.get("V3W_BUFFER_DIR",
-                                 "/var/lib/eclipticam-buffer/v3w"))
+                                 "/mnt/ssd/eclipticam-buffer/v3w"))
+BUFFER_MOUNT = Path(os.environ.get("V3W_BUFFER_MOUNT", "/mnt/ssd"))
 
 
 def _param(env, cfg_val, fallback, cast):
@@ -111,6 +114,7 @@ def main() -> int:
         mode="night",
         focus_dither=focus_dither,
         position_index=position_index,
+        buffer_mount=BUFFER_MOUNT,
     )
     reason = run(cfg)
     if reason == "capture_failed":

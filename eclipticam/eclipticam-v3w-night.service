@@ -5,6 +5,8 @@ Wants=home-peter-eclipticam\x2dframes.mount
 # Stop cleanly when eclipticam-capture flips to day; the per-tick
 # capture script controls start/stop via systemctl.
 StopWhenUnneeded=no
+# Buffer is on the SSD (no tmpfs since 2026-10-13); never start without it.
+RequiresMountsFor=/mnt/ssd
 
 [Service]
 Type=simple

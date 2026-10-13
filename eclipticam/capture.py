@@ -99,7 +99,7 @@ def scene_luminance_from_jpeg(path):
 # only ensures the streaming service is in the right state for the
 # current mode. v3w night frames themselves are written by the
 # streaming daemon, not here.
-V3W_BUFFER_DIR = Path("/var/lib/eclipticam-buffer/v3w")
+V3W_BUFFER_DIR = Path("/mnt/ssd/eclipticam-buffer/v3w")
 V3W_NIGHT_SERVICE = "eclipticam-v3w-night.service"
 # The HQ 16 mm camera on cam1 (2026-10-13) follows v3w's mode exactly.
 HQ_NIGHT_SERVICE = "eclipticam-hq16-night.service"
