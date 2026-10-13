@@ -25,7 +25,8 @@ from astro.config import CameraConfig
 
 CAMERA = "eclipticam-hq16"
 BUFFER_DIR = Path(os.environ.get("HQ_BUFFER_DIR",
-                                 "/var/lib/eclipticam-buffer/hq16"))
+                                 "/mnt/ssd/eclipticam-buffer/hq16"))
+BUFFER_MOUNT = Path(os.environ.get("HQ_BUFFER_MOUNT", "/mnt/ssd"))
 
 
 def main() -> int:
@@ -62,6 +63,7 @@ def main() -> int:
         position_index=position_index,
         sample_bits=12,
         buffer_count=int(cap.get("buffer_count", 4)),
+        buffer_mount=BUFFER_MOUNT,
     )
     reason = run(cfg)
     if reason == "capture_failed":

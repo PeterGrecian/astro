@@ -1,7 +1,7 @@
 [Unit]
 Description=eclipticam HQ uploader (drain the hq buffer to the night tree)
-After=network-online.target mnt-ssd.mount
-Requires=mnt-ssd.mount
+After=network-online.target
+RequiresMountsFor=/mnt/ssd
 OnFailure=alert-on-failure@%n.service
 
 [Service]
@@ -9,7 +9,7 @@ Type=simple
 User=peter
 WorkingDirectory=/home/peter
 Environment=V3W_SUBCAM=hq16
-Environment=V3W_BUFFER_DIR=/var/lib/eclipticam-buffer/hq16
+Environment=V3W_BUFFER_DIR=/mnt/ssd/eclipticam-buffer/hq16
 Environment=V3W_FRAMES_ROOT=/mnt/ssd/eclipticam-frames
 ExecStart=/usr/bin/python3 /home/peter/astro/eclipticam/v3w_uploader.py
 Nice=10

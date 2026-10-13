@@ -113,6 +113,26 @@ class StreamingConfig:
     # full-res stream on the same 1 GB host (eclipticam's HQ camera
     # beside v3w, 2026-10-13) runs with fewer to leave memory for the first.
     buffer_count: int = 4
+    # The mount the buffer must live on (e.g. /mnt/ssd). Replaces the RAM
+    # tmpfs as containment: a nofail mount that is absent leaves a plain
+    # directory on the root filesystem, and frames written there fill it.
+    # When set, the stream refuses to start unless buffer_dir is on this
+    # mount, and each write re-checks it, so a disk that drops mid-night
+    # stalls into the write retry instead of landing on root. None = no
+    # check (the tmpfs-buffered cameras, until they move).
+    buffer_mount: Optional[Path] = None
+
+
+def _buffer_on_mount(cfg: "StreamingConfig") -> bool:
+    """True when buffer_dir sits on cfg.buffer_mount (or no mount is set)."""
+    if cfg.buffer_mount is None:
+        return True
+    m = Path(cfg.buffer_mount)
+    try:
+        return (os.path.ismount(m) and cfg.buffer_dir.exists()
+                and cfg.buffer_dir.stat().st_dev == m.stat().st_dev)
+    except OSError:
+        return False
 
 
 def _detect_raw_shift(bayer, sample_bits: int) -> int:
@@ -344,6 +364,8 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         delay = 2.0
         while True:
             try:
+                if not _buffer_on_mount(cfg):
+                    raise OSError(f"buffer {cfg.buffer_dir} is not on {cfg.buffer_mount}")
                 fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp_path, overwrite=True)
                 tmp_path.rename(out_path)
                 break
@@ -394,6 +416,10 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
     """
     if log is None:
         log = logging.getLogger("eclipticam-stream")
+    if not _buffer_on_mount(cfg):
+        log.error(f"buffer {cfg.buffer_dir} is not on mount {cfg.buffer_mount}; "
+                  "refusing to stream")
+        return "capture_failed"
     # Lazy import: Picamera2 only exists on the Pi.
     from picamera2 import Picamera2
 

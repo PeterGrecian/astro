@@ -1,6 +1,8 @@
 [Unit]
 Description=eclipticam HQ 16mm night capture (Picamera2 streaming, cam1)
 After=network-online.target eclipticam-v3w-night.service
+# Buffer is on the SSD (no tmpfs); never start without it.
+RequiresMountsFor=/mnt/ssd
 OnFailure=alert-on-failure@%n.service
 
 [Service]
