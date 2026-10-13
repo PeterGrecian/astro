@@ -1,0 +1,37 @@
+{
+  "name": "eclipticam-hq",
+  "host": "eclipticam",
+  "sensor": "IMX477",
+  "bayer": "SRGGB12",
+  "resolution": [4056, 3040],
+  "camera": "Raspberry Pi HQ Camera (IMX477) + 16 mm C-mount lens",
+  "cam_idx": 1,
+  "cam_idx_notes": "CSI port cam1 on the Pi 5, beside v3w (imx708_wide) on cam0. Pinned in /boot/firmware/config.txt with camera_auto_detect=0, dtoverlay=imx708,cam0 and dtoverlay=imx477,cam1,rotation=0 (hand-set 2026-10-13; ansible to own it).",
+  "lens": {"focal_length_mm": 16, "mount": "C", "focus": "manual, set by hand 2026-10-13", "aperture": null},
+  "lens_notes": "Manual 16 mm C-mount lens, fixed focus and iris: neither is under software control, so lens_position is null and the FITS carry no LENSPOS. MOUNT IS INCOMPLETE: the C-CS adapter ring was missing, so the lens is screwed straight into a back-focus ring wound out ~6 turns and grips only a couple of threads. 2x 5 mm C-CS adapters due 2026-10-14; refitting (ring fully in, adapter, lens) disturbs focus and possibly pointing, so it ends epoch 1. Focus 2026-10-13 was 'will have to do' at dusk, not a star-verified best; aperture setting not recorded.",
+  "plate_scale_deg_px": 0.00555,
+  "plate_scale_notes": "NOMINAL, not solved: 1.55 um photosite / 16 mm = 19.98 arcsec per photosite at full res (40.0 per 2x2 binned pixel). FOV 22.2 x 16.7 deg. Replace with a star solve.",
+  "position_index": 1,
+  "position_index_notes": "Calibration epoch, same convention as astrocam and eclipticam-v3w: INCREMENT whenever the camera, lens or mounting changes. Stamped as POSINDEX.",
+  "position_registry": {
+    "1": {"dates": "2026-10-13..", "notes": "First light. Lens without its C-CS adapter (see lens_notes); ends when the adapter is fitted."}
+  },
+  "pedestal": 200,
+  "pedestal_notes": "CHART FLOOR ONLY: the log2(mean/pedestal) axis reference, chosen for footroom below black_level, not a measurement. 200 on this 12-bit sensor is the same place as 50 on the 10-bit IMX708s (x4).",
+  "black_level": 256,
+  "black_level_notes": "IMX477 electronic zero in 12-bit LSB-aligned ADU (libcamera tuning 4096 at 16-bit). NOMINAL, not measured: cap the lens for a master dark.",
+  "capture": {
+    "night_exposure_us": 59900000,
+    "night_gain": 1.0,
+    "buffer_count": 2
+  },
+  "capture_notes": "Night streaming params for eclipticam/hq_night_daemon.py, which reads them (env HQ_EXPOSURE_US / HQ_GAIN override per host). 60 s matches v3w's cadence. buffer_count 2 rather than the house 4 because this 1 GB host also streams v3w at full res; the systemd unit caps the daemon's memory so an OOM takes this camera, not v3w.",
+  "rotate_180": false,
+  "rotate_180_notes": "The camera IS mounted upside down, but the 180 degree turn is done by the driver (dtoverlay imx477 rotation=0 flips at the sensor), so every tool's output is already upright and libcamera reports RGGB. Do NOT also set a software rotation_180: that would turn the frames back over.",
+  "frames_root": "~/eclipticam-frames",
+  "frames_root_by_host": {"pip": "/mnt/muppet/bigstore/eclipticam-frames"},
+  "night_layout": "percam",
+  "night_layout_notes": "night/<night-date>/hq/HH/<epoch_ms>.fits.fz beside v3w's night/<night-date>/v3w/, written by the shared v3w_uploader.py with V3W_SUBCAM=hq.",
+  "processing_host": "eclipticam",
+  "occlusion_file": null
+}

@@ -1,4 +1,4 @@
-// Allow user peter to start/stop the eclipticam v3w streaming services
+// Allow user peter to start/stop the eclipticam v3w and HQ streaming services
 // without polkit auth. Needed so eclipticam-capture.service (running
 // as peter) can toggle the streaming daemon on the night/day boundary.
 polkit.addRule(function(action, subject) {
@@ -6,7 +6,9 @@ polkit.addRule(function(action, subject) {
         subject.user == "peter") {
         var unit = action.lookup("unit");
         if (unit == "eclipticam-v3w-night.service" ||
-            unit == "eclipticam-v3w-uploader.service") {
+            unit == "eclipticam-v3w-uploader.service" ||
+            unit == "eclipticam-hq-night.service" ||
+            unit == "eclipticam-hq-uploader.service") {
             return polkit.Result.YES;
         }
     }

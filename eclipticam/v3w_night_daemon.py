@@ -77,9 +77,11 @@ def main() -> int:
             "top": float(os.environ.get("V3W_FD_TOP", 5.15)),
             "step": float(os.environ.get("V3W_FD_STEP", 0.10)),
         }
+    # Calibration epoch (camera.json position_index), stamped as POSINDEX.
+    position_index = cfg_v3w.get("position_index")
     logging.info(f"capture params: exposure_us={exposure_us} gain={gain} "
                  f"lens_position={lens_position} pedestal={pedestal} "
-                 f"focus_dither={focus_dither}")
+                 f"focus_dither={focus_dither} position_index={position_index}")
 
     cfg = StreamingConfig(
         cam_idx=CAM_V3W,
@@ -108,6 +110,7 @@ def main() -> int:
         frames_root=frames_root,
         mode="night",
         focus_dither=focus_dither,
+        position_index=position_index,
     )
     reason = run(cfg)
     if reason == "capture_failed":

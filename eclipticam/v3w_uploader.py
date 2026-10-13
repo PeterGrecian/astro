@@ -28,6 +28,10 @@ BUFFER_DIR = Path(os.environ.get("V3W_BUFFER_DIR",
 FRAMES_ROOT = Path(os.environ.get("V3W_FRAMES_ROOT",
                                   str(Path.home() / "eclipticam-frames")))
 UPLOAD_INTERVAL_S = float(os.environ.get("V3W_UPLOAD_INTERVAL_S", "5"))
+# Which subcam directory under night/<date>/ the frames land in. The same
+# uploader drains every eclipticam stream: v3w by default, and the HQ 16mm
+# camera (2026-10-13) via its own unit with V3W_SUBCAM=hq and its own buffer.
+SUBCAM = os.environ.get("V3W_SUBCAM", "v3w")
 
 _stop = False
 
@@ -43,7 +47,7 @@ def _night_dir_for(epoch_ms: int) -> Path:
     dt = datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
     night = (dt - timedelta(hours=12)).date().isoformat()
     hh = dt.strftime("%H")
-    return FRAMES_ROOT / "night" / night / "v3w" / hh
+    return FRAMES_ROOT / "night" / night / SUBCAM / hh
 
 
 def _drain_brightness():
@@ -67,7 +71,7 @@ def _drain_brightness():
             epoch_ms = int(ln.split(",", 1)[0])
         except ValueError:
             continue
-        nd = _night_dir_for(epoch_ms).parent.parent  # night/<date>/v3w/
+        nd = _night_dir_for(epoch_ms).parent.parent  # night/<date>/<subcam>/
         bf = nd / "brightness.csv"
         by_night.setdefault(bf, []).append(ln)
     for bf, lns in by_night.items():
@@ -106,11 +110,11 @@ def _drain_frames(log: logging.Logger) -> int:
 def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
-    log = logging.getLogger("eclipticam-v3w-uploader")
+    log = logging.getLogger(f"eclipticam-{SUBCAM}-uploader")
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     BUFFER_DIR.mkdir(parents=True, exist_ok=True)
-    log.info(f"draining {BUFFER_DIR} -> {FRAMES_ROOT}/night/<date>/v3w/HH/")
+    log.info(f"draining {BUFFER_DIR} -> {FRAMES_ROOT}/night/<date>/{SUBCAM}/HH/")
     while not _stop:
         try:
             n = _drain_frames(log)

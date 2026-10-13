@@ -109,6 +109,10 @@ class StreamingConfig:
     # of the uint16 ceiling: once raw_shift lands the data 10-bit, a
     # 0.95 x 65535 threshold is equally unreachable.
     saturation_full_scale_fraction: float = 0.95
+    # libcamera request buffers. 4 is the house default; a second
+    # full-res stream on the same 1 GB host (eclipticam's HQ camera
+    # beside v3w, 2026-10-13) runs with fewer to leave memory for the first.
+    buffer_count: int = 4
 
 
 def _detect_raw_shift(bayer, sample_bits: int) -> int:
@@ -392,7 +396,7 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
     cam = _open_camera(Picamera2, cfg.cam_idx, log)
     cfgp = cam.create_video_configuration(
         raw={"size": cfg.sensor_size, "format": cfg.bayer_format},
-        buffer_count=4,
+        buffer_count=cfg.buffer_count,
     )
     cam.configure(cfgp)
     cam.set_controls({

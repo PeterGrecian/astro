@@ -1,0 +1,20 @@
+[Unit]
+Description=eclipticam HQ 16mm night capture (Picamera2 streaming, cam1)
+After=network-online.target eclipticam-v3w-night.service
+OnFailure=alert-on-failure@%n.service
+
+[Service]
+Type=simple
+User=peter
+WorkingDirectory=/home/peter
+ExecStart=/usr/bin/python3 /home/peter/astro/eclipticam/hq_night_daemon.py
+Nice=6
+Restart=on-failure
+RestartSec=30
+# eclipticam has 1 GB and v3w also streams at full res. Cap this daemon
+# so memory pressure kills the HQ capture, never v3w.
+MemoryMax=350M
+OOMScoreAdjust=500
+TimeoutStopSec=90
+StandardOutput=journal
+StandardError=journal

@@ -101,6 +101,8 @@ def scene_luminance_from_jpeg(path):
 # streaming daemon, not here.
 V3W_BUFFER_DIR = Path("/var/lib/eclipticam-buffer/v3w")
 V3W_NIGHT_SERVICE = "eclipticam-v3w-night.service"
+# The HQ 16 mm camera on cam1 (2026-10-13) follows v3w's mode exactly.
+HQ_NIGHT_SERVICE = "eclipticam-hq-night.service"
 
 
 def _systemctl(*args):
@@ -113,16 +115,24 @@ def _systemctl(*args):
         return None
 
 
-def ensure_v3w_streaming_running():
-    r = _systemctl("is-active", "--quiet", V3W_NIGHT_SERVICE)
+def ensure_running(service):
+    r = _systemctl("is-active", "--quiet", service)
     if r is None or r.returncode != 0:
-        _systemctl("start", V3W_NIGHT_SERVICE)
+        _systemctl("start", service)
+
+
+def ensure_stopped(service):
+    r = _systemctl("is-active", "--quiet", service)
+    if r is not None and r.returncode == 0:
+        _systemctl("stop", service)
+
+
+def ensure_v3w_streaming_running():
+    ensure_running(V3W_NIGHT_SERVICE)
 
 
 def ensure_v3w_streaming_stopped():
-    r = _systemctl("is-active", "--quiet", V3W_NIGHT_SERVICE)
-    if r is not None and r.returncode == 0:
-        _systemctl("stop", V3W_NIGHT_SERVICE)
+    ensure_stopped(V3W_NIGHT_SERVICE)
 
 
 def streaming_v3w_lum():
@@ -299,6 +309,11 @@ def capture_tick():
     if v3w_mode == "night":
         # Streaming daemon owns the camera. Don't touch cam0 here.
         ensure_v3w_streaming_running()
+        # HQ starts only once v3w is up, so v3w claims its memory first on
+        # this 1 GB host; the next tick catches it if v3w was still starting.
+        r = _systemctl("is-active", "--quiet", V3W_NIGHT_SERVICE)
+        if r is not None and r.returncode == 0:
+            ensure_running(HQ_NIGHT_SERVICE)
         lum = streaming_v3w_lum()
     else:
         # v3w day-JPEG capture RETIRED 2026-07-06 — eclipticam is now
@@ -306,6 +321,7 @@ def capture_tick():
         # design/retire-moon-marking-v1.md). In day mode just ensure the
         # night streaming daemon is stopped and shoot nothing.
         ensure_v3w_streaming_stopped()
+        ensure_stopped(HQ_NIGHT_SERVICE)
         lum = None
     new_state["v3w"] = {"mode": v3w_mode, "hold": v3w_hold,
                         "lum": lum if lum is not None else v3w_prev.get("lum")}
