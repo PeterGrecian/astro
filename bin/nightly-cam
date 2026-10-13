@@ -114,19 +114,38 @@ SKY_CLEAR_MAX_STOPS = 10.0
 # 18:25 UTC and was called clear. At 51.4 N the sun never reaches -18 in
 # midsummer, so the cut relaxes to within ANCHOR_SUN_SLACK_DEG of the
 # night's deepest sun.
+#
+# "The night's deepest sun" comes from the ephemeris, not from the
+# frames. Taken from the frames, a run that never reached the dark (a
+# capture that died in dusk: astrocam 2026-10-12, 129 frames 18:14-18:46
+# UTC) relaxed the cut to its own twilight, anchored there and called
+# the night cloudy at 8.35 stops. Such a run has no candidates at all
+# and gets verdict "twilight-only": nothing to judge, nothing stacked.
 ANCHOR_SUN_MAX_DEG = -18.0
 ANCHOR_SUN_SLACK_DEG = 2.0
 
 
+def night_min_sun_deg(lat, lon, t_mid):
+    """Deepest sun altitude within 12 h of t_mid, sampled every 10 min."""
+    from datetime import timedelta
+    from astro.state import sun_altitude_deg
+    return min(sun_altitude_deg(lat, lon, t_mid + timedelta(minutes=m))
+               for m in range(-720, 721, 10))
+
+
 def anchor_candidates(t_per_s, location):
-    """The (t, per_s) points the darkest-window anchor may come from."""
+    """The (t, per_s) points the darkest-window anchor may come from,
+    and the sun-altitude cut applied (None without a location)."""
     if not location or not t_per_s:
-        return t_per_s
+        return t_per_s, None
     from astro.state import sun_altitude_deg
     lat, lon = location["lat_deg"], location["lon_deg"]
+    ts = sorted(t for t, _ in t_per_s)
+    t_mid = ts[0] + (ts[-1] - ts[0]) / 2
+    cut = max(ANCHOR_SUN_MAX_DEG,
+              night_min_sun_deg(lat, lon, t_mid) + ANCHOR_SUN_SLACK_DEG)
     alts = [sun_altitude_deg(lat, lon, t) for t, _ in t_per_s]
-    cut = max(ANCHOR_SUN_MAX_DEG, min(alts) + ANCHOR_SUN_SLACK_DEG)
-    return [p for p, a in zip(t_per_s, alts) if a <= cut]
+    return [p for p, a in zip(t_per_s, alts) if a <= cut], cut
 
 
 def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
@@ -202,10 +221,23 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         if i % 200 == 0:
             print(f"  measure {i}/{len(frames)}", flush=True)
 
-    anchor = brightness.darkest_anchor(
-        anchor_candidates(t_per_s, location), window_s=anchor_window_s)
+    candidates, sun_cut = anchor_candidates(t_per_s, location)
+    anchor = brightness.darkest_anchor(candidates, window_s=anchor_window_s)
     verdict = "no-data"
-    if anchor is None:
+    if anchor is None and t_per_s and not candidates \
+            and band_tol != float("inf"):
+        # Frames, but none in the dark: the run is all twilight. No
+        # judgement and no stack (an empty band); an explicit
+        # --window-start/--window-end still stacks what was chosen.
+        verdict = "twilight-only"
+        anchor_info = {"verdict": verdict,
+                       "sun_cut_deg": round(sun_cut, 1),
+                       "frames_utc": [min(t for t, _ in t_per_s).isoformat(),
+                                      max(t for t, _ in t_per_s).isoformat()]}
+        lo, hi = float("inf"), float("-inf")
+        print(f"  anchor: no frame with sun <= {sun_cut:.1f} deg; "
+              f"verdict={verdict}")
+    elif anchor is None:
         anchor_info = None
         lo, hi = float("-inf"), float("inf")
     else:
@@ -554,7 +586,7 @@ def main() -> int:
         s.update({"n_stacked": 0, "anchor": anchor_info,
                   "verdict": (anchor_info or {}).get("verdict", "no-data")})
         summary_mod.write(s, out_dir / f"{stem}summary.json")
-        print(f"cloudy / no-data night: wrote brightness + summary only")
+        print(f"no stack ({s['verdict']}): wrote brightness + summary only")
         return 0
     stacked_frames = [(t, f) for (t, f) in frames if f in stacked]
     stacked_rows = [r for r in rows if Path(r[2]) in stacked]
