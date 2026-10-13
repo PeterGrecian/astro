@@ -193,7 +193,11 @@ def _capture_thread(cfg: StreamingConfig, picam2, q: queue.Queue,
             time.sleep(1)
             continue
         try:
-            bayer = req.make_array("raw").view(np.uint16).copy()
+            # Crop to the sensor width: libcamera pads each raw row to its
+            # stride alignment, so a 4056-wide IMX477 arrives 4064 wide
+            # with zero columns on the right. A no-op for the IMX708s.
+            w, h = cfg.sensor_size
+            bayer = req.make_array("raw").view(np.uint16)[:h, :w].copy()
             # Hardware abstraction: Pi 5 (PiSP) MSB-aligns raw, Pi 4 (VC6)
             # LSB-aligns it. Decide once on the first frame and latch, so
             # every frame this session lands on one scale.

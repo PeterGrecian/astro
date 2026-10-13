@@ -3,13 +3,6 @@
   "max_saturation": 0.2,
   "max_colour_notes": "max.jpg colour policy, presentation only — no effect on any FITS or on the brightness series. max_neutral 1.0 white-balances on the linear data and stretches all three channels against ONE shared clip pair, instead of the old per-channel auto-WB stretch that broke the fixed ratio between channels. max_saturation 0.2 then scales the chroma that survives. WHY SO LOW: max.jpg is stretched very hard (lo 25 / hi ~99.5 over a near-black sky), so a single ADU of chroma noise becomes ~50 levels of colour — the vivid green/magenta was amplified noise, not sky. It cannot be balanced away, only scaled down. Chosen by Peter 2026-09-19 off a six-panel sweep on astrocam 2026-09-16 (panel F), the brief being that the bright colours are likeable but make no sense to a visitor. SUPERSEDES the 2026-08-26 position (session #332) that the false colour was deliberate — that sweep varied area_gain/sky_frac/max_hi_pct only and never put a colour axis in front of him to choose from. Paired with the nightly-cam change that stores each winning pixel's CONTRAST-NORMALISED rgb rather than its raw ADU; that is what fixed the blotchy patches and the trails chopped at the patch seams.",
   "name": "eclipticam-v3w",
-  "position_index": 2,
-  "position_index_notes": "Calibration epoch, same convention as astrocam: INCREMENT whenever the camera, lens or mounting changes. Stamped into every FITS as POSINDEX so each frame self-identifies its epoch. Pointing, astrometry (az0/alt0/roll), detrans and occlusion must NOT be mixed across a boundary. Frames before 2026-10-13 carry no POSINDEX and are epoch 1 by date.",
-  "position_registry": {
-    "1": {"dates": "2026-06-21..2026-10-12", "notes": "Everything before the 2026-10-13 move, unstamped. Pointing was only per-night stable within it (1.9 deg between 08-24 and 08-25)."},
-    "2": {"dates": "2026-10-13..", "notes": "Camera moved on 2026-10-13 to share the window with the new HQ 16mm camera (eclipticam-hq), and set 3 cm forward on a hot-glued spacer so the HQ lens is out of its field. Sees ~80% sky: window frame across the top ~15-18% (narrowest mid-frame), slivers in both top corners, rooftops along the bottom. A pale crescent ghost at ~(1560,650) full-res in the dusk still is probably a room reflection in the double glazing. The astrometry block below is epoch 1 and must be re-solved; occlusion-v3w.json is stale too."}
-  },
-  "host": "eclipticam",
   "sensor": "IMX708",
   "bayer": "SRGGB10",
   "resolution": [4608, 2592],
@@ -78,8 +71,8 @@
   "location_file": "location.json",
   "privacy_file": "privacy.json",
   "occlusion_file": "occlusion.json",
-  "position_index": 6,
-  "position_index_notes": "Which physical pointing setup the camera is in. INCREMENT whenever the camera is moved, nudged or remounted. Unlike astrocam, eclipticam is NOT clamped: moves of 0.2-2 deg happen without notice and most are recorded nowhere, so the registry was built from the data (astro-science, 2026-10-10, for the Saturn walk): a pointing fit per night (scratch/saturn-walk/scan-epochs.py, epochs-scan.csv) and every 20 min through the nights around each step (scan-within.py, within-scan.csv), confirmed by red/cyan roofline overlays (look/boundaries/). The pointing given per epoch is a STARTING POINT, not a calibration: within one night the fit wanders 0.1-0.3 deg in alt (fixed lens centre and k, a changing star field), and epoch 6 creeps in roll, so every use still needs a per-night or per-frame refine. Lens model: cammodel-2026-10-07.json (equidistant + cubic, binned 2304x1296 grid). NOT YET STAMPED as POSINDEX: v3w_night_daemon.py does not read position_index (astrocam's does).",
+  "position_index": 7,
+  "position_index_notes": "Which physical pointing setup the camera is in. INCREMENT whenever the camera is moved, nudged or remounted. Unlike astrocam, eclipticam is NOT clamped: moves of 0.2-2 deg happen without notice and most are recorded nowhere, so the registry was built from the data (astro-science, 2026-10-10, for the Saturn walk): a pointing fit per night (scratch/saturn-walk/scan-epochs.py, epochs-scan.csv) and every 20 min through the nights around each step (scan-within.py, within-scan.csv), confirmed by red/cyan roofline overlays (look/boundaries/). The pointing given per epoch is a STARTING POINT, not a calibration: within one night the fit wanders 0.1-0.3 deg in alt (fixed lens centre and k, a changing star field), and epoch 6 creeps in roll, so every use still needs a per-night or per-frame refine. Lens model: cammodel-2026-10-07.json (equidistant + cubic, binned 2304x1296 grid). STAMPED as POSINDEX from epoch 7 (2026-10-13 21:53 BST): v3w_night_daemon.py reads position_index; earlier frames carry none and are placed by date.",
   "position_registry": {
     "1": {
       "label": "rosebush",
@@ -185,7 +178,7 @@
         4608,
         2592
       ],
-      "dates": "2026-09-17T22:30Z..",
+      "dates": "2026-09-17T22:30Z..2026-10-13",
       "pointing": {
         "az0_deg": 199.21,
         "alt0_deg": 30.68,
@@ -194,6 +187,19 @@
         "solved_night": "2026-10-05"
       },
       "notes": "A step between frames at 22:21 and 22:42 UTC on 09-17: roll 0.6 to 1.0, az -0.23 deg. Not in any session. After it roll CREEPS with no single step: 1.0 (09-17) to 1.45 (09-22), 1.4 (09-24..09-27), 1.6 (09-30), 1.75 (10-06), with az 199.8 to 199.2. 09-24 and 09-27 overlap, so the small 09-24/09-30 roofline fringe is this creep, not a move. Night 10-07 fits 0.25 deg higher in alt than 10-06 and 10-09 (alt 30.8-31.1); left inside this epoch. Lens position pinned at 3.30 from 10-09 (it was a 3.5-4.5 sawtooth), so f differs before and after."
+    },
+    "7": {
+      "label": "beside HQ",
+      "sensor": "imx708",
+      "camera": "Pi Camera Module 3 Wide, behind a window",
+      "bayer": "RGGB",
+      "resolution": [
+        4608,
+        2592
+      ],
+      "dates": "2026-10-13..",
+      "pointing": null,
+      "notes": "A deliberate move on 2026-10-13, recorded at the time: v3w relocated to share the window with the new HQ 16 mm camera (eclipticam-hq), then set 3 cm forward on a hot-glued spacer so the HQ lens is out of its field. Dusk still 18:26 BST: ~80% sky; window frame across the top ~15-18% (narrowest mid-frame), slivers in both top corners, rooftops along the bottom; a pale crescent ghost at ~(1560,650) full-res, probably a room reflection in the double glazing. First frames stamped POSINDEX 7 from 21:53 BST; the frames of the 10-13 night before that are epoch 7 too but unstamped. Pointing to be solved; occlusion is stale."
     }
   }
 }
