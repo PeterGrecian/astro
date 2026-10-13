@@ -362,6 +362,9 @@ def main() -> int:
                          "night already in Deep Archive (needs the frames "
                          "still on disk; dry-run without --go)")
     args = ap.parse_args()
+    # Long background IO at idle IO priority (house rule, 2026-10-13); set
+    # before any threads start so they inherit it.
+    subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], check=False)
 
     if args.camera in NEVER_COLD:
         die(f"{args.camera} is never cold-archived (low value, Peter "
