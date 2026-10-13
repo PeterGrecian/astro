@@ -328,8 +328,25 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
             h["LENSPREP"] = (float(lp_rep), "reported LensPosition (metadata)")
         if lp_act is not None:
             h["LENSACT"] = (lp_act, "lens DURING this exposure (prev report)")
-        fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp_path, overwrite=True)
-        tmp_path.rename(out_path)
+        # A full buffer is transient: the uploader is behind (an NFS stall of
+        # ~45 s filled astrocam's 50 MB tmpfs on 2026-10-12 and the ENOSPC
+        # killed this thread, losing the rest of the night). Hold the frame
+        # and retry; meanwhile the queue fills and the capture thread blocks
+        # on put(), so frames pause rather than vanish silently.
+        delay = 2.0
+        while True:
+            try:
+                fits.HDUList([fits.PrimaryHDU(), hdu]).writeto(tmp_path, overwrite=True)
+                tmp_path.rename(out_path)
+                break
+            except OSError as e:
+                tmp_path.unlink(missing_ok=True)
+                if stop.is_set():
+                    log.error(f"write failed while stopping, frame dropped: {e}")
+                    break
+                log.warning(f"write {out_path.name} failed ({e}); retry in {delay:.0f}s")
+                stop.wait(delay)
+                delay = min(delay * 2, 30.0)
     legacy_fh.close()
 
 
@@ -426,6 +443,14 @@ def run(cfg: StreamingConfig, log: Optional[logging.Logger] = None) -> str:
             # night frames make it likelier).
             if not cap_t.is_alive() and not stop.is_set():
                 log.error("capture thread died; ending the stream")
+                capture_failed = True
+                stop.set()
+                break
+            # Same zombie from the other side: a dead compress thread leaves
+            # the camera open and the capture thread blocked on a full queue
+            # (2026-10-12, astrocam, 11 h with no frames).
+            if not comp_t.is_alive() and not stop.is_set():
+                log.error("compress thread died; ending the stream")
                 capture_failed = True
                 stop.set()
                 break
