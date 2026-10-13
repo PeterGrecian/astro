@@ -1,5 +1,7 @@
 {
-  "name": "eclipticam-hq",
+  "name": "eclipticam-hq16",
+  "label": "HQ16",
+  "label_notes": "Peter's name for it (2026-10-13): HQ camera + 16 mm lens. It ran its first ~25 minutes on 10-13 as eclipticam-hq, writing to night/2026-10-13/hq/; those frames were moved into hq16/ at the rename.",
   "host": "eclipticam",
   "sensor": "IMX477",
   "bayer": "SRGGB12",
@@ -25,13 +27,13 @@
     "night_gain": 1.0,
     "buffer_count": 2
   },
-  "capture_notes": "Night streaming params for eclipticam/hq_night_daemon.py, which reads them (env HQ_EXPOSURE_US / HQ_GAIN override per host). 60 s matches v3w's cadence. buffer_count 2 rather than the house 4 because this 1 GB host also streams v3w at full res; the systemd unit caps the daemon's memory so an OOM takes this camera, not v3w.",
+  "capture_notes": "Night streaming params for eclipticam/hq16_night_daemon.py, which reads them (env HQ_EXPOSURE_US / HQ_GAIN override per host). 60 s matches v3w's cadence. buffer_count 2 rather than the house 4 because this 1 GB host also streams v3w at full res; the systemd unit caps the daemon's memory so an OOM takes this camera, not v3w.",
   "rotate_180": false,
   "rotate_180_notes": "The camera IS mounted upside down, but the 180 degree turn is done by the driver (dtoverlay imx477 rotation=0 flips at the sensor), so every tool's output is already upright and libcamera reports RGGB. Do NOT also set a software rotation_180: that would turn the frames back over.",
   "frames_root": "~/eclipticam-frames",
   "frames_root_by_host": {"pip": "/mnt/muppet/bigstore/eclipticam-frames"},
   "night_layout": "percam",
-  "night_layout_notes": "night/<night-date>/hq/HH/<epoch_ms>.fits.fz beside v3w's night/<night-date>/v3w/, written by the shared v3w_uploader.py with V3W_SUBCAM=hq.",
+  "night_layout_notes": "night/<night-date>/hq16/HH/<epoch_ms>.fits.fz beside v3w's night/<night-date>/v3w/, written by the shared v3w_uploader.py with V3W_SUBCAM=hq16.",
   "processing_host": "eclipticam",
   "occlusion_file": null
 }

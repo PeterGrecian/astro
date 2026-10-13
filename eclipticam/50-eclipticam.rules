@@ -7,8 +7,8 @@ polkit.addRule(function(action, subject) {
         var unit = action.lookup("unit");
         if (unit == "eclipticam-v3w-night.service" ||
             unit == "eclipticam-v3w-uploader.service" ||
-            unit == "eclipticam-hq-night.service" ||
-            unit == "eclipticam-hq-uploader.service") {
+            unit == "eclipticam-hq16-night.service" ||
+            unit == "eclipticam-hq16-uploader.service") {
             return polkit.Result.YES;
         }
     }

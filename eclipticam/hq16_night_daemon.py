@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""eclipticam-hq-night — streaming night capture for the HQ 16 mm camera.
+"""eclipticam-hq16-night — streaming night capture for the HQ 16 mm camera.
 
 The IMX477 HQ camera on cam1 (first light 2026-10-13), beside v3w on cam0.
 Same lifecycle as v3w_night_daemon.py: started and stopped by
 eclipticam-capture.service on the sun-altitude switch; exits 0 on SIGTERM
 or dawn saturation, non-zero on camera failure (systemd restarts it).
 
-Writes Rice-compressed FITS to /var/lib/eclipticam-buffer/hq/; a second
-instance of v3w_uploader.py (V3W_SUBCAM=hq) drains it to the night tree.
-camera.json (eclipticam-hq) is the single source of truth for params.
+Writes Rice-compressed FITS to /var/lib/eclipticam-buffer/hq16/; a second
+instance of v3w_uploader.py (V3W_SUBCAM=hq16) drains it to the night tree.
+camera.json (eclipticam-hq16) is the single source of truth for params.
 """
 import logging
 import os
@@ -23,9 +23,9 @@ if str(REPO) not in sys.path:
 from astro.capture.streaming import StreamingConfig, run
 from astro.config import CameraConfig
 
-CAMERA = "eclipticam-hq"
+CAMERA = "eclipticam-hq16"
 BUFFER_DIR = Path(os.environ.get("HQ_BUFFER_DIR",
-                                 "/var/lib/eclipticam-buffer/hq"))
+                                 "/var/lib/eclipticam-buffer/hq16"))
 
 
 def main() -> int:

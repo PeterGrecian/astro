@@ -30,7 +30,7 @@ FRAMES_ROOT = Path(os.environ.get("V3W_FRAMES_ROOT",
 UPLOAD_INTERVAL_S = float(os.environ.get("V3W_UPLOAD_INTERVAL_S", "5"))
 # Which subcam directory under night/<date>/ the frames land in. The same
 # uploader drains every eclipticam stream: v3w by default, and the HQ 16mm
-# camera (2026-10-13) via its own unit with V3W_SUBCAM=hq and its own buffer.
+# camera (2026-10-13) via its own unit with V3W_SUBCAM=hq16 and its own buffer.
 SUBCAM = os.environ.get("V3W_SUBCAM", "v3w")
 
 _stop = False
