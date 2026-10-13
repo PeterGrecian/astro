@@ -27,7 +27,8 @@ Schema:
   {"schema": 1, "camera": "eclipticam", "generated_utc": "...",
    "nights": [{"night": "YYYY-MM-DD", "thumb_key": "<key>"|null,
                "n_frames": N|null, "n_stacked": N|null,
-               "verdict": "clear"|... |null}, ...]}   # newest first
+               "verdict": "clear"|... |null,
+               "frames_utc": [first, last]|null}, ...]}   # newest first
 
 Usage:
     build-calendar-index --camera eclipticam [--publish] [--out PATH]
@@ -168,6 +169,10 @@ def build(cfg):
             "n_stacked": s.get("n_stacked"),
             "stops": extract_stops(s, cfg),
             "verdict": s.get("verdict"),
+            # Capture span, so a no-thumb card can say when it ran
+            # without the page fetching summary.json.
+            "frames_utc": [s.get("first_frame_utc"), s.get("last_frame_utc")]
+                          if s.get("first_frame_utc") else None,
         })
 
     return {
