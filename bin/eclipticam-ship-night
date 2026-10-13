@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# eclipticam-ship-night — end-of-night sync of eclipticam's local SSD night tree
+# to bigstore 'bs' over SSH, then ship-and-free the local copy. Runs ON eclipticam.
+#
+# WHAT THIS IS FOR (astro-storage strand — the dynamic bs sync, eclipticam half)
+# -----------------------------------------------------------------------------
+# eclipticam stages capture on its local SSD (/mnt/ssd, 109G, chronically ~91%
+# full) because its link to muppet is the powerline bridge (~100Mbit real) — too
+# slow to write capture directly. This tool is the "stage-then-copy" back half:
+# once a night is complete and static, rsync it SSD -> bs (muppet) over SSH,
+# VERIFY it landed byte-clean, THEN trash the local copy (keeping a small rolling
+# safety window). Keeps the SSD from filling — the whole point of staging.
+#
+# Contrast with astrocam, which writes DIRECT to bs (no staging) — see the
+# strand DESIGN-bs-nightly-sync.md for the two-camera asymmetry.
+#
+# TRANSPORT = rsync over SSH (not the NFS mount). Chosen 2026-07-29:
+#  * Sidesteps the bs export's all_squash mapping entirely — files land owned by
+#    peter on muppet natively, so plain `rsync -a` works (no chgrp EPERM / spurious
+#    code-23 that would block ship-and-free, which the NFS-mount version hit).
+#  * Delta transfer + compression (-z) — meaningfully faster over the slow
+#    powerline; verify checksums computed on each end, not read back over NFS.
+#  * Matches the house pattern (ship-astro-data, bigstore-xfer run-eclipticam-ssd).
+#  * Driven ON eclipticam, pushing straight to muppet (direct routing).
+#  * Does NOT depend on the bs NFS mount being present on eclipticam.
+#
+# DESIGN PRINCIPLES (astro-storage doctrine)
+# ------------------------------------------
+#  * SHIP-AND-FREE, VERIFIED. rsync copies to bs, a --checksum dry-run confirms
+#    zero data differences, and ONLY THEN is the local bulk data removed. A
+#    night that doesn't verify is never freed.
+#  * FREEING IS A STRIP, NOT AN rm -rf. The night DIRECTORY survives, holding
+#    brightness.csv + summary.json (~17 KB/night). combined-brightness reads
+#    LOCAL per-night CSVs, so rm -rf was quietly eating the published chart's
+#    history down to the safety window. See RETAIN_NAMES.
+#  * SAFETY WINDOW. The most-recent KEEP_NIGHTS nights stay on the SSD as a
+#    rolling local hot copy even after they've landed on bs; only verified nights
+#    OLDER than the window get trashed.
+#  * FREE ONLY WHAT'S PROVABLY RETAINED. Freeing removes the local bulk data,
+#    reached ONLY after that night byte-verifies on bs. bs (5.5T) is the retained
+#    copy — that's what satisfies the "never destroy the last copy" rule here.
+#    (super/bin/trash is deliberately NOT used: ~/.trash is on the 15G root fs, a
+#    different filesystem from /mnt/ssd, so it cross-fs-copies — fills root, frees
+#    no SSD. Verified-elsewhere is the safety net, not a local second copy.)
+#  * FAIL-SAFE. If muppet is unreachable / rsync fails / verify differs, this tool
+#    does NOTHING destructive — it logs, exits non-zero, and the next run retries.
+#    The safety window absorbs missed nights.
+#  * DRY-RUN FIRST. Without --go it shows what would copy and what would be freed;
+#    nothing is written or trashed until --go.
+#
+# LAYOUT
+#   src:  /mnt/ssd/eclipticam-frames/night/<YYYY-MM-DD>/...            (on eclipticam)
+#   dst:  peter@muppet:/mnt/bigstore/astro-data/eclipticam-frames/night/<YYYY-MM-DD>/...
+#
+# Usage:
+#   eclipticam-ship-night [--go] [--keep N] [--src DIR] [--dst DIR]
+#                         [--host USER@HOST] [--addr IP]
+#     --go        actually copy + trash (default: dry-run)
+#     --keep N    retain the N most-recent nights on the SSD (default 3)
+#     --host      ssh target for muppet (default peter@muppet.local)
+#     --addr      stable IP for muppet, used instead of the hostname if given
+#                 (mDNS can hand back a flaky link-local v6 — mirrors ship-astro-data)
+#
+# Typically driven by a once-daily systemd timer on eclipticam (~09:00 local,
+# after the night tree is complete and static). See --hints.
+set -uo pipefail
+
+# Long background IO runs at idle IO priority (house rule, 2026-10-13): a bulk
+# copy onto bigstore at full priority cost astrocam the 10-12 night.
+ionice -c3 -p $$ 2>/dev/null || true
+
+SELF="eclipticam-ship-night"
+SRC_ROOT="/mnt/ssd/eclipticam-frames/night"
+DST_ROOT="/mnt/bigstore/astro-data/eclipticam-frames/night"   # path ON muppet
+DST_HOST="peter@muppet.local"
+DST_ADDR="192.168.0.10"      # muppet's stable LAN IP (see LOCALCLAUDE/resolve-host)
+KEEP_NIGHTS=3
+GO=0
+
+die() { echo "$SELF: $*" >&2; exit 1; }
+log() { echo "$SELF: $*"; }
+
+hints() {
+  cat <<'HINTS'
+eclipticam-ship-night — sync eclipticam SSD night tree to bigstore 'bs' over SSH,
+                        then ship-and-free the local copy (verified). Runs ON eclipticam.
+
+WHAT IT DOES
+  For each complete night on the local SSD (/mnt/ssd/eclipticam-frames/night/):
+    1. rsync -az over SSH to muppet:/mnt/bigstore/astro-data/eclipticam-frames/night/
+    2. verify with a --checksum dry-run (must report ZERO data differences)
+    3. if verified AND older than the safety window (--keep N, default 3), strip
+       the local bulk data, KEEPING brightness.csv + summary.json so the
+       multi-night chart keeps its history (the verified bs copy is the retained
+       copy of the frames; ~/.trash can't be used — different, tiny filesystem).
+  Failures (muppet unreachable / rsync rc!=0 / verify diff) are non-destructive:
+  log, exit non-zero, retry next run. The safety window absorbs missed nights.
+
+WHY (astro-storage strand)
+  eclipticam stages on its SSD because its powerline link to muppet is slow
+  (~100Mbit). This is the "copy back to bs and free local" half. bs = the
+  principal live astro store (muppet /mnt/bigstore/astro-data, 5.5T).
+
+TRANSPORT
+  rsync over SSH, driven ON eclipticam, pushing straight to muppet (direct).
+  Chosen over the NFS mount because the bs export is all_squash (mount writes
+  hit chgrp EPERM); over SSH files land owned by peter natively and -a works.
+  Does NOT need the bs NFS mount present on eclipticam.
+
+RUN
+  eclipticam-ship-night            # dry-run: show copies + frees, touch nothing
+  eclipticam-ship-night --go       # do it
+  eclipticam-ship-night --keep 5   # wider local safety window
+
+CADENCE
+  Once/day via systemd timer on eclipticam, ~09:00 Europe/London (night tree
+  is static by then). Not tied to capture stop.
+HINTS
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --go) GO=1 ;;
+    --keep) shift; KEEP_NIGHTS="${1:?--keep needs N}" ;;
+    --src) shift; SRC_ROOT="${1:?--src needs DIR}" ;;
+    --dst) shift; DST_ROOT="${1:?--dst needs DIR}" ;;
+    --host) shift; DST_HOST="${1:?--host needs USER@HOST}" ;;
+    --addr) shift; DST_ADDR="${1:?--addr needs IP}" ;;
+    --hints) hints; exit 0 ;;
+    -h|--help) sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown arg: $1 (try --help / --hints)" ;;
+  esac
+  shift
+done
+
+# Resolve the ssh target: prefer the stable IP if given (mDNS can be flaky),
+# keeping the user@ part.
+if [ -n "$DST_ADDR" ]; then
+  SSH_TARGET="${DST_HOST%@*}@${DST_ADDR}"
+else
+  SSH_TARGET="$DST_HOST"
+fi
+SSH_OPTS="-o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
+
+command -v rsync >/dev/null 2>&1 || die "rsync not found"
+
+# FREEING: we rm the local night dir directly, NOT super/bin/trash. The house
+# "never rm data" rule is about not destroying the only/last copy — here the copy
+# is provably preserved: freeing happens ONLY after the night is byte-verified on
+# bs (muppet, 5.5T) AND it's outside the local safety window. bs IS the retained
+# copy; a second trashed copy is redundant. And it's impossible anyway: ~/.trash
+# is on eclipticam's 15G root fs, a DIFFERENT filesystem from /mnt/ssd, so `trash`
+# does a cross-fs COPY that fills root and frees nothing on the SSD — the exact
+# failure hit in testing 2026-07-29 (root fs -> 100%, SSD not reclaimed). So the
+# correct, space-reclaiming free of a verified night is a plain rm of the SSD dir.
+[ -d "$SRC_ROOT" ] || die "source night tree not found: $SRC_ROOT (run on eclipticam?)"
+
+# muppet reachability + dst writability probe (non-destructive). If muppet is
+# down or the dst tree isn't writable we bail here and retry next run.
+if ! ssh $SSH_OPTS "$SSH_TARGET" "mkdir -p '$DST_ROOT' && test -w '$DST_ROOT'" 2>/dev/null; then
+  die "muppet dst not reachable/writable: $SSH_TARGET:$DST_ROOT — nothing done, retry next run"
+fi
+
+# Nights present locally, sorted oldest-first (YYYY-MM-DD sorts lexically).
+mapfile -t NIGHTS < <(cd "$SRC_ROOT" && ls -d */ 2>/dev/null | sed 's#/$##' | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort)
+[ "${#NIGHTS[@]}" -gt 0 ] || { log "no dated night dirs under $SRC_ROOT — nothing to do"; exit 0; }
+
+# The KEEP_NIGHTS most-recent nights are protected from freeing regardless of
+# landing status (rolling local hot window).
+#
+# CLAMP to the array length first. `${NIGHTS[@]:(-N)}` returns EMPTY when N
+# exceeds the number of elements, so an over-large --keep would protect NOTHING
+# and free everything — the exact opposite of what the flag promises, and most
+# likely to bite precisely when someone passes a big --keep to be safe.
+declare -A PROTECTED=()
+keep_n="$KEEP_NIGHTS"
+[ "$keep_n" -gt "${#NIGHTS[@]}" ] && keep_n="${#NIGHTS[@]}"
+if [ "$keep_n" -gt 0 ]; then
+  for n in "${NIGHTS[@]:(-$keep_n)}"; do PROTECTED["$n"]=1; done
+fi
+
+# rsync over SSH. -a is safe here (files land owned by peter on muppet, no NFS
+# all_squash); -z compresses over the slow powerline; --partial resumes a killed
+# copy. The remote path is on muppet's real filesystem.
+RSYNC_SSH=(-e "ssh $SSH_OPTS")
+RSYNC_FLAGS=(-az --partial --info=stats2 --rsync-path="ionice -c3 rsync")  # muppet receiver idle IO
+
+# --- what survives freeing ---------------------------------------------
+# Freeing used to `rm -rf` the whole night dir. That reclaimed the space but
+# also took the night's brightness.csv, and `combined-brightness` reads
+# LOCAL per-night CSVs — so the multi-night chart published from eclipticam
+# silently shrank to the size of the safety window (3 curves instead of 7,
+# and the configured reference night dropped as "no brightness CSV").
+# Ship-and-free was quietly eating the chart's history.
+#
+# So free the BULK and keep the SKELETON: the night directory stays, holding
+# only its small metadata. brightness.csv is ~15 KB and summary.json ~1.5 KB,
+# so the entire archive's skeletons cost ~1.3 MB on a 109 GB SSD — nothing,
+# against a deliverable that needs months of history to mean anything.
+#
+# Keeping the DIRECTORY (rather than copying CSVs to a side-cache) is the
+# point: the layout stays exactly night/<date>/brightness.csv, so
+# astro.process.brightness.find_night_csvs — the single place that knows the
+# live directory layouts — needs no fourth case, and combined-brightness,
+# replot-brightness and all-time-brightness all keep working unchanged.
+RETAIN_NAMES=(brightness.csv summary.json)
+RETAIN_DESC="brightness.csv + summary.json"
+
+# How many skeletons to keep. combined-brightness plots --recent 6 plus the
+# camera.json reference night(s), so that is exactly what the SSD needs to
+# rebuild its published chart unaided — keeping every night's skeleton
+# forever would work too (~17 KB each) but there is no call for it
+# (Peter, 2026-08-25: "just a rolling 6 and the ref").
+#
+# The FULL per-night CSV history lives on bs and is never pruned, so the
+# whole-archive tools (bin/all-time-brightness) still have everything —
+# they just have to run on muppet, where the archive is, not on the Pi.
+SKELETON_KEEP=6
+# Reference nights are pinned from the camera config rather than hardcoded,
+# so changing reference_nights in camera.json cannot silently strand the
+# chart with a reference whose CSV this tool has already deleted.
+CAMERA_JSON="${ECLIPTICAM_CAMERA_JSON:-$HOME/astro/eclipticam-v3w/camera.json}"
+
+# Delete a night's bulk data, keeping RETAIN_NAMES and pruning the emptied
+# subdirectories. Deliberately NOT rm -rf: see above.
+strip_night() {
+  local dir="$1" args=() n
+  for n in "${RETAIN_NAMES[@]}"; do
+    # accept both plain and the mid-migration subcam-prefixed names
+    # (e.g. v3w_brightness.csv), matching find_night_csvs.
+    args+=(! -name "$n" ! -name "*_$n")
+  done
+  find "$dir" -type f "${args[@]}" -delete || return 1
+  # -delete implies -depth, so nested empties go bottom-up in one pass.
+  find "$dir" -mindepth 1 -type d -empty -delete 2>/dev/null
+  return 0
+}
+
+log "$( [ $GO -eq 1 ] && echo LIVE || echo DRY-RUN ): ${#NIGHTS[@]} night(s) on SSD; keeping newest $KEEP_NIGHTS local; -> $SSH_TARGET"
+rc_any=0
+copied=0 freed=0
+
+for night in "${NIGHTS[@]}"; do
+  src="$SRC_ROOT/$night/"
+  dst="$SSH_TARGET:$DST_ROOT/$night/"
+
+  # 1. copy to bs over ssh
+  if [ $GO -eq 1 ]; then
+    if ! rsync "${RSYNC_FLAGS[@]}" "${RSYNC_SSH[@]}" "$src" "$dst"; then
+      log "  [$night] rsync FAILED (muppet down mid-copy?) — not freeing, retry next run"; rc_any=1; continue
+    fi
+  else
+    log "  [$night] would rsync -az (ssh)  $src -> $dst"
+  fi
+
+  # 2. verify: --checksum dry-run must show zero DATA differences. Count only
+  # files whose data differs: itemize codes '>f'/'cf' (needs transfer) — NOT
+  # '.f' (attribute-only). Any missing/short/changed file shows as '>f'; a
+  # byte-identical file (checksum match) emits no line.
+  if [ $GO -eq 1 ]; then
+    diffs="$(rsync -acn --itemize-changes --rsync-path="ionice -c3 rsync" "${RSYNC_SSH[@]}" "$src" "$dst" 2>/dev/null | grep -cE '^(>|c)f' || true)"
+    if [ "${diffs:-1}" -ne 0 ]; then
+      log "  [$night] VERIFY FAILED ($diffs differing item(s)) — not freeing"; rc_any=1; continue
+    fi
+    copied=$((copied+1))
+    log "  [$night] landed + verified on bs"
+  fi
+
+  # 3. ship-and-free, but only outside the safety window
+  if [ -n "${PROTECTED[$night]:-}" ]; then
+    log "  [$night] within safety window (newest $KEEP_NIGHTS) — kept local"
+    continue
+  fi
+  # Already stripped on an earlier run? Nothing left to free; don't log it
+  # as a fresh free every night for the rest of time.
+  if ! compgen -G "$SRC_ROOT/$night/**/*.fits.fz" >/dev/null 2>&1 \
+     && ! compgen -G "$SRC_ROOT/$night/*.fits.fz" >/dev/null 2>&1; then
+    log "  [$night] already stripped — metadata skeleton kept local"
+    continue
+  fi
+  if [ $GO -eq 1 ]; then
+    # Safe strip: only reached AFTER byte-verify on bs succeeded for THIS night
+    # and it's outside the safety window. The verified bs copy is the retained
+    # copy of the BULK data.
+    if strip_night "$SRC_ROOT/$night"; then
+      freed=$((freed+1)); log "  [$night] freed local SSD bulk (kept $RETAIN_DESC; verified on bs is the retained copy)"
+    else
+      log "  [$night] strip failed — left local"; rc_any=1
+    fi
+  else
+    log "  [$night] would free local SSD bulk, keeping $RETAIN_DESC — landed+verified on bs & outside window"
+  fi
+done
+
+# 4. Prune skeletons beyond the rolling window.
+# Only SKELETON-ONLY dirs are candidates: anything still holding frames is
+# governed by the safety window above and is never touched here. Protected:
+# the newest SKELETON_KEEP nights (what combined-brightness --recent 6 needs)
+# and the camera's reference night(s). Everything else has its full copy on
+# bs, so removing a ~17 KB skeleton destroys nothing.
+REF_NIGHTS=()
+if [ -r "$CAMERA_JSON" ] && command -v python3 >/dev/null 2>&1; then
+  mapfile -t REF_NIGHTS < <(python3 -c 'import json,sys
+try: print("\n".join(json.load(open(sys.argv[1])).get("reference_nights") or []))
+except Exception: pass' "$CAMERA_JSON" 2>/dev/null)
+fi
+[ "${#REF_NIGHTS[@]}" -gt 0 ] && log "reference night(s) pinned from $(basename "$CAMERA_JSON"): ${REF_NIGHTS[*]}"
+
+mapfile -t ALL < <(cd "$SRC_ROOT" && ls -d */ 2>/dev/null | sed 's#/$##' | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort)
+declare -A SKELKEEP=()
+for n in "${ALL[@]:(-$SKELETON_KEEP)}"; do SKELKEEP["$n"]=1; done
+for n in "${REF_NIGHTS[@]}"; do [ -n "$n" ] && SKELKEEP["$n"]=1; done
+
+pruned=0
+for night in "${ALL[@]}"; do
+  [ -n "${SKELKEEP[$night]:-}" ] && continue
+  # still has bulk? then it is the safety window's business, not ours.
+  if compgen -G "$SRC_ROOT/$night/**/*.fits.fz" >/dev/null 2>&1 \
+     || compgen -G "$SRC_ROOT/$night/*.fits.fz" >/dev/null 2>&1; then
+    continue
+  fi
+  if [ $GO -eq 1 ]; then
+    if rm -rf "${SRC_ROOT:?}/${night:?}"; then
+      pruned=$((pruned+1))
+    else
+      log "  [$night] skeleton prune failed"; rc_any=1
+    fi
+  else
+    pruned=$((pruned+1))
+  fi
+done
+[ "$pruned" -gt 0 ] && log "$( [ $GO -eq 1 ] && echo pruned || echo would prune ) $pruned old skeleton(s); kept newest $SKELETON_KEEP + ref (full CSV history remains on bs)"
+
+log "done: copied+verified=$copied  freed=$freed  ($( [ $GO -eq 1 ] && echo LIVE || echo dry-run ))"
+exit $rc_any

@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# ship-astro-data — copy an astro data tree to another disk/host, verified,
+# routed directly (never through a third host), source left intact.
+#
+# WHAT THIS IS FOR (astro-storage strand — disk management)
+# ---------------------------------------------------------
+# Getting astro data OFF a tight disk onto a roomy one: puppy's root NVMe and
+# muppet's root NVMe fill with capture/backup trees; /mnt/photodisk on muppet
+# (and other big disks) have room. This is the "move it somewhere roomy" half of
+# disk management; `squash-starcam-night` is the "make it smaller" half.
+#
+# DESIGN PRINCIPLES (the things this strand is responsible for)
+# ------------------------------------------------------------
+#  * COPY ONLY. rsync copies + verifies; the SOURCE IS NEVER TOUCHED. Freeing
+#    the source (trash/delete) is a separate, human-authorised step afterwards.
+#  * DIRECT ROUTING. A transfer between two remote hosts must be driven ON one of
+#    those two hosts so the bytes go straight between them — never relayed
+#    through the box you're typing on (e.g. pip). This tool ssh-es to the source
+#    host and runs rsync there, pushing to the destination host directly.
+#  * VERIFIED. rsync runs with --checksum on a second pass (or -c inline) so a
+#    completed copy is byte-verified, not just size/mtime-matched.
+#  * DRY-RUN FIRST. Without --go it only shows what would transfer (rsync -n) and
+#    the size — nothing moves until you pass --go.
+#
+# ROUTING MODEL
+#   <src-host>:<src-path>  ->  <dst-host>:<dst-path>
+#   - If src-host is remote, rsync runs ON src-host (ssh) and pushes to dst-host.
+#     dst-host must be reachable BY NAME/IP from src-host (we pass --dst-addr for
+#     a stable address, since mDNS can hand back a flaky link-local v6).
+#   - If src-host is local (this box) the rsync runs here (dst may be local or
+#     remote). Use this only when THIS box is genuinely an endpoint.
+#   - "local" / "" / this hostname all mean "run here".
+#
+# Usage:
+#   ship-astro-data SRC DST [--go] [--dst-addr IP] [rsync-extra...]
+#     SRC / DST are  [host:]path   (host omitted or "local" = this machine)
+#
+# Examples (astro-storage, 2026-07):
+#   # muppet root -> photodisk, local on muppet, dry-run then go:
+#   ssh peter@muppet.local 'ship-astro-data \
+#       /home/peter/starcam-backup /mnt/photodisk/backups/starcam-backup'
+#   ssh peter@muppet.local 'ship-astro-data \
+#       /home/peter/starcam-backup /mnt/photodisk/backups/starcam-backup --go'
+#
+#   # puppy -> photodisk-on-muppet, driven ON puppy so bytes go puppy->muppet
+#   # (NOT through pip); dst addressed by stable IP:
+#   ssh peter@puppy.local 'ship-astro-data \
+#       /home/peter/eclipticam-frames \
+#       muppet:/mnt/photodisk/backups/eclipticam-frames \
+#       --dst-addr 192.168.0.10 --go'
+set -euo pipefail
+
+# Long background IO runs at idle IO priority (house rule, 2026-10-13): a bulk
+# copy onto bigstore at full priority cost astrocam the 10-12 night.
+ionice -c3 -p $$ 2>/dev/null || true
+
+SELF="ship-astro-data"
+die() { echo "$SELF: $*" >&2; exit 1; }
+
+hints() {
+  cat <<'HINTS'
+ship-astro-data — copy an astro data tree to roomier storage, verified, direct-routed.
+
+WHAT IT DOES
+  Copies SRC -> DST with rsync -a --checksum. SOURCE IS NEVER MODIFIED (copy
+  only). Freeing the source is a separate human step done afterwards. Dry-run by
+  default; nothing moves without --go.
+
+WHY IT EXISTS (astro-storage disk management)
+  Pull astro data off tight root disks (puppy /, muppet /) onto roomy ones
+  (/mnt/photodisk on muppet, other big disks). Sibling of squash-starcam-night
+  (which shrinks in place); this one relocates.
+
+ROUTING — the important bit
+  A transfer between two REMOTE hosts is driven ON the source host so bytes go
+  straight src->dst and never relay through the box you typed on (e.g. pip).
+  So to ship puppy->muppet, run this ON puppy (ssh peter@puppy.local '...').
+  Pass --dst-addr <IP> to pin a stable address (mDNS may return a flaky
+  link-local IPv6). Get the IP from `resolve-host <host>`.
+
+USAGE
+  ship-astro-data SRC DST [--go] [--dst-addr IP] [extra rsync args...]
+    SRC, DST = [host:]path   (host omitted / "local" = run here)
+    (no --go)  dry-run: shows what would transfer + total size, moves nothing
+    --go       actually transfer, then a --checksum verify pass
+
+TYPICAL (2026-07)
+  # local on muppet: root -> photodisk
+  ssh peter@muppet.local 'ship-astro-data /home/peter/starcam-backup \
+      /mnt/photodisk/backups/starcam-backup --go'
+  # on puppy: eclipticam -> photodisk on muppet (direct, not via pip)
+  ssh peter@puppy.local 'ship-astro-data /home/peter/eclipticam-frames \
+      muppet:/mnt/photodisk/backups/eclipticam-frames --dst-addr 192.168.0.10 --go'
+
+AFTER
+  Verify, then a human trashes/deletes the source (never rm data — use
+  super/bin/trash). Update whereisallthedata.csv + astro-storage-inventory if
+  the copy changes where a night's canonical bytes live.
+HINTS
+  exit 0
+}
+
+usage() {
+  cat <<'USG'
+Usage: ship-astro-data SRC DST [--go] [--dst-addr IP] [rsync-extra...]
+  Copy an astro tree to roomier storage, verified, source left intact.
+  SRC/DST = [host:]path  ("local" or bare path = this machine).
+  Without --go it's a dry-run (shows size, moves nothing).
+  Run ON the source host for remote->remote so bytes don't relay via this box.
+  --hints  full AI-facing surface.
+USG
+  exit 0
+}
+
+case "${1:-}" in
+  --hints) hints ;;
+  --help|-h|"") usage ;;
+esac
+
+SRC="$1"; DST="$2"; shift 2
+GO=0; DST_ADDR=""; EXTRA=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --go) GO=1 ;;
+    --dst-addr) DST_ADDR="$2"; shift ;;
+    --dst-addr=*) DST_ADDR="${1#*=}" ;;
+    *) EXTRA+=("$1") ;;
+  esac
+  shift
+done
+
+# split [host:]path
+src_host="${SRC%%:*}"; src_path="${SRC#*:}"
+dst_host="${DST%%:*}"; dst_path="${DST#*:}"
+case "$SRC" in */*) [ "$src_host" = "$src_path" ] && { src_host=""; src_path="$SRC"; } ;; *) src_host=""; src_path="$SRC" ;; esac
+case "$DST" in */*) [ "$dst_host" = "$dst_path" ] && { dst_host=""; dst_path="$DST"; } ;; *) dst_host=""; dst_path="$DST" ;; esac
+here="$(hostname -s)"
+is_local() { [ -z "$1" ] || [ "$1" = local ] || [ "$1" = "$here" ] || [ "$1" = "$here.local" ]; }
+
+# resolve destination address for the rsync target (stable over flaky mDNS)
+dst_for_rsync="$dst_path"
+if ! is_local "$dst_host"; then
+  addr="${DST_ADDR:-$dst_host}"
+  dst_for_rsync="peter@${addr}:${dst_path}"
+fi
+
+# rsync base transfer flags. Trailing slash on src => copy CONTENTS into dst
+# (dst dir represents the tree). We add the slash explicitly below.
+# The receiving rsync (on dst host) is idle too: the contended disk is the
+# destination, and our own ionice does not reach a process ssh starts there.
+RSYNC_BASE=(rsync -a --partial --human-readable --rsync-path="ionice -c3 rsync" "${EXTRA[@]}")
+
+run_rsync() {  # <mode: dry|real|verify>
+  local mode="$1" flags=()
+  case "$mode" in
+    # transfer phases show progress+stats; verify must NOT (its stdout is parsed
+    # for diffs, and progress/stats lines would look like differences — the
+    # false-positive that flagged the first clean 112G copy, 2026-07-18).
+    dry)    flags=(-n --info=progress2,stats2) ;;
+    real)   flags=(--info=progress2,stats2) ;;
+    verify) flags=(-c -n --itemize-changes --quiet) ;;  # checksum; emit only real change lines
+  esac
+  local cmd=("${RSYNC_BASE[@]}" "${flags[@]}" "${src_path%/}/" "$dst_for_rsync")
+  if is_local "$src_host"; then
+    "${cmd[@]}"
+  else
+    # drive rsync ON the source host: bytes go src-host -> dst directly
+    ssh -o BatchMode=yes "peter@${src_host}.local" "ionice -c3 $(printf '%q ' "${cmd[@]}")"
+  fi
+}
+
+echo "$SELF: ${src_host:-local}:${src_path}  ->  ${dst_host:-local}:${dst_path}"
+is_local "$src_host" && echo "  (rsync runs HERE: $here)" \
+                     || echo "  (rsync runs ON $src_host -> pushes to ${DST_ADDR:-$dst_host}; not relayed via $here)"
+
+if [ "$GO" -eq 0 ]; then
+  echo "--- DRY RUN (rsync -n); pass --go to transfer ---"
+  run_rsync dry
+  echo "$SELF: dry-run only. Re-run with --go to copy."
+  exit 0
+fi
+
+echo "--- TRANSFER ---"
+run_rsync real
+echo "--- VERIFY (checksum compare; any itemized lines below = mismatch) ---"
+# Only rsync itemize-changes lines count as differences. An itemize line starts
+# with a change code like >f..t...... / cd+++++++++ / *deleting. Filter to those
+# so nothing but a genuine mismatch can trip the guard.
+diffs="$(run_rsync verify 2>/dev/null | grep -E '^([<>ch.*][fdLDS]|\*deleting)' || true)"
+if [ -n "$diffs" ]; then
+  echo "$diffs"
+  die "verify found $(printf '%s\n' "$diffs" | grep -c .) differing path(s) — DO NOT delete source; investigate."
+fi
+echo "$SELF: copy verified (checksum-clean), source untouched. A human deletes the source when happy."

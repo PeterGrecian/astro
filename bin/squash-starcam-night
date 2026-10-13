@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# squash-starcam-night — reduce an unsquashed starcam night to its canonical
+# sum8 + sum2 products, in place, without needing free space on the target disk.
+#
+# THE ASTRO-STORAGE SQUASH (see super/strands/astro-storage)
+# ----------------------------------------------------------
+# An unsquashed starcam night is a tree of hour buckets under a night dir:
+#     <night>/HH      full-res raw Bayer frames   (2592x1944, 16-bit, ~5 GB/hr)
+#     <night>/HHb     half-res "binned" twin      (1296x972,  ~1.5 GB/hr)
+# for HH in 00..03, 20..23 (roughly — whatever hours captured that night).
+#
+# The canonical *squashed* form (compare an already-done night such as
+# 2026-05-30) keeps two temporally-summed products per hour and DELETES the raw:
+#     <night>/HH-sum8    raw summed in groups of 8  (astro/bin/pair-sum --n 8)
+#     <night>/HHb-sum2   b-twin summed in groups of 2 (pair-sum --n 2)
+# pair-sum accumulates in uint32, so the sums are lossless; it drops temporal
+# resolution (cadence x8 / x2), which is the cheap-to-lose axis. Net footprint
+# ~0.17x the raw night (~40 GB -> ~6-8 GB). This is the RRD-pyramid lever the
+# strand exists for.
+#
+# WHY PHOTODISK STAGING
+# ---------------------
+# We often squash precisely because the target disk (muppet /mnt/bigdisk) is
+# nearly full — so we cannot afford to write ~8 GB of sums *before* freeing the
+# ~70 GB of raw. This script works one hour at a time: it writes that hour's
+# sums to a staging dir on a roomy disk (default /mnt/photodisk/backups), VERIFIES
+# them (readable, right dims, NSUMMED correct), only THEN deletes that hour's raw
+# and moves the small sums into place. Peak extra usage on the target disk is one
+# hour of sums (~700 MB), never the whole night. Safe to Ctrl-C between hours.
+#
+# CORRUPT FRAMES
+# --------------
+# pair-sum aborts on a truncated/unreadable frame. Before summing each hour dir
+# we prefilter: any frame astropy can't open is moved to
+# ~/.trash/<date>/squash-bad-frames/ (data → trash, never rm, per GLOBAL.md).
+# A dropped frame just shortens one sum-group by one — negligible on these
+# already-reduced streams. (Seen 2026-07-17: one truncated frame in 05-21 01b.)
+#
+# BOOKKEEPING (not automated here — do it after, per strand convention)
+# ---------------------------------------------------------------------
+# After a night is fully squashed, update the two truth surfaces to mirror the
+# other squashed nights:
+#   - ~/astro/whereisallthedata.csv : zero raw_bayer_bytes/binned_bytes, set
+#       raw_sum8_bytes (+ binned_sum2_bytes), storage_class=local,
+#       notes="squashed sum8+sum2".
+#   - DynamoDB astro-storage-inventory (region eu-west-1, key night+loc):
+#       shrunk=true, bytes.on_disk, fmt.res_class="sum8 mosaic".
+# The /astro/storage page renders from these.
+#
+# NEVER squash a KEEPER night (the clearest night of its ISO week). Check the
+# /astro/storage/<month> page: keepers are marked "★ keeper". As of writing,
+# 2026-05-23 and 2026-05-28 are keepers.
+#
+# Usage:
+#   squash-starcam-night <night-dir>                 # all raw hours in the night
+#   squash-starcam-night <night-dir> HH [HH ...]     # only these hours
+#   STAGE_ROOT=/some/roomy/dir squash-starcam-night <night-dir>
+#
+# Examples:
+#   squash-starcam-night /mnt/bigdisk/starcam-backup/2026-05-21
+#   squash-starcam-night /mnt/bigdisk/starcam-frames/night/2026-05-24 21 22 23
+set -euo pipefail
+
+# Long background IO runs at idle IO priority (house rule, 2026-10-13): a bulk
+# copy onto bigstore at full priority cost astrocam the 10-12 night.
+ionice -c3 -p $$ 2>/dev/null || true
+
+PAIR_SUM="${PAIR_SUM:-$HOME/astro/bin/pair-sum}"
+STAGE_ROOT="${STAGE_ROOT:-/mnt/photodisk/backups/squash-stage}"
+
+die() { echo "squash-starcam-night: $*" >&2; exit 1; }
+
+hints() {
+  cat <<'HINTS'
+squash-starcam-night — reduce an unsquashed starcam night to sum8+sum2 in place.
+
+WHAT IT DOES
+  A raw starcam night is hour buckets under a night dir:
+    <night>/HH   full-res raw   (2592x1944, ~5 GB/hr)
+    <night>/HHb  half-res twin  (~1.5 GB/hr)
+  Per hour it writes HH-sum8 (raw summed x8) + HHb-sum2 (twin x2) via
+  astro/bin/pair-sum, verifies them, DELETES the raw, and moves the sums into
+  place. Lossless (uint32 accumulator); only temporal resolution is spent.
+  Night ~40 GB -> ~6-8 GB. This is the astro-storage RRD-pyramid squash.
+
+SAFE ON A FULL DISK
+  Sums are staged on a roomy disk (STAGE_ROOT), verified, THEN the raw is freed
+  one hour at a time — peak extra on the target disk is one hour of sums
+  (~700 MB), never the whole night. Ctrl-C-safe between hours. A truncated /
+  unreadable frame is moved to ~/.trash/<date>/squash-bad-frames/ (never rm)
+  and summing continues.
+
+USAGE
+  squash-starcam-night <night-dir>              # all raw hours in the night
+  squash-starcam-night <night-dir> HH [HH ...]  # only these hours
+
+ENV
+  STAGE_ROOT   staging dir on a roomy disk   (default /mnt/photodisk/backups/squash-stage)
+  PAIR_SUM     path to pair-sum              (default ~/astro/bin/pair-sum)
+
+DON'T
+  NEVER run on a KEEPER night (clearest night of its ISO week, marked "★ keeper"
+  on /astro/storage/<month> — e.g. 2026-05-23, 2026-05-28 as of 2026-07).
+
+AFTER (bookkeeping — not automated; mirror other squashed nights)
+  - ~/astro/whereisallthedata.csv : zero raw/binned bytes, set raw_sum8 +
+    binned_sum2, notes "squashed sum8+sum2".
+  - DynamoDB astro-storage-inventory (eu-west-1, key night+loc): shrunk=true,
+    bytes.on_disk, fmt.res_class="sum8 mosaic".
+  The /astro/storage page renders from these.
+HINTS
+  exit 0
+}
+
+usage() {  # terse, human-facing
+  cat <<'USG'
+Usage: squash-starcam-night <night-dir> [HH ...]
+  Squash a raw starcam night to sum8+sum2 in place (deletes raw). ~40G -> ~6-8G.
+  With no HH args, does every raw hour in the night.
+  Env: STAGE_ROOT (staging disk), PAIR_SUM (pair-sum path).
+  --hints   full AI-facing surface (method, safety, keeper rule, bookkeeping)
+USG
+  exit 0
+}
+
+case "${1:-}" in
+  --hints) hints ;;      # AI surface
+  --help|-h) usage ;;    # human surface
+esac
+
+NIGHT="${1:-}"
+[ -n "$NIGHT" ] || die "usage: squash-starcam-night <night-dir> [HH ...]"
+[ -d "$NIGHT" ] || die "no such night dir: $NIGHT"
+[ -x "$PAIR_SUM" ] || die "pair-sum not found/executable at $PAIR_SUM (set PAIR_SUM=)"
+shift || true
+
+STAGE="$STAGE_ROOT/$(basename "$NIGHT")"
+mkdir -p "$STAGE" || die "cannot create staging dir $STAGE (set STAGE_ROOT= to a writable roomy disk)"
+
+# Which hours? Explicit args, else every raw HH dir (two digits, no suffix).
+if [ "$#" -gt 0 ]; then
+  HOURS=("$@")
+else
+  mapfile -t HOURS < <(cd "$NIGHT" && ls -d [0-9][0-9] 2>/dev/null | sort)
+fi
+[ "${#HOURS[@]}" -gt 0 ] || die "no raw hour dirs found in $NIGHT (already squashed?)"
+
+prefilter() {  # <dir> — quarantine any unreadable/truncated .fits.fz so pair-sum won't abort
+  python3 - "$1" <<'PY'
+import sys, glob, os, datetime, shutil
+from astropy.io import fits
+d = sys.argv[1]
+trash = os.path.join(os.path.expanduser("~/.trash"),
+                     datetime.date.today().isoformat(), "squash-bad-frames")
+bad = 0
+for f in sorted(glob.glob(d + "/*.fits.fz")):
+    try:
+        with fits.open(f) as h:
+            _ = h[1].data.shape
+    except Exception:
+        os.makedirs(trash, exist_ok=True)
+        shutil.move(f, os.path.join(trash, f"{os.path.basename(d)}-{os.path.basename(f)}"))
+        bad += 1
+if bad:
+    print(f"  quarantined {bad} bad frame(s) from {os.path.basename(d)} -> {trash}")
+PY
+}
+
+verify() {  # <dir> <expected-nsummed> [require-fullres]
+  python3 - "$1" "$2" "${3:-0}" <<'PY'
+import sys, glob
+from astropy.io import fits
+d, n, fullres = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
+fs = sorted(glob.glob(d + "/*.fits.fz"))
+assert fs, f"no output in {d}"
+h = fits.open(fs[0])[1]
+assert int(h.header.get("NSUMMED")) == n, f"NSUMMED != {n} in {d}"
+if fullres:
+    assert h.header["NAXIS1"] == 2592 and h.header["NAXIS2"] == 1944, f"wrong dims in {d}"
+    assert str(h.data.dtype) == "uint32", f"not uint32 in {d}"
+print(f"  ok: {len(fs)} frames  ({d.split('/')[-1]})")
+PY
+}
+
+for H in "${HOURS[@]}"; do
+  echo "### $NIGHT hour $H ###"
+  did=0
+  if [ -d "$NIGHT/$H" ]; then
+    prefilter "$NIGHT/$H"
+    "$PAIR_SUM" "$NIGHT/$H" --n 8 --out "$STAGE/$H-sum8" >/dev/null
+    verify "$STAGE/$H-sum8" 8 1
+    did=1
+  fi
+  if [ -d "$NIGHT/${H}b" ]; then
+    prefilter "$NIGHT/${H}b"
+    "$PAIR_SUM" "$NIGHT/${H}b" --n 2 --out "$STAGE/${H}b-sum2" >/dev/null
+    verify "$STAGE/${H}b-sum2" 2
+    did=1
+  fi
+  [ "$did" = 1 ] || { echo "  (no raw/b dirs for $H — skipping)"; continue; }
+
+  # verified — now it's safe to free the raw and move the sums into place
+  [ -d "$NIGHT/$H" ]        && rm -rf "$NIGHT/$H"
+  [ -d "$NIGHT/${H}b" ]     && rm -rf "$NIGHT/${H}b"
+  [ -d "$STAGE/$H-sum8" ]   && mv "$STAGE/$H-sum8"    "$NIGHT/"
+  [ -d "$STAGE/${H}b-sum2" ] && mv "$STAGE/${H}b-sum2" "$NIGHT/"
+  echo "  hour $H squashed"
+done
+
+rmdir "$STAGE" 2>/dev/null || true
+echo "done: $NIGHT"
