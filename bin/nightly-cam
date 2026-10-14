@@ -186,9 +186,11 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
     anchor_info: {"per_s", "lo", "hi", "window_utc": [start, end]} or
     None if the night was too short / had no usable frames.
     """
-    with fits.open(frames[0][1]) as hdul:
-        H, W = hdul[1].data.shape
-    H, W = H // 2, W // 2
+    # The stack's shape is the night's commonest frame shape, found in
+    # pass 1; a frame of any other shape is left out of the stack (hq16's
+    # first-light frames 2026-10-13 were 4064 wide with row padding, the
+    # rest 4056, and the first frame set the shape and broke np.maximum).
+    shape_by_path = {}
 
     # Pass 1: measure every frame; build (t, per_s) for the anchor.
     rows = []
@@ -199,6 +201,7 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         with fits.open(f) as hdul:
             d = hdul[1].data
             hdr = hdul[1].header
+        shape_by_path[f] = d.shape
         # Brightness metric (for the band gate) may be restricted to the
         # top of the frame so ground-level light pollution doesn't make a
         # clear night read as cloudy. The stack itself still uses full d.
@@ -222,6 +225,14 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
             print(f"  measure {i}/{len(frames)}", flush=True)
 
     candidates, sun_cut = anchor_candidates(t_per_s, location)
+    from collections import Counter
+    shape = Counter(shape_by_path.values()).most_common(1)[0][0]
+    H, W = shape[0] // 2, shape[1] // 2
+    odd_shape = {f for f, sh in shape_by_path.items() if sh != shape}
+    if odd_shape:
+        print(f"  {len(odd_shape)} frame(s) not {shape[1]}x{shape[0]}: "
+              f"left out of the stack")
+
     anchor = brightness.darkest_anchor(candidates, window_s=anchor_window_s)
     verdict = "no-data"
     if anchor is None and t_per_s and not candidates \
@@ -321,6 +332,8 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
     for i, (t, f) in enumerate(frames):
         if f in saturated:
             n_skipped_sat += 1
+            continue
+        if f in odd_shape:
             continue
         per_s = per_s_by_path[f]
         if not (lo <= per_s <= hi):
