@@ -586,6 +586,18 @@ def _to_u8(img, cov, lohi, asinh, min_cov):
     return u[:u.shape[0] // 2 * 2, :u.shape[1] // 2 * 2]   # yuv420p wants even dims
 
 
+def _cloud_card(shape, t_c):
+    import cv2
+    from zoneinfo import ZoneInfo
+    H, W = shape[0] // 2 * 2, shape[1] // 2 * 2
+    u = np.zeros((H, W), np.uint8)
+    hhmm = t_c.astimezone(ZoneInfo("Europe/London")).strftime("%H:%M")
+    for text, scale, dy in (("cloud", 3.0, -20), (f"{hhmm} London time", 1.4, 60)):
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, 3)
+        cv2.putText(u, text, ((W - tw) // 2, H // 2 + dy), cv2.FONT_HERSHEY_SIMPLEX, scale, 110, 3, cv2.LINE_AA)
+    return u
+
+
 def _sweep_chunk(args):
     import cv2
     wins, cam_path, glow_path, shape, a, stretch, dirs = args
@@ -595,7 +607,16 @@ def _sweep_chunk(args):
     if a.residual:
         sw.resid = np.load(a.residual).astype(np.float32)
     stats = []
+    # A window that cloud has emptied (under a quarter of its frames clean)
+    # renders as a captioned card, not a black frame: black reads as broken.
+    full = a.window_min * 60 / EXPTIME_S
     for k, (wi, t_c, frames) in enumerate(wins):
+        if stretch is not None and len(frames) < 0.25 * full:
+            card = _cloud_card(shape, t_c)
+            for d in dirs:
+                if d:
+                    cv2.imwrite(str(d / f"f{wi:04d}.png"), card)
+            continue
         vmax, deep, cov = sw.window(frames, t_c, a.clip)
         if stretch is None:
             stats.append((_stretch_stats(vmax, cov, a.min_cov), _stretch_stats(deep, cov, a.min_cov)))

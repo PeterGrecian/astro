@@ -310,19 +310,29 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         --mode night --out "${night_dir}/moon" \
         || echo "moon-extract produced nothing; continuing"
 
-    # Per-video poster thumbnails: the middle frame of EACH sweep, so the
-    # website previews each clip with a frame from itself (not a shared
-    # colour-sweep thumb). poster-<name>.jpg next to <name>.mp4. The
-    # colour mid-frame is also copied to thumb.jpg for the calendar card.
+    # Per-video poster thumbnails: a frame of EACH sweep, so the website
+    # previews each clip with a frame from itself (not a shared colour-sweep
+    # thumb). poster-<name>.jpg next to <name>.mp4. Of nine frames spread
+    # through the clip, the largest JPEG wins: the most detail, so never a
+    # cloud card or an empty window (the plain middle frame was black on
+    # 2026-10-13, which clouded over at 01:00). The colour poster is also
+    # copied to thumb.jpg for the calendar card.
     extract_mid () {  # $1 = mp4 path, $2 = out jpg
         [[ -s "$1" ]] || return 0
-        local n
+        local n i k best=0 bsz=0 sz tmp
         n=$(ffprobe -v error -count_packets -select_streams v:0 \
             -show_entries stream=nb_read_packets -of csv=p=0 "$1")
-        n=$(( n / 2 ))
-        ffmpeg -y -loglevel error -i "$1" \
-            -vf "select=eq(n\,$n)" -frames:v 1 -q:v 4 "$2" \
-            && echo "wrote $2 (mid frame $n of $(basename "$1"))"
+        tmp=$(mktemp -d "${night_dir}/.poster.XXXX")
+        for i in 1 2 3 4 5 6 7 8 9; do
+            k=$(( n * i / 10 ))
+            ffmpeg -y -loglevel error -i "$1" -vf "select=eq(n\,$k)" \
+                -frames:v 1 -q:v 4 "$tmp/$k.jpg" || continue
+            sz=$(stat -c %s "$tmp/$k.jpg" 2>/dev/null || echo 0)
+            (( sz > bsz )) && { bsz=$sz; best=$k; }
+        done
+        (( bsz > 0 )) && mv "$tmp/$best.jpg" "$2" \
+            && echo "wrote $2 (frame $best of $n of $(basename "$1"))"
+        rm -rf "$tmp"
     }
     for s in colour glow detrans detrans-deep derot derot-deep; do
         extract_mid "${night_dir}/sweep-${s}.mp4" \
