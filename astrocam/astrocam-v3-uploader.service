@@ -1,0 +1,20 @@
+[Unit]
+Description=astrocam v3 uploader (drain SD buffer fits.fz to NFS night tree, flat layout)
+After=network-online.target home-peter-astrocam\x2dframes.mount
+Wants=home-peter-astrocam\x2dframes.mount
+RequiresMountsFor=/var/lib/astrocam-storage
+
+[Service]
+Type=simple
+User=peter
+WorkingDirectory=/home/peter
+Environment=ASTROCAM_BUFFER_DIR=/var/lib/astrocam-storage/buffer/v3
+ExecStart=/home/peter/astro/.venv/bin/python /home/peter/astro/astrocam/astrocam_v3_uploader.py
+Nice=10
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

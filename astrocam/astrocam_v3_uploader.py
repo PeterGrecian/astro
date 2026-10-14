@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""astrocam-v3-uploader — drain /var/lib/astrocam-buffer/v3/*.fits.fz to the
+"""astrocam-v3-uploader — drain /var/lib/astrocam-storage/buffer/v3/*.fits.fz to the
 NFS night tree at ~/astrocam-frames/<night>/HH/.
 
 Mirrors eclipticam's v3w_uploader, but astrocam uses a FLAT night layout
@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BUFFER_DIR = Path(os.environ.get("ASTROCAM_BUFFER_DIR",
-                                 "/var/lib/astrocam-buffer/v3"))
+                                 "/var/lib/astrocam-storage/buffer/v3"))
 FRAMES_ROOT = Path(os.environ.get("ASTROCAM_FRAMES_ROOT",
                                   str(Path.home() / "astrocam-frames")))
 UPLOAD_INTERVAL_S = float(os.environ.get("ASTROCAM_UPLOAD_INTERVAL_S", "5"))

@@ -1,0 +1,26 @@
+[Unit]
+Description=astrocam v3 (imx708) night capture (Picamera2 streaming, SD buffer)
+After=network-online.target
+Wants=network-online.target
+# The buffer lives on the SD data partition (2026-10-14; was a 50M tmpfs).
+# The daemon also refuses to write unless the partition is mounted.
+RequiresMountsFor=/var/lib/astrocam-storage
+
+[Service]
+Type=simple
+User=peter
+WorkingDirectory=/home/peter
+Environment=ASTROCAM_BUFFER_DIR=/var/lib/astrocam-storage/buffer/v3
+Environment=ASTROCAM_BUFFER_MOUNT=/var/lib/astrocam-storage
+ExecStart=/home/peter/astro/.venv/bin/python /home/peter/astro/astrocam/astrocam_v3_night_daemon.py
+Nice=5
+Restart=on-failure
+RestartSec=10
+# Streaming daemon exits cleanly on SIGTERM; give it time to finish the
+# in-flight compression of the last (up to 60s) frame.
+TimeoutStopSec=90
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -12,7 +12,12 @@ Started by systemd when astrocam flips to night mode; exits when:
   - frame mean crosses the dawn saturation threshold -> exit 0
   - camera error -> exit non-zero (systemd Restart=on-failure)
 
-Writes Rice-compressed FITS to a tmpfs buffer; an uploader drains it to NFS.
+Writes Rice-compressed FITS to a buffer on the SD data partition
+(/var/lib/astrocam-storage, 43G); an uploader drains it to NFS. The buffer
+was a 50M tmpfs until 2026-10-14, which an NFS outage of a few minutes
+would fill, losing frames. buffer_mount makes the engine refuse to write
+unless the partition is really mounted, so an unmounted partition cannot
+quietly fill the root filesystem instead.
 
 NB: the pole_prior, plate_scale, pedestal and occlusion tile map in
 camera.json are all STALE (imx219/v2-lens/3280x2464 era) and must be
@@ -38,7 +43,9 @@ CAM_IDX = 0
 # camera_name (the FITS CAMERA header / sensor model).
 CAMERA = "astrocam"
 BUFFER_DIR = Path(os.environ.get("ASTROCAM_BUFFER_DIR",
-                                 "/var/lib/astrocam-buffer/v3"))
+                                 "/var/lib/astrocam-storage/buffer/v3"))
+BUFFER_MOUNT = Path(os.environ.get("ASTROCAM_BUFFER_MOUNT",
+                                   "/var/lib/astrocam-storage"))
 
 
 def _param(env, cfg_val, fallback, cast):
@@ -115,6 +122,7 @@ def main() -> int:
         rotation_180=True,
         camera_name="imx708",
         buffer_dir=BUFFER_DIR,
+        buffer_mount=BUFFER_MOUNT,
         pedestal=pedestal,
         black_level=black_level,
         camera=CAMERA,
