@@ -128,12 +128,46 @@ PYEOF
 )
 brightness_csv="${night_dir}/brightness.csv"
 
+# --- sweep span: astronomical dark to dawn (sun below -18 deg), UTC HH:MM.
+# It was a fixed 22:00-04:00 UTC, set for short summer nights; by October
+# that missed ~3 dark hours every evening (2026-10-13's clearest). Falls
+# back to nautical dark (-12) around midsummer, then to 22:00-04:00.
+# SWEEP_START / SWEEP_END override.
+if [[ -z "${SWEEP_START:-}" || -z "${SWEEP_END:-}" ]]; then
+    read -r SWEEP_START SWEEP_END < <("$PY" - "$REPO/${CAMERA%%-*}/location.json" "$NIGHT" <<'PYEOF'
+import json, sys, warnings
+from datetime import datetime, timedelta, timezone
+import numpy as np
+warnings.filterwarnings("ignore")
+try:
+    from astropy.coordinates import AltAz, EarthLocation, get_sun
+    from astropy.time import Time
+    import astropy.units as u
+    loc = json.load(open(sys.argv[1]))
+    site = EarthLocation(lat=loc["lat_deg"] * u.deg, lon=loc["lon_deg"] * u.deg)
+    d = datetime.strptime(sys.argv[2], "%Y-%m-%d").replace(hour=15, tzinfo=timezone.utc)
+    ts = [d + timedelta(minutes=m) for m in range(0, 17 * 60, 2)]       # 15:00 -> 08:00 UTC
+    alt = get_sun(Time(ts)).transform_to(AltAz(obstime=Time(ts), location=site)).alt.deg
+    for cut in (-18, -12):
+        i = np.flatnonzero(alt < cut)
+        if len(i):
+            print(ts[i[0]].strftime("%H:%M"), ts[i[-1]].strftime("%H:%M"))
+            break
+    else:
+        print("22:00 04:00")
+except Exception:
+    print("22:00 04:00")
+PYEOF
+)
+fi
+echo "sweep span ${SWEEP_START}-${SWEEP_END} UTC (astronomical dark)"
+
 # --- 2. window-stack-sweep: RGB video -------------------------------
 if [[ "$NO_SWEEP" -eq 0 ]]; then
   if [[ "$WEB_ONLY" -eq 0 ]]; then
     common_args=(
         --camera "$CAMERA" --night "$NIGHT"
-        --sweep-start 22:00 --sweep-end 04:00
+        --sweep-start "$SWEEP_START" --sweep-end "$SWEEP_END"
         --window-min "$WINDOW_MIN" --step-min "$STEP_MIN"
         --fps "$FPS" --jobs "$JOBS" --stagger-s 1
         --brightness-csv "$brightness_csv"
@@ -270,6 +304,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             [[ -s "$rs" ]] || "$PY" "$HERE/derot-sky" residual "$NIGHT" --glow "$glow" -o "$rs" \
                 || { echo "derot-sky residual failed; sweeping without it"; rs=""; }
             "$PY" "$HERE/derot-sky" sweep "$cam" "$NIGHT" --glow "$glow" \
+                --sweep-start "$SWEEP_START" --sweep-end "$SWEEP_END" \
                 --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" -j "${DEROT_JOBS:-4}" \
                 ${al:+--align "$al"} ${rs:+--residual "$rs"} \
                 --out-max "${night_dir}/sweep-derot.mp4" --out-deep "${night_dir}/sweep-derot-deep.mp4"
@@ -284,7 +319,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
                 && "$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "${night_dir}/skyglow-model.npz"; then
             echo "--- glow sweep (glow-subtracted, foreground masked)"
             if "$PY" "$HERE/diff-sweep" --camera "$CAMERA" --night "$NIGHT" \
-                    --sweep-start 22:00 --sweep-end 04:00 \
+                    --sweep-start "$SWEEP_START" --sweep-end "$SWEEP_END" \
                     --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" \
                     --glow-model "${night_dir}/skyglow-model.npz" --mask-foreground 3 \
                     --noise-floor-mult 1.0 --out-dir "${night_dir}/sweep-glow"; then
