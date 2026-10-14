@@ -31,9 +31,13 @@
   "rotate_180": false,
   "rotate_180_notes": "The camera IS mounted upside down, but the 180 degree turn is done by the driver (dtoverlay imx477 rotation=0 flips at the sensor), so every tool's output is already upright and libcamera reports RGGB. Do NOT also set a software rotation_180: that would turn the frames back over.",
   "frames_root": "~/eclipticam-frames",
-  "frames_root_by_host": {"pip": "/mnt/muppet/bigstore/eclipticam-frames"},
+  "frames_root_by_host": {"pip": "/mnt/muppet/bigstore/eclipticam-frames", "muppet": "/mnt/bigstore/astro-data/eclipticam-frames"},
   "night_layout": "percam",
   "night_layout_notes": "night/<night-date>/hq16/HH/<epoch_ms>.fits.fz beside v3w's night/<night-date>/v3w/, written by the shared v3w_uploader.py with V3W_SUBCAM=hq16.",
-  "processing_host": "eclipticam",
+  "processing_host": "muppet",
+  "processing_notes": "Processed on muppet from bigstore (compute follows the data; eclipticam has ~137 MB free beside v3w). No s3 target yet: private until Peter says publish. No sky_clear_max_stops yet: a clear night sets it (falls back to 10.0).",
+  "night_output": "subcam",
+  "night_output_notes": "Products go in night/<night>/hq16/ beside the hour dirs, not night/<night>/ where v3w's live (astro/frames.py night_output_dir).",
+  "location_file": "location.json",
   "occlusion_file": null
 }

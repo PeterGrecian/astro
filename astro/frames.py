@@ -111,4 +111,11 @@ def night_output_dir(cfg, night: str) -> Path:
         return cfg.frames_root / night_path(night) / cfg.name
     if cfg.night_layout == "flat":
         return cfg.frames_root / night
+    # percam: night/<night>/ is shared by every subcam, so a second camera's
+    # products would overwrite the first's. night_output "subcam" puts them
+    # beside its own hour dirs instead (eclipticam-hq16); v3w keeps the old
+    # place, where the site and the ship already look.
+    if cfg.get("night_output") == "subcam":
+        subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
+        return cfg.frames_root / "night" / night / subcam
     return cfg.frames_root / "night" / night
