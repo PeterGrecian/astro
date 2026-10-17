@@ -5,7 +5,12 @@ Calibration (2026-06-09): min = open, mid = closed. max is the other open
 extreme of the servo's travel and is not used by the cover.
 
 Run on astrocam. Needs gpio group membership (or sudo) for /dev/gpiomem.
+
+After each move the pin is released and driven low with pinctrl, so the
+SG90 sees a steady 0 V between moves instead of a floating input it can
+twitch on. config.txt sets gpio=18=op,dl for the same state from boot.
 """
+import subprocess
 import sys
 from time import sleep
 
@@ -27,6 +32,8 @@ def main(argv):
     servo = Servo(SERVO_PIN)
     POSITIONS[argv[1]](servo)
     sleep(SETTLE_S)
+    servo.close()
+    subprocess.run(["pinctrl", "set", str(SERVO_PIN), "op", "dl"], check=True)
     return 0
 
 
