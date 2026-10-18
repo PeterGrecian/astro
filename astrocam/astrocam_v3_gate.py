@@ -50,9 +50,11 @@ WEATHER_CACHE = Path("/var/lib/astrocam/weather.json")
 WEATHER_STALE_S = 1800
 # Cloud verdict persisted between ticks (the gate itself is stateless).
 CLOUD_STATE = Path("/var/lib/astrocam/cloud.json")
-# The night daemon's local per-frame sidecar (epoch_ms = END of exposure).
-# Local SD, so the cloud decision never waits on NFS.
-LOCAL_BRIGHTNESS = Path("/var/lib/astrocam-storage/buffer/v3/brightness.csv")
+# The night daemon's per-frame environment log (epoch_ms = END of exposure,
+# column 2; frame mean, column 8). Local SD, so the cloud decision never
+# waits on NFS. NOT the buffer's brightness.csv: the uploader drains that,
+# so on 10-18 the verdict saw zero frames all night.
+LOCAL_BRIGHTNESS = Path("/var/lib/astrocam-storage/env/frame-env.csv")
 # camera.json "cloud_gate" overrides these. mode "shadow" logs what it would
 # do and never moves the cover; "live" moves it; "off" skips it. Thresholds
 # are the median frame mean above black_level over the window, for the
@@ -189,8 +191,8 @@ def cloud_verdict(black_level: float, gate: dict) -> tuple[str, float, int]:
             for line in fh:
                 f = line.split(",")
                 try:
-                    if int(f[0]) >= since_ms:
-                        vals.append(float(f[1]) - black_level)
+                    if int(f[1]) >= since_ms:
+                        vals.append(float(f[7]) - black_level)
                 except (ValueError, IndexError):
                     continue
     except OSError:
@@ -263,8 +265,10 @@ def main() -> int:
     # here means: don't actively flip — we key purely off the two edges).
     if alt <= night_deg:
         if raining:
-            logging.info(f"sun_alt={alt:.2f} <= {night_deg} but RAINING -> stopping & closing")
-            ensure_stopped(NIGHT_SERVICE)
+            # The cover is transparent from 2026-10-18: rain closes it and
+            # capture carries on through it (COVER=closed on those frames).
+            logging.info(f"sun_alt={alt:.2f} <= {night_deg} but RAINING -> closing, capture continues")
+            ensure_running(NIGHT_SERVICE)
             ensure_cover("closed", "rain")
         else:
             logging.info(f"sun_alt={alt:.2f} <= {night_deg} and dry -> night")
@@ -288,8 +292,7 @@ def main() -> int:
     else:
         # In the band: leave the service in whatever state it's in, unless it's raining
         if raining and _is_active(NIGHT_SERVICE):
-            logging.info(f"sun_alt={alt:.2f} in band but RAINING -> stopping & closing")
-            ensure_stopped(NIGHT_SERVICE)
+            logging.info(f"sun_alt={alt:.2f} in band but RAINING -> closing, capture continues")
             ensure_cover("closed", "rain")
         else:
             logging.info(f"sun_alt={alt:.2f} in ({night_deg},{day_deg}) band; "
