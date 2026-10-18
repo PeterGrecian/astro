@@ -24,6 +24,7 @@ Caller responsibilities:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -121,6 +122,23 @@ class StreamingConfig:
     # stalls into the write retry instead of landing on root. None = no
     # check (the tmpfs-buffered cameras, until they move).
     buffer_mount: Optional[Path] = None
+    # Lens cover state file ({"position": "open"|"closed"}), rewritten only
+    # when the cover moves. When set, every FITS carries COVER, so frames
+    # taken through a closed cover can be told apart from open-sky frames
+    # without a side log (astrocam, transparent cover, 2026-10-18). None =
+    # no cover, no header.
+    cover_state_file: Optional[Path] = None
+
+
+def _cover_state(path: Path, exposure_start: float) -> Optional[str]:
+    """The cover position during an exposure that began at exposure_start
+    (unix s): "moving" if the file changed after then, None if unreadable."""
+    try:
+        if path.stat().st_mtime > exposure_start - 2:
+            return "moving"
+        return json.loads(path.read_text()).get("position")
+    except (OSError, ValueError):
+        return None
 
 
 def _buffer_on_mount(cfg: "StreamingConfig") -> bool:
@@ -235,7 +253,11 @@ def _capture_thread(cfg: StreamingConfig, picam2, q: queue.Queue,
         finally:
             req.release()
         epoch_ms = int(time.time() * 1000)
-        q.put((epoch_ms, bayer, lp_cmd, lp_rep, lp_act, temp_c))
+        # epoch_ms marks the END of the exposure (frame arrival).
+        cover = (_cover_state(cfg.cover_state_file,
+                              epoch_ms / 1000 - cfg.exposure_us / 1e6)
+                 if cfg.cover_state_file else None)
+        q.put((epoch_ms, bayer, lp_cmd, lp_rep, lp_act, temp_c, cover))
         if sweep:
             arrived = lp_act is not None and abs(lp_act - lp_cmd) < 0.005
             sweep["good"] += arrived
@@ -272,7 +294,7 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
 
     while not (stop.is_set() and q.empty()):
         try:
-            epoch_ms, bayer, lp_cmd, lp_rep, lp_act, temp_c = q.get(timeout=1.0)
+            epoch_ms, bayer, lp_cmd, lp_rep, lp_act, temp_c, cover = q.get(timeout=1.0)
         except queue.Empty:
             continue
         # Saturation guard: if the frame is bright enough to be daylight
@@ -343,6 +365,8 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         if cfg.position_index is not None:
             h["POSINDEX"] = (cfg.position_index,
                              "camera/lens generation (camera.json position_index)")
+        if cover is not None:
+            h["COVER"] = (cover, "lens cover during exposure (open/closed/moving)")
         h["ROWORDER"] = ("TOP-DOWN", "row 0 is sky-top / right-side up")
         h["MEAN"] = mean
         h["PER_S"] = per_s

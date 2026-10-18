@@ -44,6 +44,7 @@ CAM_IDX = 0
 CAMERA = "astrocam"
 BUFFER_DIR = Path(os.environ.get("ASTROCAM_BUFFER_DIR",
                                  "/var/lib/astrocam-storage/buffer/v3"))
+COVER_STATE_FILE = Path("/var/lib/astrocam/cover.json")
 BUFFER_MOUNT = Path(os.environ.get("ASTROCAM_BUFFER_MOUNT",
                                    "/var/lib/astrocam-storage"))
 
@@ -131,6 +132,7 @@ def main() -> int:
         focus_dither=focus_dither,
         focus_sweep=focus_sweep,
         position_index=position_index,
+        cover_state_file=COVER_STATE_FILE,
     )
     reason = run(cfg)
     if reason == "capture_failed":
