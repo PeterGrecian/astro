@@ -53,6 +53,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.cover import frame_open  # noqa: E402
 from astro.skyglow import SIDEREAL_RAD_PER_S, CameraModel, GlowModel, _enu  # noqa: E402
 
 LAT, LON = 51.3948, -0.2923
@@ -76,6 +77,12 @@ def night_frames(night):
             EXPTIME_S = float(fits.getheader(out[len(out) // 2][1], 1).get("EXPTIME", EXPTIME_S))
         except Exception:
             pass
+        # Open-cover frames only: closed frames go through the transparent cover
+        # (from 10-18, COVER header) or a logged dip (10-17); see astro/cover.py.
+        n = len(out)
+        out = [(t, p) for t, p in out if frame_open(p)]
+        if len(out) < n:
+            print(f"{night}: dropped {n - len(out)} of {n} frames taken with the cover closed", file=sys.stderr)
     return sorted(out)
 
 

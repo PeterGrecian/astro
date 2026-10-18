@@ -91,7 +91,10 @@ class CameraModel:
         self.mirror = p["mirror"]
         self.f, self.k, self.cx, self.cy = p["f"], p["k"], p["cx"], p["cy"]
         b = _enu(np.array(p["az0"]), np.array(p["alt0"]))
-        e1 = np.cross([0, 0, 1.0], b); e1 /= np.linalg.norm(e1)
+        e1 = np.cross([0, 0, 1.0], b)
+        if np.linalg.norm(e1) < 1e-6:      # axis AT the zenith (astrocam epoch 5 points near it):
+            e1 = np.array([1.0, 0, 0])     # az0 is undefined there, take east; roll carries it
+        e1 /= np.linalg.norm(e1)
         e2 = np.cross(b, e1)
         cr, sr = np.cos(p["roll"]), np.sin(p["roll"])
         self.b, self.ex, self.ey = b, cr * e1 + sr * e2, -sr * e1 + cr * e2
