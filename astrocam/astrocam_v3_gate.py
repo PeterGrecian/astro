@@ -41,6 +41,25 @@ COVER_SCRIPT = HERE / "cover.py"
 # 60x/hour for no reason. So the cover's last commanded position is persisted
 # here and we move ONLY on a change.
 COVER_STATE_FILE = Path("/var/lib/astrocam/cover.json")
+# Durable record of every cover move and every cloud verdict change, so
+# "did it close for cloud at 02:00?" is answerable after the journal has
+# rotated. utc,event,position,reason,detail.
+COVER_LOG = Path("/var/lib/astrocam/cover-log.csv")
+# Last good open-meteo answer: a 503 reuses it rather than reading as dry.
+WEATHER_CACHE = Path("/var/lib/astrocam/weather.json")
+WEATHER_STALE_S = 1800
+# Cloud verdict persisted between ticks (the gate itself is stateless).
+CLOUD_STATE = Path("/var/lib/astrocam/cloud.json")
+# The night daemon's local per-frame sidecar (epoch_ms = END of exposure).
+# Local SD, so the cloud decision never waits on NFS.
+LOCAL_BRIGHTNESS = Path("/var/lib/astrocam-storage/buffer/v3/brightness.csv")
+# camera.json "cloud_gate" overrides these. mode "shadow" logs what it would
+# do and never moves the cover; "live" moves it; "off" skips it. Thresholds
+# are the median frame mean above black_level over the window, for the
+# night's sub length: 10-17 (15 s) read 6.4-10 clear and dark, ~22 in a
+# brighter clear spell, and 76-120 on streetlit overcast nights.
+CLOUD_DEFAULTS = {"mode": "shadow", "window_min": 10,
+                  "close_above_black": 30.0, "open_above_black": 16.0}
 
 # Defaults if camera.json omits them. Night below -10 matches astrocam's
 # configured sun_altitude_night_deg and eclipticam-v3w. Day threshold a
@@ -95,7 +114,21 @@ def _write_cover_position(position: str):
         logging.error(f"cover state write failed: {e}")
 
 
-def ensure_cover(position: str):
+def _log_cover(event: str, position: str, reason: str, detail: str = ""):
+    """Append one row to the durable cover log. Never raises."""
+    from datetime import datetime, timezone
+    try:
+        new = not COVER_LOG.exists()
+        with COVER_LOG.open("a") as fh:
+            if new:
+                fh.write("utc,event,position,reason,detail\n")
+            utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            fh.write(f"{utc},{event},{position},{reason},{detail}\n")
+    except OSError as e:
+        logging.error(f"cover log write failed: {e}")
+
+
+def ensure_cover(position: str, reason: str = "", detail: str = ""):
     """Drive the cover to `position` if it isn't already there.
 
     Never raises: a stuck servo must not stop the gate from managing the
@@ -113,19 +146,93 @@ def ensure_cover(position: str):
         logging.error(f"cover {position} FAILED: {e}")
         return
     _write_cover_position(position)
+    _log_cover("move", position, reason, detail)
 
 
 def is_raining(lat: float, lon: float) -> bool:
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+    """open-meteo's current weather code says rain (>= 50). A failed fetch
+    reuses the last good answer for up to WEATHER_STALE_S, then reads as
+    RAIN: the lens is exposed, so an unknown sky closes the cover."""
+    import time
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'astro-gate/1.0'})
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
-            code = data.get("current_weather", {}).get("weathercode", 0)
-            return code >= 50
+        raining = _fetch_raining(lat, lon)
     except Exception as e:
-        logging.error(f"weather fetch failed: {e}")
-        return False
+        try:
+            c = json.loads(WEATHER_CACHE.read_text())
+            age = time.time() - float(c["t"])
+            if age < WEATHER_STALE_S:
+                logging.warning(f"weather fetch failed ({e}); using cached "
+                                f"raining={c['raining']} from {age:.0f} s ago")
+                return bool(c["raining"])
+        except (OSError, ValueError, KeyError):
+            pass
+        logging.error(f"weather fetch failed ({e}) and no fresh cache; "
+                      "treating as RAIN")
+        return True
+    try:
+        WEATHER_CACHE.write_text(json.dumps({"t": time.time(), "raining": raining}))
+    except OSError as e:
+        logging.error(f"weather cache write failed: {e}")
+    return raining
+
+
+def cloud_verdict(black_level: float, gate: dict) -> tuple[str, float, int]:
+    """("cloudy"|"clear"|"unsure", median above black, n frames) over the
+    last window_min minutes of the night daemon's local brightness rows."""
+    import statistics
+    import time
+    since_ms = (time.time() - 60 * float(gate["window_min"])) * 1000
+    vals = []
+    try:
+        with LOCAL_BRIGHTNESS.open() as fh:
+            next(fh, None)
+            for line in fh:
+                f = line.split(",")
+                try:
+                    if int(f[0]) >= since_ms:
+                        vals.append(float(f[1]) - black_level)
+                except (ValueError, IndexError):
+                    continue
+    except OSError:
+        return "unsure", float("nan"), 0
+    # Need most of the window's frames, not one or two after a restart.
+    if len(vals) < 3:
+        return "unsure", float("nan"), len(vals)
+    med = statistics.median(vals)
+    if med > float(gate["close_above_black"]):
+        return "cloudy", med, len(vals)
+    if med < float(gate["open_above_black"]):
+        return "clear", med, len(vals)
+    return "unsure", med, len(vals)
+
+
+def cloud_state(black_level: float, gate: dict) -> str:
+    """Hysteresis over cloud_verdict: "unsure" holds the previous state.
+    Logs every change. Returns "cloudy" or "clear"."""
+    verdict, med, n = cloud_verdict(black_level, gate)
+    try:
+        prev = json.loads(CLOUD_STATE.read_text()).get("state", "clear")
+    except (OSError, ValueError):
+        prev = "clear"
+    state = prev if verdict == "unsure" else verdict
+    logging.info(f"cloud: verdict={verdict} median_above_black={med:.2f} "
+                 f"n={n} state={state} mode={gate['mode']}")
+    if state != prev:
+        _log_cover("cloud", "closed" if state == "cloudy" else "open",
+                   f"{gate['mode']}:{state}", f"median={med:.2f} n={n}")
+        try:
+            CLOUD_STATE.write_text(json.dumps({"state": state}))
+        except OSError as e:
+            logging.error(f"cloud state write failed: {e}")
+    return state
+
+
+def _fetch_raining(lat: float, lon: float) -> bool:
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+    req = urllib.request.Request(url, headers={'User-Agent': 'astro-gate/1.0'})
+    with urllib.request.urlopen(req, timeout=10) as response:
+        data = json.loads(response.read().decode())
+        return data["current_weather"]["weathercode"] >= 50
 
 
 def main() -> int:
@@ -136,13 +243,16 @@ def main() -> int:
     night_deg = float(st.get("sun_altitude_night_deg", DEFAULT_NIGHT_DEG))
     day_deg = float(st.get("sun_altitude_day_deg", DEFAULT_DAY_DEG))
 
+    gate = {**CLOUD_DEFAULTS, **(cfg.get("cloud_gate") or {})}
+    black_level = float(cfg.get("black_level") or 64)
+
     loc = cfg.location or {}
     if "lat_deg" not in loc or "lon_deg" not in loc:
         # No location -> safest is DAY (never point the sensor at the sun in
         # a way that pins frames all day). Stop the night daemon.
         logging.warning("no location.json lat/lon; defaulting to day (stop)")
         ensure_stopped(NIGHT_SERVICE)
-        ensure_cover("closed")
+        ensure_cover("closed", "no-location")
         return 0
 
     alt = sun_altitude_deg(loc["lat_deg"], loc["lon_deg"])
@@ -155,21 +265,32 @@ def main() -> int:
         if raining:
             logging.info(f"sun_alt={alt:.2f} <= {night_deg} but RAINING -> stopping & closing")
             ensure_stopped(NIGHT_SERVICE)
-            ensure_cover("closed")
+            ensure_cover("closed", "rain")
         else:
-            logging.info(f"sun_alt={alt:.2f} <= {night_deg} and clear -> night")
-            ensure_cover("open")
+            logging.info(f"sun_alt={alt:.2f} <= {night_deg} and dry -> night")
             ensure_running(NIGHT_SERVICE)
+            # The cover is transparent from 2026-10-18, so capture runs on
+            # under a closed cover and the same frames say when to reopen.
+            cloudy = (gate["mode"] != "off"
+                      and cloud_state(black_level, gate) == "cloudy")
+            if cloudy and gate["mode"] == "live":
+                ensure_cover("closed", "cloud")
+            else:
+                ensure_cover("open", "night")
     elif alt >= day_deg:
         logging.info(f"sun_alt={alt:.2f} >= {day_deg} -> day")
         ensure_stopped(NIGHT_SERVICE)
-        ensure_cover("closed")
+        ensure_cover("closed", "day")
+        try:
+            CLOUD_STATE.unlink()   # each night starts from "clear"
+        except OSError:
+            pass
     else:
         # In the band: leave the service in whatever state it's in, unless it's raining
         if raining and _is_active(NIGHT_SERVICE):
             logging.info(f"sun_alt={alt:.2f} in band but RAINING -> stopping & closing")
             ensure_stopped(NIGHT_SERVICE)
-            ensure_cover("closed")
+            ensure_cover("closed", "rain")
         else:
             logging.info(f"sun_alt={alt:.2f} in ({night_deg},{day_deg}) band; "
                          f"holding {'running' if _is_active(NIGHT_SERVICE) else 'stopped'}")
