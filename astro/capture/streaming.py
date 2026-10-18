@@ -128,6 +128,44 @@ class StreamingConfig:
     # without a side log (astrocam, transparent cover, 2026-10-18). None =
     # no cover, no header.
     cover_state_file: Optional[Path] = None
+    # Enclosure sensor on IIO sysfs, stamped into every FITS as BOXTEMP and
+    # BOXRH (astrocam's DHT22 via the kernel dht11 overlay, 2026-10-18). The
+    # value is the IIO device's name prefix, e.g. "dht11". None = no sensor.
+    box_sensor: Optional[str] = None
+
+
+class _BoxSensor:
+    """Cached IIO temperature/humidity. The DHT bus is slow and fails now
+    and then, so it is read at most once a minute, from the compress
+    thread (never the capture thread), and a reading older than five
+    minutes is not stamped."""
+    REFRESH_S, MAX_AGE_S = 60, 300
+
+    def __init__(self, name_prefix: str):
+        self.dev = None
+        for d in sorted(Path("/sys/bus/iio/devices").glob("iio:device*")):
+            try:
+                if (d / "name").read_text().strip().startswith(name_prefix):
+                    self.dev = d
+                    break
+            except OSError:
+                continue
+        self.t = self.rh = None
+        self.at = self.tried = 0.0
+
+    def read(self) -> tuple[Optional[float], Optional[float]]:
+        now = time.time()
+        if self.dev is not None and now - self.tried >= self.REFRESH_S:
+            self.tried = now
+            try:
+                t = int((self.dev / "in_temp_input").read_text()) / 1000
+                rh = int((self.dev / "in_humidityrelative_input").read_text()) / 1000
+                self.t, self.rh, self.at = t, rh, now
+            except (OSError, ValueError):
+                pass
+        if now - self.at > self.MAX_AGE_S:
+            return None, None
+        return self.t, self.rh
 
 
 def _cover_state(path: Path, exposure_start: float) -> Optional[str]:
@@ -291,6 +329,7 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         legacy_fh.write("epoch_ms,mean,exposure_us,gain,per_s\n")
 
     exposure_s = cfg.exposure_us / 1e6
+    box = _BoxSensor(cfg.box_sensor) if cfg.box_sensor else None
 
     while not (stop.is_set() and q.empty()):
         try:
@@ -365,6 +404,11 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         if cfg.position_index is not None:
             h["POSINDEX"] = (cfg.position_index,
                              "camera/lens generation (camera.json position_index)")
+        if box is not None:
+            box_t, box_rh = box.read()
+            if box_t is not None:
+                h["BOXTEMP"] = (round(box_t, 1), "enclosure air temperature, degC")
+                h["BOXRH"] = (round(box_rh, 1), "enclosure relative humidity, %")
         if cover is not None:
             h["COVER"] = (cover, "lens cover during exposure (open/closed/moving)")
         h["ROWORDER"] = ("TOP-DOWN", "row 0 is sky-top / right-side up")

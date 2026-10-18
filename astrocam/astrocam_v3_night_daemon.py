@@ -133,6 +133,7 @@ def main() -> int:
         focus_sweep=focus_sweep,
         position_index=position_index,
         cover_state_file=COVER_STATE_FILE,
+        box_sensor="dht11",   # the DHT22 in the box (kernel dht11 driver)
     )
     reason = run(cfg)
     if reason == "capture_failed":
