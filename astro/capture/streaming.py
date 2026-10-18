@@ -135,10 +135,11 @@ class StreamingConfig:
 
 
 class _BoxSensor:
-    """Cached IIO temperature/humidity. The DHT bus is slow and fails now
-    and then, so it is read at most once a minute, from the compress
-    thread (never the capture thread), and a reading older than five
-    minutes is not stamped."""
+    """Cached IIO temperature/humidity, read from the compress thread (never
+    the capture thread). After a good read it waits a minute; after a
+    failed one it retries on the next frame, because the DHT bus fails
+    often (7 of 12 bare reads on astrocam, 2026-10-18). A reading older
+    than five minutes is not stamped."""
     REFRESH_S, MAX_AGE_S = 60, 300
 
     def __init__(self, name_prefix: str):
@@ -151,12 +152,11 @@ class _BoxSensor:
             except OSError:
                 continue
         self.t = self.rh = None
-        self.at = self.tried = 0.0
+        self.at = 0.0
 
     def read(self) -> tuple[Optional[float], Optional[float]]:
         now = time.time()
-        if self.dev is not None and now - self.tried >= self.REFRESH_S:
-            self.tried = now
+        if self.dev is not None and now - self.at >= self.REFRESH_S:
             try:
                 t = int((self.dev / "in_temp_input").read_text()) / 1000
                 rh = int((self.dev / "in_humidityrelative_input").read_text()) / 1000
