@@ -45,6 +45,8 @@ CAMERA = "astrocam"
 BUFFER_DIR = Path(os.environ.get("ASTROCAM_BUFFER_DIR",
                                  "/var/lib/astrocam-storage/buffer/v3"))
 COVER_STATE_FILE = Path("/var/lib/astrocam/cover.json")
+# Per-frame environment CSV on the SD data partition, shipped to OpenSearch.
+FRAME_LOG = Path("/var/lib/astrocam-storage/env/frame-env.csv")
 BUFFER_MOUNT = Path(os.environ.get("ASTROCAM_BUFFER_MOUNT",
                                    "/var/lib/astrocam-storage"))
 
@@ -134,6 +136,7 @@ def main() -> int:
         position_index=position_index,
         cover_state_file=COVER_STATE_FILE,
         box_sensor="dht11",   # the DHT22 in the box (kernel dht11 driver)
+        frame_log=FRAME_LOG,
     )
     reason = run(cfg)
     if reason == "capture_failed":

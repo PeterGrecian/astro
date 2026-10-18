@@ -132,6 +132,32 @@ class StreamingConfig:
     # BOXRH (astrocam's DHT22 via the kernel dht11 overlay, 2026-10-18). The
     # value is the IIO device's name prefix, e.g. "dht11". None = no sensor.
     box_sensor: Optional[str] = None
+    # Per-frame environment log: one CSV row per frame (time, sensor and
+    # box temperature, humidity, cover, lens, mean), shipped to OpenSearch
+    # by fluent-bit (ansible journal_ship_csv_tails). Rotated by rename to
+    # .1 at FRAME_LOG_MAX_BYTES, which the tail follows. None = no log.
+    frame_log: Optional[Path] = None
+
+
+FRAME_LOG_MAX_BYTES = 1 << 20
+FRAME_LOG_HEADER = ("utc,epoch_ms,senstemp_c,box_temp_c,box_rh_pct,cover,"
+                    "lensact,mean,exptime_s,posindex\n")
+
+
+def _frame_log_row(cfg: "StreamingConfig", row: list) -> None:
+    """Append one row to cfg.frame_log. Never raises: a full or missing
+    log must not cost a frame."""
+    p = cfg.frame_log
+    try:
+        if p.exists() and p.stat().st_size > FRAME_LOG_MAX_BYTES:
+            p.rename(p.with_name(p.name + ".1"))
+        new = not p.exists()
+        with p.open("a") as fh:
+            if new:
+                fh.write(FRAME_LOG_HEADER)
+            fh.write(",".join("" if v is None else str(v) for v in row) + "\n")
+    except OSError as e:
+        logging.getLogger(__name__).warning(f"frame log append failed: {e}")
 
 
 class _BoxSensor:
@@ -404,6 +430,7 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
         if cfg.position_index is not None:
             h["POSINDEX"] = (cfg.position_index,
                              "camera/lens generation (camera.json position_index)")
+        box_t = box_rh = None
         if box is not None:
             box_t, box_rh = box.read()
             if box_t is not None:
@@ -424,6 +451,16 @@ def _compress_thread(cfg: StreamingConfig, q: queue.Queue,
             h["LENSPREP"] = (float(lp_rep), "reported LensPosition (metadata)")
         if lp_act is not None:
             h["LENSACT"] = (lp_act, "lens DURING this exposure (prev report)")
+        if cfg.frame_log is not None:
+            # utc is the doc id downstream, one row per second; frames are
+            # >= 1 s apart. epoch_ms marks the END of the exposure.
+            _frame_log_row(cfg, [
+                datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                epoch_ms,
+                None if temp_c is None else round(float(temp_c), 2),
+                None if box_t is None else round(box_t, 1),
+                None if box_rh is None else round(box_rh, 1),
+                cover, lp_act, round(mean, 3), exposure_s, cfg.position_index])
         # A full buffer is transient: the uploader is behind (an NFS stall of
         # ~45 s filled astrocam's 50 MB tmpfs on 2026-10-12 and the ENOSPC
         # killed this thread, losing the rest of the night). Hold the frame
