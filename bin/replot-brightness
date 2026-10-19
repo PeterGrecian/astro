@@ -130,7 +130,8 @@ def main() -> int:
             brightness.plot_night(rows, night, cfg.name, png,
                                   pedestal=pedestal,
                                   zero_label=zero_label,
-                                  stacked_window_utc=window)
+                                  stacked_window_utc=window,
+                                  cfg=cfg)
         except Exception as e:                      # noqa: BLE001
             sys.stderr.write(f"  {night}: plot failed: {e}\n")
             failed += 1

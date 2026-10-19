@@ -43,6 +43,36 @@ def build(camera: str, night: str, rows, badpix: dict | None,
                   "n_frames": len(hours[hh]),
                   "mean_brightness": round(sum(hours[hh]) / len(hours[hh]), 3)}
                  for hh in order if hh in hours]
+    env_temps = []
+    env_rhs = []
+    for r in rows:
+        if isinstance(r, dict):
+            bt = r.get("box_temp_c")
+            brh = r.get("box_rh_pct")
+        else:
+            bt = r[9] if len(r) > 9 else None
+            brh = r[10] if len(r) > 10 else None
+        if bt not in (None, ""):
+            try:
+                env_temps.append(float(bt))
+            except ValueError:
+                pass
+        if brh not in (None, ""):
+            try:
+                env_rhs.append(float(brh))
+            except ValueError:
+                pass
+
+    env = None
+    if env_temps or env_rhs:
+        env = {}
+        if env_temps:
+            env["box_temp_min"] = round(min(env_temps), 1)
+            env["box_temp_max"] = round(max(env_temps), 1)
+        if env_rhs:
+            env["box_rh_min"] = round(min(env_rhs), 1)
+            env["box_rh_max"] = round(max(env_rhs), 1)
+
     summary = {
         "schema": 2,
         "camera": camera,
@@ -54,6 +84,7 @@ def build(camera: str, night: str, rows, badpix: dict | None,
         "hours": hour_list,
         "badpix": badpix,
         "derot": derot,
+        "env": env,
         "outputs": outputs,
     }
     return summary

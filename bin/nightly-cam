@@ -212,7 +212,11 @@ def stack_and_measure(frames, anchor_window_s=ANCHOR_WINDOW_S,
         exp = float(hdr.get("EXPTIME", 1.0) or 1.0)
         gain = float(hdr.get("GAIN", 1.0) or 1.0)
         row = brightness.measure(d_measure, t, f,
-                                 exptime=hdr.get("EXPTIME"))
+                                 exptime=hdr.get("EXPTIME"),
+                                 box_temp_c=hdr.get("BOXTEMP"),
+                                 box_rh_pct=hdr.get("BOXRH"),
+                                 senstemp_c=hdr.get("SENSTEMP"),
+                                 cover=hdr.get("COVER"))
         rows.append(row)
         mean = float(row[3])
         median = float(row[4])
@@ -587,7 +591,8 @@ def main() -> int:
         brightness.plot_night(rows, night, cfg.name,
                               out_dir / f"{stem}brightness.png",
                               pedestal=brightness.chart_zero(cfg)[0],
-                              zero_label=brightness.chart_zero(cfg)[1])
+                              zero_label=brightness.chart_zero(cfg)[1],
+                              cfg=cfg)
         # Privacy-safe by construction (plot has no camera pixels) —
         # mark so publish doesn't refuse to upload on cloudy nights.
         if getattr(cfg, "privacy", None):
@@ -664,7 +669,8 @@ def main() -> int:
                           out_dir / f"{stem}brightness.png",
                           pedestal=brightness.chart_zero(cfg)[0],
                           zero_label=brightness.chart_zero(cfg)[1],
-                          stacked_window_utc=stacked_window_utc)
+                          stacked_window_utc=stacked_window_utc,
+                          cfg=cfg)
     if getattr(cfg, "privacy", None):
         # Plots contain no camera pixels — privacy-safe by construction.
         privacy_mod.mark_ok(out_dir / f"{stem}brightness.png")

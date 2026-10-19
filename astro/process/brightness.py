@@ -18,12 +18,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-from matplotlib.ticker import FuncFormatter
+from matplotlib.ticker import FuncFormatter, FormatStrFormatter, MultipleLocator, NullLocator
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 LONDON = ZoneInfo("Europe/London")
 
 HEADER = ["epoch_ms", "iso_utc", "filename",
-          "mean", "median", "p95", "max", "bright_pixels", "exptime"]
+          "mean", "median", "p95", "max", "bright_pixels", "exptime",
+          "box_temp_c", "box_rh_pct", "senstemp_c", "cover"]
 
 BRIGHT_PIXEL_THRESHOLD = 500
 
@@ -171,19 +174,31 @@ def lsb_align(vals, pedestal=None):
     return vals / MSB_ALIGN_FACTOR, True
 
 
-def measure(arr, t_utc: datetime, path: Path, exptime: float | None = None):
+def measure(arr, t_utc: datetime, path: Path, exptime: float | None = None,
+            box_temp_c: float | None = None,
+            box_rh_pct: float | None = None,
+            senstemp_c: float | None = None,
+            cover: str | None = None):
     """One CSV row for a frame already in memory.
 
-    exptime (s, from the frame's EXPTIME) is the last column so the series
-    says what exposure its ADU are per: mean is per FRAME, and astrocam went
-    from 59.9 s to 15 s subs on 2026-10-09. Empty when unknown. Readers
-    index positionally up to mean/median only, so appending is safe.
+    exptime (s, from the frame's EXPTIME) is the exposure time.
+    box_temp_c, box_rh_pct, senstemp_c, cover: environmental and hardware
+    sidecars when available (DHT22 enclosure temp/RH, IMX708 sensor temp,
+    and SG90 transparent cover open/closed state). Readers index positionally
+    up to mean/median only, so appending is safe.
     """
-    return [int(t_utc.timestamp() * 1000), t_utc.isoformat(), str(path),
-            f"{float(arr.mean()):.3f}", f"{float(np.median(arr)):.1f}",
-            f"{float(np.percentile(arr, 95)):.1f}", int(arr.max()),
-            int((arr >= BRIGHT_PIXEL_THRESHOLD).sum()),
-            "" if exptime is None else f"{float(exptime):g}"]
+    row = [int(t_utc.timestamp() * 1000), t_utc.isoformat(), str(path),
+           f"{float(arr.mean()):.3f}", f"{float(np.median(arr)):.1f}",
+           f"{float(np.percentile(arr, 95)):.1f}", int(arr.max()),
+           int((arr >= BRIGHT_PIXEL_THRESHOLD).sum()),
+           "" if exptime is None else f"{float(exptime):g}"]
+    row.extend([
+        "" if box_temp_c is None else f"{float(box_temp_c):.1f}",
+        "" if box_rh_pct is None else f"{float(box_rh_pct):.1f}",
+        "" if senstemp_c is None else f"{float(senstemp_c):.1f}",
+        "" if cover is None else str(cover),
+    ])
+    return row
 
 
 def write_csv(rows, csv_path: Path):
@@ -213,99 +228,265 @@ def read_csv(csv_path: Path):
 def plot_night(rows, night: str, camera: str, out_path: Path,
                pedestal: float | None = None,
                stacked_window_utc: tuple[str, str] | None = None,
-               zero_label: str = "pedestal"):
+               zero_label: str = "pedestal",
+               cfg=None):
     """Scatter of log2(mean - pedestal) vs local time for one night's
-    rows (as produced by measure()). X-axis ends at 05:00 the next
-    morning (cover-close safety time), matching bin/plot-brightness.
-    The timezone label is whatever Europe/London is on the night-of-date
-    (BST or GMT), so it's never ambiguous.
+    rows (as produced by measure() or read from brightness.csv).
 
-    Y-axis is stops of signal ABOVE the sensor pedestal (electronic
-    black level, exposed by libcamera's bit-shift unpack of 10-bit
-    raw into the 16-bit container — typically a few thousand counts).
-    `pedestal` is the per-sensor calibration constant (from camera.json);
-    fall back to the night's 1st percentile if not given. With a fixed
-    pedestal, 0 stops means "as dark as this sensor ever reads," each
-    gridline is one stop of real signal."""
-    times = [datetime.fromisoformat(r[1]).astimezone(LONDON) for r in rows]
-    vals = np.array([float(r[3]) for r in rows])
-    # Put MSB-aligned nights on the same ADU scale as everything else, so
-    # the fixed pedestal from camera.json means the same thing on every
-    # chart (see lsb_align).
+    When temperature/humidity data are present (box_temp_c, box_rh_pct),
+    renders a 2-panel chart: sky brightness on top, enclosure environment
+    on the bottom, sharing a single Europe/London time axis.
+
+    When camera.json carries sky_mag calibration and zero_label is 'black level',
+    adds a secondary right-hand y-axis in mag/arcsec².
+
+    When cover status is present (or a cover-log is discoverable), highlights
+    closed-cover intervals (transparent cover during rain) in both panels and
+    differentiates open vs closed frames in the scatter plot.
+    """
+    def _val(r, idx, key):
+        if isinstance(r, dict):
+            v = r.get(key)
+        elif len(r) > idx:
+            v = r[idx]
+        else:
+            v = None
+        return v if v not in (None, "") else None
+
+    times = []
+    means = []
+    covers = []
+    box_temps = []
+    box_rhs = []
+    sens_temps = []
+    for r in rows:
+        iso = _val(r, 1, "iso_utc")
+        if not iso:
+            continue
+        try:
+            t = datetime.fromisoformat(iso).astimezone(LONDON)
+        except (ValueError, TypeError):
+            continue
+        m = _val(r, 3, "mean")
+        if m is None:
+            continue
+        times.append(t)
+        means.append(float(m))
+        cov = _val(r, 12, "cover")
+        covers.append(cov if cov else "open")
+        bt = _val(r, 9, "box_temp_c")
+        box_temps.append(float(bt) if bt is not None else np.nan)
+        rh = _val(r, 10, "box_rh_pct")
+        box_rhs.append(float(rh) if rh is not None else np.nan)
+        st = _val(r, 11, "senstemp_c")
+        sens_temps.append(float(st) if st is not None else np.nan)
+
+    if not times:
+        return
+
+    vals = np.array(means)
     vals, _was_msb = lsb_align(vals, pedestal)
     if pedestal is None:
         pedestal = float(np.percentile(vals, 1))
     pedestal = float(pedestal)
-    # 0.5-count floor (= log2 -1) prevents the -10 clip spikes when
-    # mean ~= pedestal; real lens-covered drops still go negative.
     signal = np.maximum(vals - pedestal, 0.5)
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.scatter(times, signal, s=3, linewidths=0, color="#007AFF")
-    ax.set_yscale("log", base=2)
-    ax.yaxis.set_major_formatter(FuncFormatter(
+
+    has_temp = any(not np.isnan(v) for v in box_temps)
+    has_rh = any(not np.isnan(v) for v in box_rhs)
+    has_env = has_temp or has_rh
+
+    # Try loading CameraConfig if not passed
+    if cfg is None:
+        try:
+            from astro.config import CameraConfig
+            cfg = CameraConfig.load(camera)
+        except Exception:
+            cfg = None
+
+    # Cover status: find physical move intervals (from cover-log.csv or per-frame cover)
+    closed_intervals = []
+    cover_log_candidates = [
+        out_path.parent / "cover-log.csv",
+        Path(f"/var/lib/{camera}/cover-log.csv"),
+    ]
+    for cl_path in cover_log_candidates:
+        if cl_path.exists():
+            try:
+                cur_start = None
+                with open(cl_path, newline="") as f:
+                    for cl_row in csv.DictReader(f):
+                        if cl_row.get("event") != "move":
+                            continue
+                        t_u = datetime.fromisoformat(cl_row["utc"].replace("Z", "+00:00"))
+                        t_l = t_u.astimezone(LONDON)
+                        pos = cl_row.get("position")
+                        if pos == "closed" and cur_start is None:
+                            cur_start = t_l
+                        elif pos == "open" and cur_start is not None:
+                            closed_intervals.append((cur_start, t_l))
+                            cur_start = None
+                break
+            except Exception:
+                pass
+
+    if not closed_intervals and any(c in ("closed", "moving") for c in covers):
+        cur_start = None
+        for t, c in zip(times, covers):
+            if c in ("closed", "moving") and cur_start is None:
+                cur_start = t
+            elif c not in ("closed", "moving") and cur_start is not None:
+                closed_intervals.append((cur_start, t))
+                cur_start = None
+        if cur_start is not None and times:
+            closed_intervals.append((cur_start, times[-1]))
+
+    # Setup figure
+    if has_env:
+        fig, (ax_sky, ax_env) = plt.subplots(
+            2, 1, figsize=(10, 5.8), sharex=True,
+            gridspec_kw={"height_ratios": [2.3, 1.1], "hspace": 0.08}
+        )
+    else:
+        fig, ax_sky = plt.subplots(figsize=(10, 4.5))
+        ax_env = None
+
+    open_mask = np.array([c == "open" for c in covers])
+    closed_mask = np.array([c == "closed" for c in covers])
+    moving_mask = np.array([c == "moving" for c in covers])
+
+    if np.any(open_mask):
+        ax_sky.scatter(np.array(times)[open_mask], signal[open_mask],
+                       s=4, linewidths=0, color="#007AFF", label="open", zorder=3)
+    if np.any(closed_mask):
+        ax_sky.scatter(np.array(times)[closed_mask], signal[closed_mask],
+                       s=5, linewidths=0, color="#FF9500", label="cover closed", zorder=4)
+    if np.any(moving_mask):
+        ax_sky.scatter(np.array(times)[moving_mask], signal[moving_mask],
+                       s=6, linewidths=0, color="#FF3B30", label="cover moving", zorder=5)
+
+    ax_sky.set_yscale("log", base=2)
+    ax_sky.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
-    night_date = datetime.strptime(night, "%Y-%m-%d").date()
-    tz_label = datetime.combine(
-        night_date, time(22, 0), tzinfo=LONDON).tzname()
-    ax.set_xlabel(f"local time ({tz_label})")
-    ax.set_ylabel(f"stops above {zero_label} ({pedestal:.0f})")
-    ax.set_title(f"{camera} — night {night} — per-frame brightness")
-    ax.grid(True, alpha=0.3)
-    ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-    ax.xaxis.set_major_formatter(
-        mdates.DateFormatter("%H:%M", tz=LONDON))
-    # 21:00 (night N) -> 05:00 next morning. The 05:00 local cover-close
-    # safety close is the rightmost event we expect to see.
-    #
-    # LEFT EDGE IS 21:00, NOT 22:00 (changed 2026-08-25, Peter): capture
-    # starts when the sun reaches the camera's night altitude, which in
-    # late August is ~20:12 UTC = 21:12 local — so a 22:00 left edge
-    # silently CLIPPED the first ~48 min of every night, including the
-    # steep twilight fall-off where the measurements visibly begin.
-    # Verified the same on both published cameras (astrocam and
-    # eclipticam-v3w both first-framed at 20:12:04 UTC on 2026-08-24).
-    # bin/combined-brightness admits h >= 21 in its observing-window
-    # filter, so 21:00 also makes the per-night and multi-night charts
-    # agree on where the night starts.
-    # BOTH EDGES ARE DYNAMIC (Peter, 2026-08-25): the whole hour either
-    # side of the data actually present, rather than a fixed window.
-    #
-    # This supersedes both the old hard 22:00->05:00 frame and the fixed
-    # 21:00 that briefly replaced its left edge. A fixed frame is wrong in
-    # both directions at once: 05:00 clipped the dawn rise mid-climb on
-    # nights that ran past it, and any fixed left edge is a midwinter bug
-    # in waiting, because capture tracks the sun and starts hours earlier
-    # in December than in August. Deriving the frame from the data cannot
-    # clip and cannot leave a broad empty margin on a short night.
-    #
-    # Late-August nights land on 21:00 of their own accord (frames start
-    # ~21:12), so this gives the 9pm start that prompted the change while
-    # still being right in every other season.
-    start = datetime.combine(night_date, time(21, 0), tzinfo=LONDON)
-    end = datetime.combine(night_date + timedelta(days=1),
-                           time(5, 0), tzinfo=LONDON)
-    if times:
-        first, last = min(times), max(times)
-        start = first.replace(minute=0, second=0, microsecond=0)
-        floor_last = last.replace(minute=0, second=0, microsecond=0)
-        end = floor_last + timedelta(hours=1) if floor_last < last else last
-    ax.set_xlim(start, end)
-    # Mark the time-range of frames that entered max/min/sum stacks.
-    # These bounds come from nightly-cam's anchor-band gate; everything
-    # outside is twilight, dawn, or unusually-dark flap frames.
+    ax_sky.set_ylabel(f"stops above {zero_label} ({pedestal:.0f})")
+    title_suffix = " & environment" if has_env else ""
+    ax_sky.set_title(f"{camera} — night {night} — per-frame brightness{title_suffix}")
+    ax_sky.grid(True, alpha=0.25, linestyle=":")
+
+    # Secondary right Y-axis for mag/arcsec²
+    sm = cfg.get("sky_mag") if cfg is not None else None
+    if sm and zero_label == "black level":
+        try:
+            m0 = float(sm["mag"])
+            s0 = float(sm["at_stops"])
+            k = float(sm["mag_per_stop"])
+            sec = ax_sky.secondary_yaxis(
+                "right",
+                functions=(lambda y: m0 - k * (np.log2(np.clip(y, 1e-9, None)) - s0),
+                           lambda m: np.power(2.0, s0 + (m0 - np.asarray(m)) / k)))
+            sec.yaxis.set_major_locator(MultipleLocator(0.5))
+            sec.yaxis.set_minor_locator(NullLocator())
+            sec.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
+            sec.set_ylabel(f"mag/arcsec\u00b2 ({sm.get('band', '')})")
+        except Exception:
+            pass
+
+    # Shading for closed cover intervals
+    for s_start, s_end in closed_intervals:
+        ax_sky.axvspan(s_start, s_end, color="#FF9500", alpha=0.12, zorder=1)
+        if ax_env is not None:
+            ax_env.axvspan(s_start, s_end, color="#FF9500", alpha=0.12, zorder=1)
+
+    # Stacked window bounds
     if stacked_window_utc:
         try:
             t_lo = datetime.fromisoformat(stacked_window_utc[0]).astimezone(LONDON)
             t_hi = datetime.fromisoformat(stacked_window_utc[1]).astimezone(LONDON)
             for t in (t_lo, t_hi):
-                ax.axvline(t, color="#FF9500", linestyle="--",
-                           linewidth=1.2, alpha=0.7)
+                ax_sky.axvline(t, color="#FF9500", linestyle="--",
+                               linewidth=1.2, alpha=0.7, zorder=2)
         except (ValueError, TypeError):
             pass
+
+    # Legend on sky plot
+    legend_elements = []
+    if np.any(open_mask):
+        legend_elements.append(Line2D([0], [0], marker='o', color='w',
+                                      markerfacecolor='#007AFF', markersize=6,
+                                      label=f'open ({open_mask.sum()})'))
+    if np.any(closed_mask):
+        legend_elements.append(Line2D([0], [0], marker='o', color='w',
+                                      markerfacecolor='#FF9500', markersize=6,
+                                      label=f'closed ({closed_mask.sum()})'))
+    if stacked_window_utc:
+        legend_elements.append(Line2D([0], [0], color='#FF9500', linestyle='--',
+                                      linewidth=1.2, label='stacked window'))
+    if closed_intervals:
+        legend_elements.append(Patch(facecolor='#FF9500', alpha=0.25, label='cover closed'))
+
+    if legend_elements:
+        ax_sky.legend(handles=legend_elements, loc="upper right", framealpha=0.9, fontsize=8)
+
+    # Bottom panel (environment)
+    if ax_env is not None:
+        times_arr = []
+        box_temps_arr = []
+        box_rhs_arr = []
+        sens_temps_arr = []
+        for i, t in enumerate(times):
+            if i > 0 and (t - times[i-1]).total_seconds() > 180:
+                times_arr.append(times[i-1] + timedelta(seconds=1))
+                box_temps_arr.append(np.nan)
+                box_rhs_arr.append(np.nan)
+                sens_temps_arr.append(np.nan)
+            times_arr.append(t)
+            box_temps_arr.append(box_temps[i])
+            box_rhs_arr.append(box_rhs[i])
+            sens_temps_arr.append(sens_temps[i])
+
+        l_temp, = ax_env.plot(times_arr, box_temps_arr, color="#FF3B30",
+                              linewidth=1.4, label="box temp (°C)")
+        env_handles = [l_temp]
+
+        has_sens = any(not np.isnan(v) for v in sens_temps)
+        if has_sens:
+            l_sens, = ax_env.plot(times_arr, sens_temps_arr, color="#AF52DE",
+                                  linewidth=1.0, linestyle=":", alpha=0.8,
+                                  label="sensor temp (°C)")
+            env_handles.append(l_sens)
+
+        ax_env.set_ylabel("temp (°C)", color="#D70015")
+        ax_env.tick_params(axis="y", labelcolor="#D70015")
+        ax_env.grid(True, alpha=0.25, linestyle=":")
+
+        ax_rh = ax_env.twinx()
+        l_rh, = ax_rh.plot(times_arr, box_rhs_arr, color="#34C759",
+                           linewidth=1.4, label="relative humidity (%)")
+        ax_rh.set_ylabel("humidity (% RH)", color="#248A3D")
+        ax_rh.tick_params(axis="y", labelcolor="#248A3D")
+        ax_rh.set_ylim(40, 100)
+        env_handles.append(l_rh)
+
+        ax_env.legend(handles=env_handles, loc="upper right", framealpha=0.9, fontsize=8)
+
+    # X-axis limits and labels
+    bottom_ax = ax_env if ax_env is not None else ax_sky
+    night_date = datetime.strptime(night, "%Y-%m-%d").date()
+    tz_label = datetime.combine(night_date, time(22, 0), tzinfo=LONDON).tzname()
+    bottom_ax.set_xlabel(f"local time ({tz_label})")
+
+    first, last = min(times), max(times)
+    start = first.replace(minute=0, second=0, microsecond=0)
+    floor_last = last.replace(minute=0, second=0, microsecond=0)
+    end = floor_last + timedelta(hours=1) if floor_last < last else last
+    bottom_ax.set_xlim(start, end)
+    bottom_ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    bottom_ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=LONDON))
+
     fig.autofmt_xdate()
-    fig.tight_layout()
+    if not has_env and sm is None:
+        fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=100, facecolor="white")
+    fig.savefig(out_path, dpi=100, facecolor="white", bbox_inches="tight")
     plt.close(fig)
 
 
