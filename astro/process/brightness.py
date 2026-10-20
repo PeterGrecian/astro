@@ -360,12 +360,19 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     closed_mask = np.array([c == "closed" for c in covers])
     moving_mask = np.array([c == "moving" for c in covers])
 
+    # Closed-cover frames see the sky through the transparent cover: lift
+    # them onto the open-sky scale so the curve and mag axis stay continuous.
+    cover_t = cfg.get("cover_closed_transmission") if cfg is not None else None
+    if cover_t and np.any(closed_mask):
+        signal[closed_mask] = signal[closed_mask] / float(cover_t)
+
     if np.any(open_mask):
         ax_sky.scatter(np.array(times)[open_mask], signal[open_mask],
                        s=4, linewidths=0, color="#007AFF", label="open", zorder=3)
     if np.any(closed_mask):
         ax_sky.scatter(np.array(times)[closed_mask], signal[closed_mask],
-                       s=5, linewidths=0, color="#FF9500", label="cover closed", zorder=4)
+                       s=5, linewidths=0, color="#FF9500", label=(f"cover closed (\u00f7{float(cover_t):g})" if cover_t
+                              else "cover closed"), zorder=4)
     if np.any(moving_mask):
         ax_sky.scatter(np.array(times)[moving_mask], signal[moving_mask],
                        s=6, linewidths=0, color="#FF3B30", label="cover moving", zorder=5)
