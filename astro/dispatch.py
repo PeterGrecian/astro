@@ -58,6 +58,22 @@ def _reset_pending(state_path_: Path, flag: str, log: logging.Logger) -> None:
         log.warning(f"reset: cannot write {state_path_}: {e}")
 
 
+def _sync_repo(repo_root: Path, log: logging.Logger) -> None:
+    """Fast-forward the checkout before a run (bin/astro-sync). The run
+    goes ahead whatever happens: a refusal costs freshness, not a night.
+    The daemon itself keeps the code it started with; publish-night-cam,
+    a fresh process, gets the pulled code."""
+    try:
+        r = subprocess.run([str(repo_root / "bin" / "astro-sync")],
+                           check=False, capture_output=True, text=True,
+                           timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log.warning(f"astro-sync did not run: {e}")
+        return
+    for line in (r.stdout + r.stderr).splitlines():
+        log.info(line)
+
+
 def run_for_camera(camera: str, night: str, repo_root: Path,
                    log: logging.Logger,
                    dry_run: bool = False) -> int:
@@ -67,6 +83,7 @@ def run_for_camera(camera: str, night: str, repo_root: Path,
     if dry_run:
         log.info(f"[{camera}/{night}] dry-run: would invoke")
         return 0
+    _sync_repo(repo_root, log)
     try:
         result = subprocess.run(cmd, check=False)
     except OSError as e:

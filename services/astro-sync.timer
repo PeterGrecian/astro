@@ -1,0 +1,12 @@
+[Unit]
+Description=astro: daily fast-forward of ~/astro (the nightly runs also pull just before they start)
+
+[Timer]
+# Midday local: clear of capture, of the dawn dispatch and of the 05:00-06:00
+# timer jobs. Persistent catches a host that was down at noon.
+OnCalendar=*-*-* 12:30:00
+RandomizedDelaySec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

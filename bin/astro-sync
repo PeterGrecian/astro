@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# astro-sync — fast-forward this host's ~/astro checkout to origin/main.
+#
+# Nothing else deploys ~/astro to the hosts that run it: on 2026-10-20 muppet
+# was 3 commits behind and would have published that night's brightness chart
+# without the fix pushed that morning. So every host follows main, pulled
+# (a) by astro-sync.timer once a day and (b) just before each nightly run
+# (astro.dispatch before publish-night-cam; ExecStartPre=- drop-ins on the
+# timer oneshots), so a fix pushed in the evening still lands that night.
+#
+# Fast-forward ONLY. A dirty tracked tree, another branch, or a local commit
+# not on origin is someone's work in progress: refuse, alert, leave it alone.
+# Never reset, never stash. Exit 0 = up to date or updated; 1 = refused;
+# 2 = fetch failed (network; logged, no alert). Callers run the job anyway on
+# whatever is checked out, so a refusal costs freshness, never a night.
+#
+# requirements.txt changing is alerted, not acted on: a venv rebuild on a Pi
+# is too heavy to do unannounced before a run.
+#
+# ASTRO_SYNC=0 in the environment (e.g. /etc/default/astro-process) disables it.
+set -u
+
+REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+HOST="$(hostname -s)"
+
+log() { echo "astro-sync: $*"; }
+
+say_alert() {
+    # $1 title, $2 detail. alert lives in super/bin; absent on a host = log only.
+    local a
+    a="$(command -v alert || echo "$HOME/super/bin/alert")"
+    [ -x "$a" ] && "$a" --info --source "astro-sync@$HOST" --detail "$2" "$1" >/dev/null 2>&1
+}
+
+refuse() {
+    log "REFUSED: $1"
+    say_alert "astro-sync refused on $HOST: $1" "$REPO is not being updated, so tonight's run uses $(git -C "$REPO" rev-parse --short HEAD). ${2:-}"
+    exit 1
+}
+
+if [ "${ASTRO_SYNC:-1}" = "0" ]; then
+    log "disabled (ASTRO_SYNC=0)"
+    exit 0
+fi
+
+# One at a time: the timer and two cameras' dispatches can coincide.
+exec 9>"$REPO/.git/astro-sync.lock"
+flock -w 120 9 || { log "lock busy, skipping"; exit 0; }
+
+cd "$REPO" || exit 1
+
+branch="$(git rev-parse --abbrev-ref HEAD)"
+[ "$branch" = "main" ] || refuse "on branch '$branch', not main"
+
+dirty="$(git status --porcelain --untracked-files=no)"
+[ -z "$dirty" ] || refuse "tracked files modified" "$(echo "$dirty" | head -10 | tr '\n' ' ')"
+
+if ! timeout 90 git fetch -q origin main; then
+    log "fetch failed (network?); staying at $(git rev-parse --short HEAD)"
+    exit 2
+fi
+
+old="$(git rev-parse HEAD)"
+new="$(git rev-parse origin/main)"
+if [ "$old" = "$new" ]; then
+    log "up to date at ${old:0:7}"
+    exit 0
+fi
+
+git merge-base --is-ancestor "$old" "$new" \
+    || refuse "local main has diverged from origin/main" \
+              "local-only commits: $(git log --oneline origin/main..HEAD | head -5 | tr '\n' ';')"
+
+git merge -q --ff-only origin/main || refuse "fast-forward failed (untracked file in the way?)"
+
+log "updated ${old:0:7} -> ${new:0:7} ($(git rev-list --count "$old..$new") commits)"
+git log --oneline "$old..$new" | head -20 | sed 's/^/astro-sync:   /'
+
+if ! git diff --quiet "$old" "$new" -- requirements.txt; then
+    log "requirements.txt changed: venv needs 'pip install -r requirements.txt'"
+    say_alert "astro-sync on $HOST: requirements.txt changed" \
+              "Pulled ${old:0:7}..${new:0:7}. Rebuild: $REPO/.venv/bin/pip install -r $REPO/requirements.txt"
+fi
+exit 0
