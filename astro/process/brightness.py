@@ -259,6 +259,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     box_temps = []
     box_rhs = []
     sens_temps = []
+    exptimes = []
     for r in rows:
         iso = _val(r, 1, "iso_utc")
         if not iso:
@@ -280,6 +281,11 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
         box_rhs.append(float(rh) if rh is not None else np.nan)
         st = _val(r, 11, "senstemp_c")
         sens_temps.append(float(st) if st is not None else np.nan)
+        ex = _val(r, 8, "exptime")
+        try:
+            exptimes.append(float(ex) if ex is not None else np.nan)
+        except ValueError:
+            exptimes.append(np.nan)
 
     if not times:
         return
@@ -379,6 +385,14 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
             m0 = float(sm["mag"])
             s0 = float(sm["at_stops"])
             k = float(sm["mag_per_stop"])
+            # at_stops is on the sky_clear_ref_exptime basis (59.9 s); the
+            # scatter is per frame, so shift by the sub length (15 s subs
+            # sit 2 stops lower and would read 1.5 mag too dark).
+            ref = cfg.get("sky_clear_ref_exptime")
+            ex = np.array(exptimes)
+            ex = ex[np.isfinite(ex) & (ex > 0)]
+            if ref and ex.size:
+                s0 = s0 - math.log2(float(ref) / float(np.median(ex)))
             sec = ax_sky.secondary_yaxis(
                 "right",
                 functions=(lambda y: m0 - k * (np.log2(np.clip(y, 1e-9, None)) - s0),
