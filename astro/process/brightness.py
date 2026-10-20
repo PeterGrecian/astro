@@ -437,7 +437,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     if np.any(closed_mask):
         legend_elements.append(Line2D([0], [0], marker='o', color='w',
                                       markerfacecolor='#FF9500', markersize=6,
-                                      label=f'closed ({closed_mask.sum()})'))
+                                      label=(f'closed ({closed_mask.sum()}, \u00f7{float(cover_t):g})' if cover_t else f'closed ({closed_mask.sum()})')))
     if stacked_window_utc:
         legend_elements.append(Line2D([0], [0], color='#FF9500', linestyle='--',
                                       linewidth=1.2, label='stacked window'))
