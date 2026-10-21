@@ -22,6 +22,10 @@ figures:
       circles around the ring centre.
 ---
 
+> **Update 2026-10-21:** the rings survived removing the glass, so the cause
+> given here is wrong; they come from inside the camera module, probably the
+> infrared-cut filter. See [the follow-up](2026-10-21-astrocam-rings-not-the-glass.md).
+
 Peter: *"the glass cover for the camera is very thin and flat. probably the
 cause of the newton's rings."*
 
