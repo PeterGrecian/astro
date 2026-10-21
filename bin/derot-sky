@@ -90,12 +90,20 @@ def mid(dt):
     return dt + timedelta(seconds=EXPTIME_S / 2)
 
 
-def load_binned(path):
+# RGGB cells of each 2x2 superpixel, weighted so every choice is on the 2x2-sum
+# scale (the glow model's black level is 4x the per-pixel black)
+CHANNELS = {"sum": ((0, 0, 1), (0, 1, 1), (1, 0, 1), (1, 1, 1)),
+            "R": ((0, 0, 4),), "G": ((0, 1, 2), (1, 0, 2)), "B": ((1, 1, 4),),
+            "G1": ((0, 1, 4),), "G2": ((1, 0, 4),)}
+
+
+def load_binned(path, channel="sum"):
     from astropy.io import fits
     with fits.open(path) as h:
         d = h[1].data
     H, W = d.shape
-    return d[:H // 2 * 2, :W // 2 * 2].reshape(H // 2, 2, W // 2, 2).sum(axis=(1, 3), dtype=np.float32)
+    q = d[:H // 2 * 2, :W // 2 * 2].reshape(H // 2, 2, W // 2, 2)
+    return sum(w * q[:, dy, :, dx].astype(np.float32) for dy, dx, w in CHANNELS[channel])
 
 
 def utc_on_night(night, hhmmss):
@@ -320,9 +328,21 @@ def cmd_residual(a):
     pick = [fr[i] for i in np.linspace(0, len(fr) - 1, min(a.n, len(fr))).astype(int)]
     stack = []
     for _, path in pick:
-        img, amp, rms, level = gm.subtract(load_binned(path), return_fit=True)
+        img, amp, rms, level = gm.subtract(load_binned(path, a.channel), return_fit=True)
         stack.append((img / max(level, 1e-3)).astype(np.float32))
-    R = np.median(np.stack(stack), axis=0)
+    if a.stat == "median":
+        R = np.median(np.stack(stack), axis=0)
+    else:
+        # The median of integer ADU snaps to whole steps: on a sky only ~30-80 ADU
+        # above black, with ~1.5-6 ADU noise, its contours of the smooth vignetting
+        # come out as rings (+-0.5 ADU / level: ~2% in B). A clipped mean averages
+        # the steps away and still drops the stars.
+        st = np.stack(stack)
+        med = np.median(st, axis=0)
+        mad = 1.4826 * np.median(np.abs(st - med), axis=0) + 1e-3
+        keep = np.abs(st - med) <= 3 * mad
+        R = (st * keep).sum(axis=0) / np.maximum(keep.sum(axis=0), 1)
+        del st, keep
     del stack
     sky = gm.sky_mask(R.shape, 1)
     R -= np.median(R[sky])                        # pattern only; the glow model owns the level
@@ -737,6 +757,10 @@ def main():
     rs.add_argument("--max-ratio", type=float, default=1.5)
     rs.add_argument("--n", type=int, default=61, help="frames in the median (default 61)")
     rs.add_argument("-o", "--out", required=True)
+    rs.add_argument("--channel", choices=["sum", "R", "G", "B", "G1", "G2"], default="sum",
+                    help="one Bayer colour (rings in a thin layer scale as sqrt(wavelength))")
+    rs.add_argument("--stat", choices=["median", "clipped"], default="median",
+                    help="median (the 10-10 map) or 3-sigma clipped mean (no ADU-step contours)")
     al = sub.add_parser("align", help="measure each frame's offset from the camera model against catalogue stars")
     al.add_argument("camera"); al.add_argument("night"); al.add_argument("--glow", required=True)
     al.add_argument("--max-ratio", type=float, default=1.5); al.add_argument("--all", action="store_true",

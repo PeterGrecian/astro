@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Fit the camera-fixed rings in a `derot-sky residual` map.
+
+    camera-rings centre RESIDUAL.npy CAMMODEL.json [-o rings.json]
+    camera-rings colour CENTRE.json R.npy G.npy B.npy CAMMODEL.json [-o colour.json]
+
+`centre` finds the direction the rings are centred on and their angles. The map
+is band-passed first (column offsets out, 3 px smooth, minus a 120 px blur) so
+leftover glow cannot pass for a ring. A candidate centre is scored by the
+covariance between radial profiles built from two disjoint halves of the pixels
+(a checkerboard of 48 px blocks): noise is independent between the halves and
+averages out, rings are common to both. A global grid of centres over the frame
+comes before a local refine; centres are kept IN the frame, because far outside
+it the circles turn into near-straight lines that soak up any stripe pattern
+(the first version ran to the grid edge, 45 deg off axis, on 10-09). The
+blurs leave artefacts parallel to the mask edges (trees, roof, frame), which
+a centre on that edge fits well, so the mask is eroded EDGE px and each
+refine stays within REACH px of its grid point. The 10-10 fitter was a bare
+local Nelder-Mead on a biased score and landed wherever it started.
+
+`colour` takes the centre and compares the R and B profiles with G in
+u = 1 - cos(theta). Fringes of equal inclination in a thin flat layer of
+thickness d sit at u_m = m * lambda / 2d, so a colour's profile is G's
+stretched in u by lambda_colour / lambda_G (~1.13 for R, ~0.88 for B with
+Bayer filters). A pattern that is not interference (a ripple, a stain) has
+the same angles in every colour: ratio 1.
+
+The camera model only maps pixels to directions. Ring angles are between
+directions, so any model with this lens's intrinsics will do, whatever the
+pointing was that night.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from scipy.ndimage import binary_erosion, gaussian_filter
+from scipy.optimize import minimize
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.skyglow import CameraModel  # noqa: E402
+
+BIN_DEG = 0.2          # radial profile bin
+TMAX_DEG = 36.0        # profile reach
+BLOCK = 48             # checkerboard block for the two halves (px)
+EDGE = 80              # mask erosion against blur artefacts (px)
+REACH = 100            # refine stays this close to its grid point (px)
+
+
+def bandpass(path):
+    """Residual map -> (band-passed map, sky mask)."""
+    R = np.load(path).astype(np.float64)
+    sky = R != 0
+    col = np.array([np.median(R[sky[:, i], i]) if sky[:, i].sum() > 50 else 0.0
+                    for i in range(R.shape[1])])
+    R = (R - col[None, :]) * sky
+    w3 = gaussian_filter(sky.astype(float), 3)
+    S = np.where(w3 > 0.5, gaussian_filter(R, 3) / np.maximum(w3, 1e-6), 0.0)
+    wL = gaussian_filter(sky.astype(float), 120)
+    L = gaussian_filter(S * sky, 120) / np.maximum(wL, 1e-6)
+    ok = binary_erosion(sky & (w3 > 0.5) & (wL > 0.3), iterations=EDGE, border_value=0)
+    return np.where(ok, S - L, 0.0), ok
+
+
+def directions(cm, shape, stride):
+    yy, xx = np.mgrid[0:shape[0]:stride, 0:shape[1]:stride]
+    V = np.asarray(cm.unproject(xx.ravel().astype(float), yy.ravel().astype(float))).reshape(-1, 3)
+    return V, yy.ravel(), xx.ravel()
+
+
+class Profiles:
+    def __init__(self, h, ok, cm, stride):
+        V, yy, xx = directions(cm, h.shape, stride)
+        m = ok[yy, xx]
+        self.V, self.v = V[m], h[yy, xx][m]
+        self.half = (((yy[m] // BLOCK) + (xx[m] // BLOCK)) % 2).astype(bool)
+        self.nb = int(TMAX_DEG / BIN_DEG)
+
+    def bins(self, c):
+        th = np.degrees(np.arccos(np.clip(self.V @ c, -1, 1)))
+        b = (th / BIN_DEG).astype(int)
+        return np.where(b < self.nb, b, -1)
+
+    def profile(self, c, sel=None):
+        b = self.bins(c)
+        keep = b >= 0 if sel is None else (b >= 0) & sel
+        n = np.bincount(b[keep], minlength=self.nb)
+        s = np.bincount(b[keep], self.v[keep], minlength=self.nb)
+        return np.where(n > 20, s / np.maximum(n, 1), np.nan), n
+
+    def score(self, c):
+        """Covariance of the two halves' profiles, weighted by pixels per bin."""
+        c = c / np.linalg.norm(c)
+        pa, na = self.profile(c, self.half)
+        pb, nb = self.profile(c, ~self.half)
+        ok = np.isfinite(pa) & np.isfinite(pb)
+        w = np.sqrt(na * nb)[ok]
+        return float(np.sum(w * pa[ok] * pb[ok]) / max(w.sum(), 1))
+
+
+def to_vec(cm, x, y):
+    return np.asarray(cm.unproject(np.array([float(x)]), np.array([float(y)]))).reshape(3)
+
+
+def extrema(p, sig=1.0):
+    """Maxima and minima (deg) of a lightly smoothed profile."""
+    ok = np.isfinite(p)
+    q = gaussian_filter(np.where(ok, p, 0.0), sig) / np.maximum(gaussian_filter(ok * 1.0, sig), 1e-6)
+    th = (np.arange(len(p)) + 0.5) * BIN_DEG
+    mx = [th[i] for i in range(1, len(q) - 1) if ok[i - 1:i + 2].all() and q[i] > q[i - 1] and q[i] >= q[i + 1]]
+    mn = [th[i] for i in range(1, len(q) - 1) if ok[i - 1:i + 2].all() and q[i] < q[i - 1] and q[i] <= q[i + 1]]
+    return [round(float(t), 2) for t in mx], [round(float(t), 2) for t in mn], q
+
+
+def cmd_centre(a):
+    cm = CameraModel(a.cammodel)
+    h, ok = bandpass(a.residual)
+    H, W = h.shape
+    coarse = Profiles(h, ok, cm, 6)
+    grid = [(x, y) for y in range(0, H + 1, 40) for x in range(0, W + 1, 40)]
+    sc = np.array([coarse.score(to_vec(cm, x, y)) for x, y in grid])
+    top = np.argsort(sc)[::-1][:5]
+    fine = Profiles(h, ok, cm, 2)
+
+    def near(c, x0, y0):
+        x, y = cm.project(c / np.linalg.norm(c))
+        return float(np.hypot(x - x0, y - y0) <= REACH)
+    best = None
+    for i in top:
+        x0, y0 = grid[i]
+        r = minimize(lambda c: -fine.score(c) * near(c, x0, y0), to_vec(cm, x0, y0), method="Nelder-Mead",
+                     options=dict(xatol=1e-5, fatol=1e-14, maxiter=400))
+        c = r.x / np.linalg.norm(r.x)
+        if best is None or -r.fun > best[0]:
+            best = (-r.fun, c)
+    score, c = best
+    x, y = cm.project(c)
+    axis = to_vec(cm, cm.cx, cm.cy)
+    p, n = fine.profile(c)
+    mx, mn, q = extrema(p)
+    noise = fine.score(np.cross(c, axis) / np.linalg.norm(np.cross(c, axis)))  # an unrelated direction
+    out = dict(residual=a.residual, cammodel=a.cammodel,
+               centre_px=[round(float(x), 1), round(float(y), 1)], centre_vec=c.tolist(),
+               centre_off_axis_deg=round(float(np.degrees(np.arccos(c @ axis))), 2),
+               score=score, score_unrelated_direction=noise,
+               coarse_top=[[grid[i][0], grid[i][1], float(sc[i])] for i in top],
+               maxima_deg=mx, minima_deg=mn,
+               amplitude_pct=round(float(100 * np.nanstd(q[np.isfinite(p)])), 3),
+               profile=[[round((i + 0.5) * BIN_DEG, 2), None if np.isnan(v) else float(v), int(k)]
+                        for i, (v, k) in enumerate(zip(p, n))])
+    if a.check:
+        xc, yc = a.check
+        out["score_at_check"] = [xc, yc, fine.score(to_vec(cm, xc, yc))]
+    print(json.dumps({k: v for k, v in out.items() if k != "profile"}, indent=1))
+    if a.out:
+        json.dump(out, open(a.out, "w"), indent=1)
+
+
+def stretch_fit(uG, pG, uX, pX):
+    """Best k with pX(u) ~ A * pG(u / k): (k, correlation) over a scan."""
+    best = (1.0, -2.0)
+    for k in np.arange(0.70, 1.40, 0.002):
+        g = np.interp(uX / k, uG, pG, left=np.nan, right=np.nan)
+        ok = np.isfinite(g) & np.isfinite(pX)
+        if ok.sum() < 40:
+            continue
+        r = np.corrcoef(g[ok], pX[ok])[0, 1]
+        if r > best[1]:
+            best = (float(k), float(r))
+    return best
+
+
+def cmd_colour(a):
+    cm = CameraModel(a.cammodel)
+    c = np.array(json.load(open(a.centre))["centre_vec"])
+    prof, out = {}, dict(centre=a.centre)
+    for name, path in (("R", a.r), ("G", a.g), ("B", a.b)):
+        h, ok = bandpass(path)
+        P = Profiles(h, ok, cm, 2)
+        p, _ = P.profile(c)
+        mx, mn, q = extrema(p)
+        prof[name] = np.where(np.isfinite(p), q, np.nan)
+        out[f"{name}_maxima_deg"] = mx
+        out[f"{name}_amplitude_pct"] = round(float(100 * np.nanstd(prof[name])), 3)
+    th = np.radians((np.arange(len(prof["G"])) + 0.5) * BIN_DEG)
+    u = 1 - np.cos(th)
+    lo = th > np.radians(a.min_deg)        # the centre few degrees hold too few pixels per bin
+    for name, expect in (("R", 1.13), ("B", 0.88)):
+        k, r = stretch_fit(u[lo], prof["G"][lo], u[lo], prof[name][lo])
+        k1 = np.corrcoef(*[x[lo & np.isfinite(prof["G"]) & np.isfinite(prof[name])]
+                           for x in (prof["G"], prof[name])])[0, 1]
+        out[f"{name}_over_G"] = dict(stretch=round(k, 3), corr=round(r, 3), corr_at_1=round(float(k1), 3),
+                                     expected_if_interference=expect)
+    print(json.dumps(out, indent=1))
+    if a.out:
+        out["profiles"] = {k: [None if np.isnan(x) else float(x) for x in v] for k, v in prof.items()}
+        json.dump(out, open(a.out, "w"), indent=1)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("centre"); c.add_argument("residual"); c.add_argument("cammodel")
+    c.add_argument("-o", "--out")
+    c.add_argument("--check", type=float, nargs=2, metavar=("X", "Y"), help="also score this centre (px)")
+    k = sub.add_parser("colour"); k.add_argument("centre"); k.add_argument("r"); k.add_argument("g")
+    k.add_argument("b"); k.add_argument("cammodel"); k.add_argument("--min-deg", type=float, default=4.0)
+    k.add_argument("-o", "--out")
+    a = ap.parse_args()
+    {"centre": cmd_centre, "colour": cmd_colour}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()
