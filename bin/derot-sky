@@ -65,7 +65,7 @@ EXPTIME_S = 59.9   # astrocam default; night_frames() replaces it from the night
                    # exposure START. Set before any Pool forks, so workers inherit it.
 
 
-def night_frames(night):
+def night_frames(night, cover="open"):
     global EXPTIME_S
     out = []
     for p in sorted(glob.glob(f"{BASE}/astrocam-frames/{night}/[0-2][0-9]/*.fits.fz")):
@@ -79,10 +79,12 @@ def night_frames(night):
             pass
         # Open-cover frames only: closed frames go through the transparent cover
         # (from 10-18, COVER header) or a logged dip (10-17); see astro/cover.py.
+        # cover="closed" keeps only those instead (the cover's own rings, 10-21).
         n = len(out)
-        out = [(t, p) for t, p in out if frame_open(p)]
+        out = [(t, p) for t, p in out if frame_open(p) == (cover == "open")]
         if len(out) < n:
-            print(f"{night}: dropped {n - len(out)} of {n} frames taken with the cover closed", file=sys.stderr)
+            print(f"{night}: dropped {n - len(out)} of {n} frames taken with the cover "
+                  f"{'closed' if cover == 'open' else 'open'}", file=sys.stderr)
     return sorted(out)
 
 
@@ -322,7 +324,11 @@ def cmd_residual(a):
     glass window?) and sensor column offsets. A 10 min derot window turns only
     2.5 deg, so without this both survive into the deep sweep."""
     gm = GlowModel(a.glow)
-    fr = clean_frames(a.night, night_frames(a.night), a.glow, a.max_ratio)
+    frames = night_frames(a.night, a.cover)
+    if a.start:                                # a window of the night (UTC), to watch the rings move
+        t0, t1 = utc_on_night(a.night, a.start), utc_on_night(a.night, a.end)
+        frames = [f for f in frames if t0 <= f[0] < t1]
+    fr = clean_frames(a.night, frames, a.glow, a.max_ratio)
     if len(fr) < 10:
         sys.exit(f"{len(fr)} clean frames: too few for a residual map")
     pick = [fr[i] for i in np.linspace(0, len(fr) - 1, min(a.n, len(fr))).astype(int)]
@@ -761,6 +767,10 @@ def main():
                     help="one Bayer colour (rings in a thin layer scale as sqrt(wavelength))")
     rs.add_argument("--stat", choices=["median", "clipped"], default="median",
                     help="median (the 10-10 map) or 3-sigma clipped mean (no ADU-step contours)")
+    rs.add_argument("--from", dest="start", help="window start, UTC HH:MM (with --to)")
+    rs.add_argument("--to", dest="end", help="window end, UTC HH:MM")
+    rs.add_argument("--cover", choices=["open", "closed"], default="open",
+                    help="frames with the cover open (default) or closed (through the transparent cover)")
     al = sub.add_parser("align", help="measure each frame's offset from the camera model against catalogue stars")
     al.add_argument("camera"); al.add_argument("night"); al.add_argument("--glow", required=True)
     al.add_argument("--max-ratio", type=float, default=1.5); al.add_argument("--all", action="store_true",
