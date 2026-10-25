@@ -199,6 +199,17 @@ def main():
     # one you care about most. Reference nights stay dashed (so they read as
     # "not a recent night") but coloured, not black.
     latest_night = nights[-1][0] if nights else None
+    # Reference nights are drawn on the LATEST night's clock, not their
+    # own: the 2026-07-25 baseline is BST, and on a GMT night its dark
+    # trough would sit an hour late against the sky. Shifting it by the
+    # offset difference lines its solar midnight up with tonight's. The
+    # other nights keep their own wall clock, where the step at a clocks
+    # change is plain to see and ages out by itself (Peter, 2026-10-25).
+    latest_tz = None
+    if latest_night:
+        end = datetime.strptime(latest_night, "%Y-%m-%d").replace(
+            hour=12, tzinfo=timezone.utc) + timedelta(days=1)
+        latest_tz = end.astimezone(LONDON)
 
     # Exposure: the curves are mean ADU per FRAME, so a night shot with a
     # different exposure plots stops away from the rest for no sky reason
@@ -239,15 +250,21 @@ def main():
         idx = f"  {trough:5.2f}" if trough is not None else "      -"
         if scale != 1.0:
             idx += f"  ({e:g} s, x{scale:.1f})"
-        xs = to_anchor_axis(times, night_str)
         is_latest = night_str == latest_night
         is_ref = night_str in ref_set
+        ref_note = ""
+        if is_ref and not is_latest and latest_tz is not None:
+            shift = latest_tz.utcoffset() - times[len(times) // 2].utcoffset()
+            if shift:
+                times = np.array([t + shift for t in times], dtype=object)
+                ref_note = f", on {latest_tz.tzname()}"
+        xs = to_anchor_axis(times, night_str)
         if is_latest:
             style = dict(linewidth=2.0, linestyle="--", color="black",
                          zorder=6, label=f"{night_str} (latest){idx}")
         elif is_ref:
             style = dict(linewidth=1.4, linestyle="--", color=cmap(i % 10),
-                         zorder=5, label=f"{night_str} (ref){idx}")
+                         zorder=5, label=f"{night_str} (ref{ref_note}){idx}")
         else:
             style = dict(linewidth=1.0, linestyle="-", color=cmap(i % 10),
                          zorder=2, label=f"{night_str}{idx}")
