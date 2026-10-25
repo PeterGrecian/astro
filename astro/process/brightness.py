@@ -491,17 +491,26 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
 
     # X-axis limits and labels
     bottom_ax = ax_env if ax_env is not None else ax_sky
-    night_date = datetime.strptime(night, "%Y-%m-%d").date()
-    tz_label = datetime.combine(night_date, time(22, 0), tzinfo=LONDON).tzname()
-    bottom_ax.set_xlabel(f"local time ({tz_label})")
-
     first, last = min(times), max(times)
+    # A clocks-change night (last Sunday of Mar/Oct) spans two zones: the
+    # axis stays continuous in real time, so October shows 01:00 twice.
+    # Name both zones and tag each tick with the zone it is in, so the
+    # repeated hour reads as "01:00 BST, 01:00 GMT" rather than a glitch.
+    tz_first, tz_last = first.astimezone(LONDON).tzname(), last.astimezone(LONDON).tzname()
+    if tz_first == tz_last:
+        bottom_ax.set_xlabel(f"local time ({tz_first})")
+        tick_fmt = mdates.DateFormatter("%H:%M", tz=LONDON)
+    else:
+        bottom_ax.set_xlabel(f"local time ({tz_first} → {tz_last}, clocks changed)")
+        tick_fmt = FuncFormatter(lambda x, _pos: mdates.num2date(x).astimezone(LONDON)
+                                 .strftime("%H:%M\n%Z"))
+
     start = first.replace(minute=0, second=0, microsecond=0)
     floor_last = last.replace(minute=0, second=0, microsecond=0)
     end = floor_last + timedelta(hours=1) if floor_last < last else last
     bottom_ax.set_xlim(start, end)
     bottom_ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-    bottom_ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=LONDON))
+    bottom_ax.xaxis.set_major_formatter(tick_fmt)
 
     fig.autofmt_xdate()
     if not has_env and sm is None:
