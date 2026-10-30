@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""xoverpi-night — night capture for the OV5647 at prime focus of the FirstScope.
+"""xoverpi-night — night capture for the IMX477 (fshq) at prime focus of the FirstScope.
+
+Written for the OV5647; fshq replaced it on 2026-10-14. Notes below that quote
+OV5647 numbers are that history, not this sensor.
 
 Derived from eclipticam/v1_night_daemon.py, which is the estate's other OV5647
 daemon, but with its central design decision REVERSED. That daemon exists to
@@ -66,20 +69,19 @@ from astro.nightdir import night_of          # noqa: E402
 from astro.config import CameraConfig         # noqa: E402
 
 CAMERA = "xoverpi"
-RES_FULL = (2592, 1944)
-RES_BIN = (1296, 972)
-RAW_FORMAT = "SGBRG10"        # OV5647 native; confirmed against this camera
-BAYERPAT = "SGBRG"
+RES_FULL = (4056, 3040)
+RES_BIN = (2028, 1520)
+RAW_FORMAT = "SRGGB12"
+BAYERPAT = "SRGGB"
 
-# MEASURED on this camera 2026-09-14, not quoted: identical across
-# {video,still} x {full,binned}. Video mode does NOT buy a longer exposure.
-EXPOSURE_MAX_US = 3_066_985
+# Not a sensor limit: the IMX477 goes far longer. Just a sanity cap on a typo.
+EXPOSURE_MAX_US = 60_000_000
 
 # One length by default: collect all the light the sensor will give. See the
 # duty-cycle note above before setting this to a list.
 EXPOSURES = [float(x) for x in
              os.environ.get("XOVER_EXPOSURES", "3.0").split(",")]
-GAIN = float(os.environ.get("XOVER_GAIN", 4.0))   # 8 clipped bright stars at 2 s (2026-09-17)
+GAIN = float(os.environ.get("XOVER_GAIN", 2.0))   # first guess for fshq, unmeasured on stars
 COADD_N = int(os.environ.get("XOVER_COADD_N", 1))
 BINNED = os.environ.get("XOVER_BINNED", "1") != "0"
 MIN_FREE_GB = float(os.environ.get("XOVER_MIN_FREE_GB", 2.0))
@@ -91,7 +93,7 @@ PAUSE_FILE = Path.home() / "xoverpi-capture.pause"
 # analysable if each frame carries the setting it was taken at - otherwise the
 # whole sweep reduces to "some frames, some focus". Set it with xoverpi/focus.py.
 FOCUS_FILE = Path.home() / "xoverpi-focus"
-SAT_LEVEL = 1023              # 10-bit data in a uint16 container
+SAT_LEVEL = 4095              # 12-bit data in a uint16 container
 SAT_FRACTION = 0.9
 
 _stop = False
@@ -118,7 +120,7 @@ def write_fits(data, out_path, exp_us, n_coadd, t_start, t_end, mean, run_tag,
     h["BAYERPAT"] = BAYERPAT
     h["DATE-OBS"] = t_start.isoformat()
     h["DATE-END"] = t_end.isoformat()
-    h["CAMERA"] = "ov5647"
+    h["CAMERA"] = "imx477"
     h["TELESCOP"] = "Celestron FirstScope 76/300"
     h["RUNTAG"] = run_tag
     h["FOCUSPOS"] = focus
@@ -284,7 +286,9 @@ def main() -> int:
             for _ in range(COADD_N):
                 req = cam.capture_request()
                 try:
-                    bayer = req.make_array("raw").view(np.uint16).copy()
+                    # The raw arrives padded to the stride; keep the sensor's width.
+                    w, h = RES_BIN if BINNED else RES_FULL
+                    bayer = req.make_array("raw").view(np.uint16)[:h, :w].copy()
                 finally:
                     req.release()
                 if ROTATE180:

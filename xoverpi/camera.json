@@ -1,17 +1,23 @@
 {
   "name": "xoverpi",
   "host": "xoverpi",
-  "sensor": "OV5647",
-  "bayer": "SGBRG10",
-  "bayer_notes": "Confirmed against the hardware 2026-09-14: rpicam-hello --list-cameras reports 'ov5647 [2592x1944 10-bit GBRG]'. splay-graticule/CLAUDE.md flags OV5647-vs-IMX708 Bayer order as a RECURRING mistake (OV5647 = SGBRG10, IMX708 = SRGGB10) - do not copy an order from another camera's file.",
-  "black_level": 15.3,
-  "black_level_notes": "INHERITED from starcam's OV5647 and NOT verified on this sensor. starcam measured 15.30 from its own 4x coadd floor. Whether this is the same physical module moved over or a different OV5647 is unrecorded - measure before relying on it for photometry.",
-  "resolution": [2592, 1944],
-  "resolution_binned": [1296, 972],
+  "sensor": "IMX477",
+  "bayer": "SRGGB12",
+  "bayer_notes": "fshq, Raspberry Pi HQ camera, since 2026-10-14. The OV5647 notes in this file describe the earlier sensor (2026-09-14..2026-10-13).",
+  "black_level": 256,
+  "black_level_notes": "Taken from eclipticam-hq16 (same sensor, 12-bit). NOT yet measured on fshq: take darks.",
+  "resolution": [
+    4056,
+    3040
+  ],
+  "resolution_binned": [
+    2028,
+    1520
+  ],
   "capture_resolution": "binned",
   "capture_resolution_notes": "Binned 2x2 is the DEFAULT capture mode, on two independent grounds. Optically it costs nothing: the primary is spherical at f/3.95 giving ~1.1 waves P-V, ~4x the Rayleigh limit, so real star images are several arcsec wide against a 0.96 arcsec pixel. Practically it is the difference between fitting a night on the card and not - see storage below.",
-  "plate_scale_deg_px": 0.000267381,
-  "plate_scale_notes": "THEORETICAL, not plate-solved: 206.265 * 1.4 um / 300 mm = 0.9626 arcsec/px unbinned (1.925 binned 2x2). Field of view 0.693 x 0.520 deg. REPLACE THIS from the streaks themselves: trailed stars self-calibrate, since streak length at known exposure gives plate_scale*cos(dec) and streak direction gives orientation - free on every frame, and it tracks flexure and focus drift in a way a one-off plate solve does not.",
+  "plate_scale_deg_px": 0.000296,
+  "plate_scale_notes": "THEORETICAL, not plate-solved: 206.265 * 1.55 um / 300 mm = 1.066 arcsec/px unbinned (2.13 binned 2x2). Field of view 1.20 x 0.90 deg.",
   "pole_prior_xy": null,
   "frames_root": "~/xoverpi-frames",
   "frames_root_by_host": {
@@ -24,11 +30,7 @@
   "processing_host": "muppet",
   "processing_host_notes": "Processed ON MUPPET, matching astrocam (Peter, 2026-09-15): same host, same stage-3 dispatcher, same deliverables as the other cameras. Requires xoverpi to be added to muppet's astro_processor_cameras (ansible host_vars/muppet.yml, currently \"--camera astrocam\") and the frames to be reachable there on bigstore. A Pi 3B can compress in-line but should not stack or plate-solve.",
   "exposure": {
-    "max_us": 3066985,
-    "min_us_full": 130,
-    "min_us_binned": 86,
-    "measured": "2026-09-14",
-    "notes": "MEASURED on this camera via Picamera2 camera_controls, not quoted from documentation. 3066985 us is IDENTICAL across all four of {video, still} x {full-res, binned} - video mode does NOT buy a longer exposure on the OV5647. FrameDurationLimits tops out at the same 3067365 us, which is the mechanism: exposure is bounded by frame length and the driver's VBLANK ceiling does not vary by mode. An earlier note in this estate suggesting a 6 s ceiling was wrong."
+    "notes": "IMX477: no measured ceiling recorded here; subs of 3 s are well inside its range."
   },
   "storage": {
     "rice_ratio_measured": 1.99,
@@ -53,7 +55,7 @@
     "focus_reachable": true,
     "focus_reachable_notes": "CONFIRMED 2026-09-14 by imaging a sycamore at 35 m: the sensor reaches focus at prime focus and the image circle covers the full frame with no vignetting. This was flagged as a potentially fatal unknown and is now closed. Focusing at 35 m sits f^2/(d-f) = 300^2/(35000-300) = 2.59 mm OUTSIDE the infinity position, so going from the tree to stars means racking IN 2.59 mm.",
     "ir_cut": false,
-    "ir_cut_notes": "The OV5647's IR-cut filter lives in the lens assembly, which is removed to reach prime focus - so this is now a panchromatic camera. Measured on the 35 m frames: R/G 1.16-1.32 and B/G 1.06-1.10 on a foliage scene that should be strongly green-dominant, the near-IR wood effect. For a MIRROR this is close to free signal (no chromatic aberration to smear the extra band), but colour is meaningless and NIR skyglow adds background.",
+    "ir_cut_notes": "fshq had its IR filter removed with the collar on 2026-10-29, so this is a panchromatic camera reaching into the near-infrared. Earlier OV5647 notes: The OV5647's IR-cut filter lives in the lens assembly, which is removed to reach prime focus - so this is now a panchromatic camera. Measured on the 35 m frames: R/G 1.16-1.32 and B/G 1.06-1.10 on a foliage scene that should be strongly green-dominant, the near-IR wood effect. For a MIRROR this is close to free signal (no chromatic aberration to smear the extra band), but colour is meaningless and NIR skyglow adds background.",
     "notes": "Celestron FirstScope, International Year of Astronomy 2009 edition (21024-IYA). NO tracking and NO finder - both are operational constraints on the capture design, not footnotes. The absent finder is the live obstacle to acquiring a target in a 0.69 x 0.52 deg field (1.3 x 1.0 moon diameters)."
   },
   "drift": {
@@ -85,5 +87,16 @@
   "quality_file": null,
   "location_file": "location.json",
   "privacy_file": null,
-  "subcams": null
+  "subcams": null,
+  "position_index": 2,
+  "position_registry": {
+    "1": {
+      "dates": "2026-09-14..2026-10-13",
+      "notes": "OV5647 at prime focus."
+    },
+    "2": {
+      "dates": "2026-10-30..",
+      "notes": "fshq (IMX477): cast collar and IR filter removed 2026-10-29, sensor no longer dust-sealed. Own bandpass, reaching into the near-infrared. Focus set in daylight to about 2.9 mm inward of a ball at ~32 m (2026-10-30), good to about 0.5 mm; first stars must refine it. Focus, flats and the dots offset all restart."
+    }
+  }
 }
