@@ -26,7 +26,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 SIDEREAL_ARCSEC_PER_S = 15.0411
-TEXT, SECONDARY, ACCENT = "#E0E0E0", "#8E8E93", "#FF9500"
+# Mid grey throughout, so the stars stay the brightest thing in the picture.
+GREY = "#8E8E93"
 LONDON = ZoneInfo("Europe/London")
 
 
@@ -95,7 +96,7 @@ def main():
     pole_x += pad_x
     pole_y += pad_top
     d = ImageDraw.Draw(canvas)
-    small, big = ImageFont.truetype(FONT, 30), ImageFont.truetype(FONT, 36)
+    small = ImageFont.truetype(FONT, 30)
 
     t_mid = datetime.fromisoformat(a.t_mid.replace("Z", "+00:00"))
     t_first = t_mid + timedelta(seconds=a.cadence * (a.seq_first - a.seq_mid))
@@ -116,29 +117,31 @@ def main():
     t += timedelta(hours=1)
     while t <= t_last:
         x, y = at(t, field_r + 42)
-        d.text((x, y), clock(t), fill=TEXT, font=small, anchor="mm")
+        d.text((x, y), clock(t), fill=GREY, font=small, anchor="mm")
         t += timedelta(hours=1)
 
     # The pole.
-    d.line([(pole_x - 18, pole_y), (pole_x + 18, pole_y)], fill=TEXT, width=2)
-    d.line([(pole_x, pole_y - 18), (pole_x, pole_y + 18)], fill=TEXT, width=2)
-    d.text((pole_x, pole_y + 44), "celestial pole", fill=SECONDARY, font=small, anchor="mm")
+    d.line([(pole_x - 18, pole_y), (pole_x + 18, pole_y)], fill=GREY, width=2)
+    d.line([(pole_x, pole_y - 18), (pole_x, pole_y + 18)], fill=GREY, width=2)
+    d.text((pole_x, pole_y + 44), "celestial pole", fill=GREY, font=small, anchor="mm")
 
     # Polaris, from a plate solve: usually in the empty middle of the arch.
     if a.polaris:
         x, y = a.polaris[0] + a.border + pad_x, a.polaris[1] + a.border + pad_top
-        d.ellipse([x - 18, y - 18, x + 18, y + 18], outline=ACCENT, width=3)
-        d.text((x - 32, y), "Polaris", fill=ACCENT, font=big, anchor="rm")
+        d.ellipse([x - 18, y - 18, x + 18, y + 18], outline=GREY, width=2)
+        d.text((x - 32, y), "Polaris", fill=GREY, font=small, anchor="rm")
 
-    # One degree, above the pole, inside the arch.
+    # One degree, above the pole, inside the arch: |--- 1 deg ---|
     arcsec_per_px = a.arcsec_per_px or scale * a.arcsec_per_superpixel
     deg_px = 3600 / arcsec_per_px
     y = pole_y - 190
     x0, x1 = pole_x - deg_px / 2, pole_x + deg_px / 2
-    d.line([(x0, y), (x1, y)], fill=TEXT, width=4)
-    for x in (x0, pole_x, x1):
-        d.line([(x, y - 12), (x, y + 12)], fill=TEXT, width=3)
-    d.text((pole_x, y - 42), "1\u00b0", fill=TEXT, font=big, anchor="mm")
+    gap = d.textlength("1\u00b0", font=small) / 2 + 12
+    d.line([(x0, y), (pole_x - gap, y)], fill=GREY, width=2)
+    d.line([(pole_x + gap, y), (x1, y)], fill=GREY, width=2)
+    for x in (x0, x1):
+        d.line([(x, y - 12), (x, y + 12)], fill=GREY, width=2)
+    d.text((pole_x, y), "1\u00b0", fill=GREY, font=small, anchor="mm")
 
     canvas.save(a.output, quality=90)
     print(f"{a.output}: {canvas.size}, pole at ({pole_x:.0f}, {pole_y:.0f}), "
