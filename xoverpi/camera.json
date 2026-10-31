@@ -15,6 +15,8 @@
     "prefix": "xoverpi/nights"
   },
   "s3_notes": "Public on /astro/firstscope from the night of 2026-10-30 (Peter, 2026-10-31). The prefix keeps the camera's config name because combined-brightness and build-calendar-index derive it from there; the site maps firstscope -> xoverpi.",
+  "sky_clear_ref_exptime": 12,
+  "sky_clear_ref_exptime_notes": "Darkest-sky bits in summary.json are put on a 12 s basis, the sub length from 2026-10-31, so nights compare; 10-30's 3 s subs read 2 bits higher than they measured.",
   "black_level": 256,
   "black_level_notes": "Taken from eclipticam-hq16 (same sensor, 12-bit). NOT yet measured on fshq: take darks.",
   "resolution": [

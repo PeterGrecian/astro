@@ -406,6 +406,27 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     done
 fi
 
+# --- 2a. night still: fshq's whole night derotated about the pole, and what it
+# shows (bin/night-still, astro-capture). Exit 3 means no stars, so no still; any
+# failure costs this product, never the night. Built only if missing, so a
+# re-publish does not redo it. SKIP_NIGHT_STILL=1 skips it.
+if [[ "$CAMERA" == "xoverpi" && "$WEB_ONLY" -eq 0 && "${SKIP_NIGHT_STILL:-0}" -ne 1 ]]; then
+    if [[ ! -s "${night_dir}/night-still.jpg" ]]; then
+        echo "--- night-still"
+        rc=0; "$PY" "$HERE/night-still" --camera "$CAMERA" --night "$NIGHT" || rc=$?
+        [[ "$rc" -eq 0 ]] || echo "night-still: exit $rc, continuing without it"
+    fi
+    if [[ -s "${night_dir}/night-still.jpg" && -s "${night_dir}/night-still.json" ]]; then
+        "$PY" "$HERE/annotate-night-still" "${night_dir}/night-still.jpg" \
+            "${night_dir}/night-still-annotated.jpg" \
+            --geometry "${night_dir}/night-still.json" \
+            || echo "annotate-night-still FAILED; publishing the plain still"
+        # The calendar card shows the still, not the colour sweep's poster.
+        ffmpeg -y -loglevel error -i "${night_dir}/night-still.jpg" -vf "scale=800:-2" \
+            -q:v 4 "${night_dir}/thumb.jpg" || echo "still thumb FAILED; keeping thumb.jpg"
+    fi
+fi
+
 # --- 2b. sensitivity chart (flag-gated, clear nights, graceful skip) ---
 # SENSITIVITY=1 enables the per-night freq-vs-mag deliverable. Runs only on
 # CLEAR nights (verdict in summary.json), and NEVER fails this run — any
@@ -461,8 +482,13 @@ names = [
     # fshq: astro-capture's derotated still and star-count chart, once its
     # commands write them to the night dir. Absent files are simply skipped.
     "night-still.jpg",
+    "night-still.json",
+    "night-still-annotated.jpg",
     "star-counts.png",
     "star-counts.json",
+    "star-colours.png",
+    "star-colours.json",
+    "star-crops.jpg",
     "sensitivity.png",
     "sensitivity.json",
     "thumb.jpg",
