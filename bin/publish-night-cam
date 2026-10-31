@@ -458,6 +458,11 @@ names = [
     "brightness.png",
     "max.jpg",
     "derot.jpg",
+    # fshq: astro-capture's derotated still and star-count chart, once its
+    # commands write them to the night dir. Absent files are simply skipped.
+    "night-still.jpg",
+    "star-counts.png",
+    "star-counts.json",
     "sensitivity.png",
     "sensitivity.json",
     "thumb.jpg",
