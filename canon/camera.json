@@ -30,6 +30,8 @@
   "rotate_180": false,
   "rotate_180_notes": "No downstream rotation. DSLR raw is delivered in the sensor's native orientation; any sky-up convention is deferred to the (unsolved) pole/derot stage. Set false so the raw mosaic is stacked as-read.",
   "pedestal": 2048,
+  "sky_mag": [{"mag": 18.1, "at_stops": 8.8, "mag_per_stop": 0.753, "band": "Gaia G", "from_night": "2026-08-10", "provisional": true}],
+  "sky_mag_notes": "astro-science 2026-10-31, PROVISIONAL +/-0.3: transfer from astrocam, 7 nights 08-10..08-16, ratio 22-24. Stops are mean-2048 on the raw 30 s ISO 1600 subs, with no 60 s rescale.",
   "black_level": 2048,
   "black_level_notes": "Canon EOS 2000D electronic zero in its native 14-bit ADU. MEASURED per-channel at ~2046-2052 on real sky (2026-08-11), matching Canon's documented 2048. Best-characterised black level in the estate — the only one confirmed against data rather than inferred.",
   "blackest_observed": 2590.592,

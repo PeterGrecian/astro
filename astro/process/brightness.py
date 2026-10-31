@@ -117,6 +117,19 @@ def daylight_keep_mask(times_local, cfg=None, day_alt_deg=None):
             "21:00-05:00 clock window (no location/ephem)")
 
 
+def sky_mag_for(cfg, night: str | None):
+    """The camera.json sky_mag zero point in force on `night`, or None.
+
+    sky_mag is a list, oldest first, because a zero point changes when the
+    throughput does (astrocam's glass window). Before the first from_night
+    the chart has no mag axis rather than a wrong one."""
+    found = None
+    for zp in (cfg.get("sky_mag") or []) if cfg is not None else []:
+        if night is None or night >= zp.get("from_night", ""):
+            found = zp
+    return found
+
+
 def chart_zero(cfg) -> tuple[float | None, str]:
     """The ADU the brightness charts subtract before taking log2, and its
     axis label. Returns (value, label).
@@ -386,7 +399,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     ax_sky.grid(True, alpha=0.25, linestyle=":")
 
     # Secondary right Y-axis for mag/arcsec²
-    sm = cfg.get("sky_mag") if cfg is not None else None
+    sm = sky_mag_for(cfg, night)
     if sm and zero_label == "black level":
         try:
             m0 = float(sm["mag"])

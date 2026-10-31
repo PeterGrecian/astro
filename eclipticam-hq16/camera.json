@@ -21,6 +21,8 @@
   },
   "pedestal": 200,
   "pedestal_notes": "CHART FLOOR ONLY: the log2(mean/pedestal) axis reference, chosen for footroom below black_level, not a measurement. 200 on this 12-bit sensor is the same place as 50 on the 10-bit IMX708s (x4).",
+  "sky_mag": [{"mag": 17.8, "at_stops": 5.49, "mag_per_stop": 0.753, "band": "Gaia G", "from_night": "2026-10-14", "provisional": true}],
+  "sky_mag_notes": "astro-science 2026-10-31, PROVISIONAL +/-0.3: same-sky transfer from v3w on the one clean night (10-20, ratio 4.98), epoch 1, 60 s. Epoch 2 (from 10-25) is unconfirmed: recheck near new moon.",
   "black_level": 256,
   "black_level_notes": "IMX477 electronic zero in 12-bit LSB-aligned ADU (libcamera tuning 4096 at 16-bit). NOMINAL, not measured: cap the lens for a master dark.",
   "capture": {

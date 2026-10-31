@@ -38,6 +38,7 @@ from matplotlib.ticker import FuncFormatter
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
+from astro.process.brightness import sky_mag_for
 from astro.process.brightness import (chart_zero, darkest_anchor,
                                       daylight_keep_mask, find_night_csvs,
                                       lsb_align)
@@ -293,7 +294,7 @@ def main():
     # Right axis in sky surface brightness where camera.json calibrates it
     # (sky_mag: astro-science's Gaia G zero point). Stops are log2 of the
     # 60 s-equivalent sky flux, so mag is linear in them.
-    sm = cfg.get("sky_mag")
+    sm = sky_mag_for(cfg, latest_night)
     if sm and zero_label == "black level":
         m0, s0, k = float(sm["mag"]), float(sm["at_stops"]), float(sm["mag_per_stop"])
         sec = ax.secondary_yaxis(
