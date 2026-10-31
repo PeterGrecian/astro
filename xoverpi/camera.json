@@ -1,9 +1,19 @@
 {
   "name": "xoverpi",
+  "label": "FirstScope fshq",
   "host": "xoverpi",
   "sensor": "IMX477",
   "bayer": "SRGGB12",
   "bayer_notes": "fshq, Raspberry Pi HQ camera, since 2026-10-14. The OV5647 notes in this file describe the earlier sensor (2026-09-14..2026-10-13).",
+  "pedestal": 200,
+  "pedestal_notes": "CHART FLOOR ONLY, same place as hq16's 200 (same sensor, 12-bit). Charts count stops from black_level (brightness.chart_zero).",
+  "max_neutral": 1.0,
+  "max_saturation": 0.2,
+  "s3": {
+    "bucket": "astro-berrylands-eu-west-1",
+    "prefix": "xoverpi/nights"
+  },
+  "s3_notes": "Public on /astro/firstscope from the night of 2026-10-30 (Peter, 2026-10-31). The prefix keeps the camera's config name because combined-brightness and build-calendar-index derive it from there; the site maps firstscope -> xoverpi.",
   "black_level": 256,
   "black_level_notes": "Taken from eclipticam-hq16 (same sensor, 12-bit). NOT yet measured on fshq: take darks.",
   "resolution": [
@@ -21,7 +31,8 @@
   "pole_prior_xy": null,
   "frames_root": "~/xoverpi-frames",
   "frames_root_by_host": {
-    "xoverpi": "/mnt/muppet/bigstore/xoverpi-frames"
+    "xoverpi": "/mnt/muppet/bigstore/xoverpi-frames",
+    "muppet": "/mnt/bigstore/astro-data/xoverpi-frames"
   },
   "frames_root_by_host_notes": "Frames are written STRAIGHT to muppet's bigstore over NFS (Peter, 2026-09-15): xoverpi is on ethernet, so there is bandwidth to ship as we go and no reason to stage on the SD card. The pipeline then runs on muppet where the frames already are. Mounted by hand 2026-09-15 pending the ansible nfs-client change.",
   "frames_root_notes": "Intended to be muppet's bigstore export, automounted by the ansible nfs-client role - requested from the ansible strand 2026-09-14, NOT YET IN PLACE. Until it is, this is a local directory on the SD card and the disk guard in the daemon is the only thing preventing a full card.",

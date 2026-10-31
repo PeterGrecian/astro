@@ -11,6 +11,9 @@ Layouts (camera.json "night_layout"):
               already night-keyed (legacy eclipticam pre-split).
   starcam-npy <frames_root>/night/<night-date>/HH/*.{npy,fits.fz},
               night-keyed, epoch-ms filenames (decommissioned starcam).
+  fits-hour   <frames_root>/night/<night-date>/HH/<RUNTAG>-NNNN.fits.fz,
+              night-keyed, run-tagged filenames, so time comes from
+              DATE-OBS (xoverpi/FirstScope).
 
 Returns a sorted list of (utc_datetime, path).
 """
@@ -95,6 +98,16 @@ def list_night_frames(cfg, night: str, ext: str = "*.fits.fz"):
                 if any(s in str(f) for s in _SKIP_SUBSTRINGS):
                     continue
                 t = _epoch_ms_time(f) or _date_obs(f)
+                if t is not None:
+                    keep.append((t, f))
+
+    elif layout == "fits-hour":
+        base = root / "night" / night
+        for hour_dir in sorted(base.glob("[0-2][0-9]")):
+            for f in sorted(hour_dir.glob(ext)):
+                if any(s in str(f) for s in _SKIP_SUBSTRINGS):
+                    continue
+                t = _date_obs(f)
                 if t is not None:
                     keep.append((t, f))
 
