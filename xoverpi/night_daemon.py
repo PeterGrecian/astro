@@ -71,8 +71,11 @@ from astro.config import CameraConfig         # noqa: E402
 CAMERA = "xoverpi"
 RES_FULL = (4056, 3040)
 RES_BIN = (2028, 1520)
-RAW_FORMAT = "SRGGB12"
-BAYERPAT = "SRGGB"
+# NOT SRGGB, whatever sensor_modes lists: with the sensor's rotation of 180 and an
+# identity transform, libcamera delivers SBGGR12 here (checked 2026-10-31; stars
+# against Gaia BP-RP agree). Frames of the night of 2026-10-30 say SRGGB and are BGGR.
+RAW_FORMAT = "SBGGR12"
+BAYERPAT = "SBGGR"
 
 # Not a sensor limit: the IMX477 goes far longer. Just a sanity cap on a typo.
 EXPOSURE_MAX_US = 60_000_000
@@ -80,7 +83,7 @@ EXPOSURE_MAX_US = 60_000_000
 # One length by default: collect all the light the sensor will give. See the
 # duty-cycle note above before setting this to a list.
 EXPOSURES = [float(x) for x in
-             os.environ.get("XOVER_EXPOSURES", "3.0").split(",")]
+             os.environ.get("XOVER_EXPOSURES", "12.0").split(",")]
 GAIN = float(os.environ.get("XOVER_GAIN", 2.0))   # first guess for fshq, unmeasured on stars
 COADD_N = int(os.environ.get("XOVER_COADD_N", 1))
 BINNED = os.environ.get("XOVER_BINNED", "1") != "0"
