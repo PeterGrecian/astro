@@ -4,21 +4,21 @@
 The still is an arch: the sky is held fixed and turned so the field's mid-night
 position sits straight above the celestial pole. The field then swings clockwise
 about the pole, so the evening is bottom left and dawn bottom right. This adds:
-  - a timeline round the outside of the arch, hours in London time, each tick
-    marking where the centre of the field was at that moment,
-  - evening and dawn labels at the two ends,
-  - the celestial pole, and a scale bar in degrees.
+  - the hours round the outside of the arch, London time, each marking where
+    the centre of the field was at that moment,
+  - the celestial pole, Polaris if its position is given, and a degree scale.
 
 The geometry must match the still's stacker (astro/scratch/fshq/night_still.py):
 pole in superpixels of the frame, frame size, middle frame and its time, and the
 output width and border. Nothing here reads the frames.
 
     annotate-night-still in.png out.jpg --t-mid 2026-10-30T23:52:42.8Z \
-        --seq-first 1 --seq-mid 7449 --seq-last 14801
+        --seq-first 1 --seq-mid 7449 --seq-last 14801 \
+        --arcsec-per-px 13.15 --polaris 890.7 1143.6
 """
 import argparse
 from datetime import datetime, timedelta
-from math import atan2, cos, degrees, hypot, pi, radians, sin
+from math import atan2, cos, hypot, pi, radians, sin
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -53,6 +53,13 @@ def geometry(a):
     return (-x0 / scale + a.border, -y0 / scale + a.border), scale, radius, out_h
 
 
+def clock(t):
+    """6pm, 11pm, midnight, 1am."""
+    if t.hour == 0:
+        return "midnight"
+    return f"{t.hour % 12 or 12}{'am' if t.hour < 12 else 'pm'}"
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -67,6 +74,11 @@ def main():
                     help="pole in superpixels of the frame")
     ap.add_argument("--frame-size", type=int, nargs=2, default=(1014, 760))
     ap.add_argument("--arcsec-per-superpixel", type=float, default=4.26)
+    ap.add_argument("--arcsec-per-px", type=float,
+                    help="measured scale of the still, from a plate solve; "
+                         "without it the nominal plate scale is used")
+    ap.add_argument("--polaris", type=float, nargs=2, metavar=("X", "Y"),
+                    help="Polaris in the stacker's canvas, before its border")
     ap.add_argument("--out-width", type=int, default=2000)
     ap.add_argument("--border", type=int, default=100)
     a = ap.parse_args()
@@ -99,54 +111,38 @@ def main():
         th = angle(t)
         return pole_x + r * cos(th), pole_y + r * sin(th)
 
-    r = field_r + 22
-    arc = [at(t_first + (t_last - t_first) * i / 240, r) for i in range(241)]
-    d.line(arc, fill=SECONDARY, width=3)
-
-    # Quarter hours by London clock.
-    t = t_first.astimezone(LONDON).replace(second=0, microsecond=0)
-    t += timedelta(minutes=15 - t.minute % 15)
+    # Hours by London clock, just outside the arch.
+    t = t_first.astimezone(LONDON).replace(minute=0, second=0, microsecond=0)
+    t += timedelta(hours=1)
     while t <= t_last:
-        hour = t.minute == 0
-        d.line([at(t, r), at(t, r + (22 if hour else 9))], fill=TEXT if hour else SECONDARY,
-               width=4 if hour else 2)
-        if hour:
-            x, y = at(t, r + 62)
-            d.text((x, y), t.strftime("%H:%M"), fill=TEXT, font=small, anchor="mm")
-        t += timedelta(minutes=15)
-
-    # The two ends, inside the arch's feet.
-    inner_r = 2 * hypot(*fc_radius(a)) / scale - field_r
-    for when, word, anchor in ((t_first, "evening", "lm"), (t_last, "dawn", "rm")):
-        x, y = at(when, inner_r)
-        d.text((x, y), f"{word} {when.astimezone(LONDON):%H:%M}", fill=ACCENT, font=big,
-               anchor=anchor)
+        x, y = at(t, field_r + 42)
+        d.text((x, y), clock(t), fill=TEXT, font=small, anchor="mm")
+        t += timedelta(hours=1)
 
     # The pole.
     d.line([(pole_x - 18, pole_y), (pole_x + 18, pole_y)], fill=TEXT, width=2)
     d.line([(pole_x, pole_y - 18), (pole_x, pole_y + 18)], fill=TEXT, width=2)
     d.text((pole_x, pole_y + 44), "celestial pole", fill=SECONDARY, font=small, anchor="mm")
 
+    # Polaris, from a plate solve: usually in the empty middle of the arch.
+    if a.polaris:
+        x, y = a.polaris[0] + a.border + pad_x, a.polaris[1] + a.border + pad_top
+        d.ellipse([x - 18, y - 18, x + 18, y + 18], outline=ACCENT, width=3)
+        d.text((x - 32, y), "Polaris", fill=ACCENT, font=big, anchor="rm")
+
     # One degree, above the pole, inside the arch.
-    deg_px = 3600 / (scale * a.arcsec_per_superpixel)
+    arcsec_per_px = a.arcsec_per_px or scale * a.arcsec_per_superpixel
+    deg_px = 3600 / arcsec_per_px
     y = pole_y - 190
     x0, x1 = pole_x - deg_px / 2, pole_x + deg_px / 2
     d.line([(x0, y), (x1, y)], fill=TEXT, width=4)
     for x in (x0, pole_x, x1):
         d.line([(x, y - 12), (x, y + 12)], fill=TEXT, width=3)
-    d.text((pole_x, y - 42), "1°", fill=TEXT, font=big, anchor="mm")
-    d.text((pole_x, y + 42), "the Moon is about ½°", fill=SECONDARY, font=small, anchor="mm")
+    d.text((pole_x, y - 42), "1\u00b0", fill=TEXT, font=big, anchor="mm")
 
     canvas.save(a.output, quality=90)
     print(f"{a.output}: {canvas.size}, pole at ({pole_x:.0f}, {pole_y:.0f}), "
-          f"{deg_px:.0f} px per degree, arcs {degrees(angle(t_first)):.0f} to "
-          f"{degrees(angle(t_last)):.0f} deg")
-
-
-def fc_radius(a):
-    """Frame centre relative to the pole, superpixels."""
-    w, h = a.frame_size
-    return (w - 1) / 2 - a.pole[0], (h - 1) / 2 - a.pole[1]
+          f"{deg_px:.0f} px per degree")
 
 
 if __name__ == "__main__":
