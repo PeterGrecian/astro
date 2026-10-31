@@ -1,0 +1,702 @@
+#!/usr/bin/env python3
+"""night-still: the whole night derotated about the pole, and what it shows.
+
+For an untracked camera near the pole (fshq). Reads each night's frames once,
+then writes to the night dir:
+  night-still.jpg     colour still, 2000 px wide plus a black border
+  night-still.json    its geometry, the arguments bin/annotate-night-still takes
+  star-counts.png     stars by Gaia G against all Gaia stars in the same sky
+  star-counts.json    {"g50": G where detection falls to 50%, ...}
+  star-colours.png    colour histogram, and our B-R against Gaia BP-RP
+  star-colours.json   the fit, and the stars
+  star-crops.jpg      the brightest stars at the frame's own scale, blue to red
+
+    night-still --camera xoverpi --night 2026-10-30
+
+Exit 3: too few frames or stars to make a still (cloud, or no capture). Exit 0
+with star-counts missing means the plate solve or Gaia failed; the still stands.
+It finds the pole from the night's own frames, so a repoint needs no setting.
+"""
+import argparse
+import csv
+import glob
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+import warnings
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(v, "1")
+warnings.filterwarnings("ignore")
+
+import numpy as np                                   # noqa: E402
+from astropy.io import fits                          # noqa: E402
+from astropy.table import Table                      # noqa: E402
+from astropy.wcs import WCS                          # noqa: E402
+from PIL import Image                                # noqa: E402
+from scipy import ndimage as ndi                     # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig                # noqa: E402
+from astro.process.bayer import as_pattern           # noqa: E402
+
+SIDEREAL_ARCSEC_PER_S = 15.0411
+OUT_W = 2000
+BORDER = 100
+MAX_FRAMES = 3800        # a night of 12 s frames; shorter subs are sampled down to this
+SUPERPIXEL_ARCSEC = 4.47 # measured 13.15 arcsec/px at 2.94 superpixels/px, 2026-10-30
+WB = np.array([1.0, 0.795, 1.183])   # R G B, grey at Gaia BP-RP 0.82, fitted 2026-10-30
+POLARIS = (37.9546, 89.2641)
+MIRRORS = ("vizier.idia.ac.za", "vizier.cds.unistra.fr", "vizier.cfa.harvard.edu", "vizier.nao.ac.jp")
+HIST_BINS = np.arange(4.0, 12.51, 0.5)
+CROPS = 24
+CROP_R = 60              # superpixels
+
+
+def log(start, *a):
+    print(f"[{time.time() - start:5.0f}s]", *a, flush=True)
+
+
+class Frames:
+    """The night's files in order, each with a time from its run and sequence number."""
+
+    def __init__(self, night_dir, pattern):
+        self.pat = pattern
+        items = []
+        for f in glob.glob(f"{night_dir}/[0-9][0-9]/*.fits.fz"):
+            m = re.match(r"(\d{8}T\d{6}Z)-(\d+)\.fits\.fz$", os.path.basename(f))
+            if m:
+                items.append((m[1], int(m[2]), f))
+        items.sort()
+        self.items = items
+        if not items:
+            return
+        starts = {}
+        for run, seq, f in items:
+            starts.setdefault(run, (seq, f))
+        self.run_t = {}
+        for run, (seq, f) in starts.items():
+            self.run_t[run] = (self._date_obs(f), seq)
+        first_run = items[0][0]
+        run_files = [i for i in items if i[0] == first_run]
+        self.exptime = float(fits.getheader(items[0][2], 1).get("EXPTIME", 3.0))
+        self.focus = str(fits.getheader(items[0][2], 1).get("FOCUSPOS", ""))
+        if len(run_files) > 20:
+            span = (self._date_obs(run_files[-1][2]) - self._date_obs(run_files[0][2])).total_seconds()
+            self.cadence = span / (run_files[-1][1] - run_files[0][1])
+        else:
+            self.cadence = self.exptime
+        self.t0 = self.when(0)
+        self.n = len(items)
+
+    @staticmethod
+    def _date_obs(f):
+        return datetime.fromisoformat(fits.getheader(f, 1)["DATE-OBS"].replace("Z", "+00:00"))
+
+    def when(self, i):
+        run, seq, _ = self.items[i]
+        t, s0 = self.run_t[run]
+        return t + timedelta(seconds=(seq - s0) * self.cadence)
+
+    def seq(self, i):
+        """frame number on one clock, so a restarted run keeps its place in the sky"""
+        return (self.when(i) - self.t0).total_seconds() / self.cadence + 1
+
+    def channels(self, i):
+        with fits.open(self.items[i][2]) as h:
+            a = h[1].data.astype(np.float32)
+        out = {}
+        g = []
+        for (r, c), name in zip(((0, 0), (0, 1), (1, 0), (1, 1)), self.pat):
+            p = a[r::2, c::2]
+            if name == "G":
+                g.append(p)
+            else:
+                out[name] = p
+        return out["R"], (g[0] + g[1]) / 2, out["B"]
+
+
+def level(a):
+    """clipped mean. Not a median: R and B are whole numbers, so a median snaps to a
+    whole count and leaves a colour offset larger than the noise of the stack."""
+    med = np.median(a)
+    k = np.abs(a - med) < 6
+    return a[k].mean()
+
+
+def background(a, mask=None):
+    """large-scale background from a 64 px clipped block mean, so haze and glow come out"""
+    h, w = a.shape
+    bh, bw = h // 64, w // 64
+    b = a[:bh * 64, :bw * 64].reshape(bh, 64, bw, 64).transpose(0, 2, 1, 3).reshape(bh, bw, -1)
+    keep = np.abs(b - np.median(b, axis=2, keepdims=True)) < 6
+    if mask is not None:
+        keep &= ~mask[:bh * 64, :bw * 64].reshape(bh, 64, bw, 64).transpose(0, 2, 1, 3).reshape(bh, bw, -1)
+    n = keep.sum(axis=2)
+    m = (b * keep).sum(axis=2) / np.maximum(n, 1)
+    thin = n < 400                    # a block mostly under a star takes its nearest well-sampled neighbour
+    if thin.any() and not thin.all():
+        iy, ix = ndi.distance_transform_edt(thin, return_distances=False, return_indices=True)
+        m = m[iy, ix]
+    return ndi.zoom(m, (h / bh, w / bw), order=1)
+
+
+def find_pole(fr, ref, per_s):
+    """Rotate a short stack by the sidereal angle to one half an hour later: what is
+    left is a shift, and that shift gives the pole. A faint field can lock onto the
+    wrong star, so this returns candidates from several places in the night and the
+    caller keeps whichever stacks sharpest."""
+    H, W = ref[1].shape
+    cen = np.array([(W - 1) / 2, (H - 1) / 2])
+    secs = np.array([(fr.when(i) - fr.t0).total_seconds() for i in range(fr.n)])
+
+    def short(t):
+        """four minutes of frames, blurred to the size of a defocused star"""
+        i = int(np.searchsorted(secs, t))
+        j = int(np.searchsorted(secs, t + 240))
+        idx = range(i, j, max(1, (j - i) // 30))
+        s = np.zeros((H, W), np.float32)
+        count = 0
+        for k in idx:
+            a = fr.channels(k)[1]
+            a = a - level(a) - ref[1]
+            s += a
+            count += 1
+        if not count:
+            return None
+        s /= count
+        return np.clip(ndi.gaussian_filter(s, 4) - ndi.gaussian_filter(s, 30), 0, None)
+
+    found = []
+    span = secs[-1]
+    for frac in (0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75):
+        ta = span * frac
+        tb = ta + 1800
+        if tb > span:
+            continue
+        a, b = short(ta), short(tb)
+        if a is None or b is None:
+            continue
+        th = per_s * (tb - ta)
+        c, s = np.cos(th), np.sin(th)
+        M = np.array([[c, s], [-s, c]])       # output (y, x) to input (y, x)
+        pc = cen[::-1]
+        rot = ndi.affine_transform(a, M, offset=pc - M @ pc, order=1)
+        # plain correlation, not phase correlation: the few bright stars are the signal,
+        # and whitening hands the peak to the noise
+        F = np.fft.rfft2(b - b.mean()) * np.conj(np.fft.rfft2(rot - rot.mean()))
+        cc = np.fft.irfft2(F, s=b.shape)
+        py, px = np.unravel_index(cc.argmax(), cc.shape)
+        score = cc.max() / cc.std()
+        ty = py - H if py > H / 2 else py
+        tx = px - W if px > W / 2 else px
+        Fw = np.array([[c, s], [-s, c]])      # sky to frame on (x, y)
+        p = cen + np.linalg.solve(np.eye(2) - Fw, np.array([tx, ty], float))
+        found.append((score, p[0], p[1]))
+    return [(float(f[1]), float(f[2])) for f in found if f[0] > 4], found
+
+
+class Canvas:
+    """The same geometry as bin/annotate-night-still: keep the two in step."""
+
+    def __init__(self, shape, pole, per_frame, seq_first, seq_mid, seq_last):
+        self.H, self.W = shape
+        self.pole = pole
+        self.per_frame = per_frame
+        self.seq_mid = seq_mid
+        px, py = pole
+        fc = ((self.W - 1) / 2 - px, (self.H - 1) / 2 - py)
+        self.spin = -np.pi / 2 - np.arctan2(fc[1], fc[0])
+        self.yy, self.xx = np.mgrid[:self.H, :self.W].astype(np.float32)
+        xs, ys = [], []
+        for n in range(seq_first, seq_last + 1, 100):
+            th = per_frame * (n - seq_mid) + self.spin
+            c, s = np.cos(th), np.sin(th)
+            for x, y in ((0, 0), (self.W - 1, 0), (0, self.H - 1), (self.W - 1, self.H - 1)):
+                dx, dy = x - px, y - py
+                xs.append(c * dx - s * dy)
+                ys.append(s * dx + c * dy)
+        self.x0, self.y0 = min(xs), min(ys)
+        self.scale = (max(xs) - self.x0 + 1) / OUT_W
+        self.out_h = int((max(ys) - self.y0 + 1) / self.scale) + 1
+
+    def indices(self, seq):
+        th = self.per_frame * (seq - self.seq_mid) + self.spin
+        c, s = np.cos(th), np.sin(th)
+        dx, dy = self.xx - self.pole[0], self.yy - self.pole[1]
+        ox = ((c * dx - s * dy - self.x0) / self.scale).astype(np.int64)
+        oy = ((s * dx + c * dy - self.y0) / self.scale).astype(np.int64)
+        ok = (ox >= 0) & (ox < OUT_W) & (oy >= 0) & (oy < self.out_h)
+        return (oy * OUT_W + ox), ok
+
+    def frame_xy(self, ox, oy, seq):
+        """canvas position to superpixel position in the frame at this moment"""
+        th = self.per_frame * (seq - self.seq_mid) + self.spin
+        c, s = np.cos(th), np.sin(th)
+        sx, sy = ox * self.scale + self.x0, oy * self.scale + self.y0
+        return c * sx + s * sy + self.pole[0], -s * sx + c * sy + self.pole[1]
+
+
+def build(fr, ref, cv, picks, mask=None, crops=None, start=0.0):
+    size = cv.out_h * OUT_W
+    sums = np.zeros((3, size)); counts = np.zeros(size)
+    boxes = None
+    if crops is not None:
+        boxes = np.zeros((len(crops), 3, 2 * CROP_R + 1, 2 * CROP_R + 1), np.float32)
+        nbox = np.zeros(len(crops))
+    for k, i in enumerate(picks):
+        seq = fr.seq(i)
+        idx, ok = cv.indices(seq)
+        chans = fr.channels(i)
+        keep = idx[ok]
+        fm = None if mask is None else (mask.ravel()[np.clip(idx, 0, size - 1)].reshape(cv.H, cv.W) & ok)
+        counts += np.bincount(keep, minlength=size)
+        res = []
+        for c in range(3):
+            a = chans[c] - ref[c]
+            a = a - background(a, fm)
+            res.append(a)
+            sums[c] += np.bincount(keep, a[ok], minlength=size)
+        if crops is not None:
+            for b, (ox, oy) in enumerate(crops):
+                fx, fy = cv.frame_xy(ox, oy, seq)
+                x, y = int(round(fx)), int(round(fy))
+                if CROP_R <= x < cv.W - CROP_R and CROP_R <= y < cv.H - CROP_R:
+                    for c in range(3):
+                        boxes[b, c] += res[c][y - CROP_R:y + CROP_R + 1, x - CROP_R:x + CROP_R + 1]
+                    nbox[b] += 1
+        if k % 500 == 0:
+            log(start, f"  frame {k + 1}/{len(picks)}")
+    img = np.array([s.reshape(cv.out_h, OUT_W) / np.maximum(counts.reshape(cv.out_h, OUT_W), 1) for s in sums])
+    depth = counts.reshape(cv.out_h, OUT_W) / cv.scale ** 2
+    if crops is not None:
+        return img, depth, boxes, nbox
+    return img, depth
+
+
+def luminance_sigma(img, good):
+    return np.mean([p / (1.4826 * np.median(np.abs(p[good]))) for p in img], axis=0)
+
+
+def blobs(img, good, thresh=6.0):
+    l = luminance_sigma(img, good)
+    sm = ndi.gaussian_filter(l, 2)
+    s = 1.4826 * np.median(np.abs(sm[good]))
+    lab, n = ndi.label((sm > thresh * s) & good)
+    if not n:
+        return np.zeros(0), np.zeros(0), np.zeros(0), np.zeros(0), sm, s
+    idx = range(1, n + 1)
+    raw = img.mean(axis=0)
+    fl = np.array(ndi.sum(np.clip(raw, 0, None), lab, idx))
+    cm = np.array(ndi.center_of_mass(np.clip(raw, 0, None), lab, idx))
+    area = np.array(ndi.sum(lab > 0, lab, idx))
+    keep = (area >= 8) & (area < 2000)
+    o = np.argsort(-fl[keep])
+    return cm[keep][o, 1], cm[keep][o, 0], fl[keep][o], area[keep][o], sm, s
+
+
+def stretch(img, depth, good, median_depth):
+    wb = np.zeros_like(img)
+    for c in range(3):
+        v = img[c][good]
+        wb[c] = (img[c] - v[np.abs(v - np.median(v)) < 0.5].mean()) * WB[c]
+    sig = 1.4826 * np.median(np.abs(wb.mean(axis=0)[good]))
+    rgb = wb / sig
+    top = np.percentile(rgb.mean(axis=0)[good], 99.97)
+    fade = np.clip(depth / median_depth, 0, 1) ** 0.7
+    out = np.clip(np.arcsinh(np.clip(rgb + 0.5, 0, None) / 3) / np.arcsinh((top + 0.5) / 3), 0, 1) * fade
+    return np.pad((255 * out.transpose(1, 2, 0)).astype(np.uint8), ((BORDER, BORDER), (BORDER, BORDER), (0, 0)))
+
+
+def solve(x, y, flux, height, scale, workdir):
+    Table({"X": x + 1, "Y": y + 1, "FLUX": flux}).write(f"{workdir}/stars.xy.fits", overwrite=True)
+    arc = scale * SUPERPIXEL_ARCSEC
+    r = subprocess.run(["solve-field", "--overwrite", "--no-plots", "--scale-units", "arcsecperpix",
+                        "--scale-low", str(arc * 0.88), "--scale-high", str(arc * 1.12),
+                        "--width", str(OUT_W), "--height", str(height), "--x-column", "X", "--y-column", "Y",
+                        "--sort-column", "FLUX", "--cpulimit", "240", "--dir", workdir, f"{workdir}/stars.xy.fits"],
+                       capture_output=True, text=True, timeout=400)
+    p = f"{workdir}/stars.xy.wcs"
+    return WCS(fits.getheader(p)) if r.returncode == 0 and os.path.exists(p) else None
+
+
+def gaia_cone(cache, ra, dec, radius, start):
+    """Gaia DR3 to G 13.5 with BP-RP. A cone already fetched is used if it covers the field."""
+    cache.mkdir(parents=True, exist_ok=True)
+    for f in cache.glob("gaia_*.npy"):
+        m = re.match(r"gaia_([\d.]+)_([-+\d.]+)_([\d.]+)\.npy", f.name)
+        if m:
+            r0, d0, rad = float(m[1]), float(m[2]), float(m[3])
+            cs = np.sin(np.radians(d0)) * np.sin(np.radians(dec)) + np.cos(np.radians(d0)) * np.cos(np.radians(dec)) * np.cos(np.radians(r0 - ra))
+            if np.degrees(np.arccos(np.clip(cs, -1, 1))) + radius <= rad:
+                return np.load(f)
+    rad = np.ceil(radius + 0.5)
+    q = urllib.parse.urlencode({"-source": "I/355/gaiadr3", "-c": f"{ra:.3f} {dec:+.3f}", "-c.rd": str(rad),
+                                "-out": "RA_ICRS,DE_ICRS,Gmag,BP-RP", "Gmag": "<13.5", "-out.max": "60000", "-oc.form": "d"})
+    for h in MIRRORS:
+        try:
+            txt = urllib.request.urlopen(f"https://{h}/viz-bin/asu-tsv?{q}", timeout=60).read().decode()
+        except OSError as e:
+            log(start, f"Gaia: {h} failed: {e}")
+            continue
+        rows = [r.split("\t") for r in txt.splitlines() if r[:1].isdigit()]
+        rows = [r[:4] for r in rows if len(r) >= 3 and r[2].strip()]
+        if len(rows) < 50:
+            continue
+        a = np.array([[float(v) if v.strip() else np.nan for v in (r + [""])[:4]] for r in rows])
+        np.save(cache / f"gaia_{ra:.3f}_{dec:+.3f}_{rad:.1f}.npy", a)
+        log(start, f"Gaia: {len(a)} stars from {h}")
+        return a
+    return None
+
+
+def aperture(raw, x, y, ok):
+    """flux in 14 px, sky from an 18-28 px ring"""
+    x0, y0 = int(x), int(y)
+    y1, y2, x1, x2 = max(y0 - 29, 0), y0 + 30, max(x0 - 29, 0), x0 + 30
+    box = raw[y1:y2, x1:x2]
+    gy, gx = np.mgrid[y1:y1 + box.shape[0], x1:x1 + box.shape[1]]
+    d = np.hypot(gx - x, gy - y)
+    ann = (d > 18) & (d <= 28) & ok[y1:y2, x1:x2]
+    if ann.sum() < 50:
+        return np.nan, np.nan
+    bg = np.median(box[ann])
+    ap = d <= 14
+    return float((box[ap] - bg).sum()), float(1.4826 * np.median(np.abs(box[ann] - bg)) * ap.sum() ** .5)
+
+
+def plotstyle(plt):
+    plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": "#E0E0E0", "axes.labelcolor": "#8E8E93",
+                         "xtick.color": "#8E8E93", "ytick.color": "#8E8E93"})
+
+
+def axstyle(ax):
+    ax.set_facecolor("#000000")
+    for sp in ("top", "right", "left"):
+        ax.spines[sp].set_visible(False)
+    ax.spines["bottom"].set_color("#2C2C2E")
+    ax.tick_params(length=0)
+    ax.set_axisbelow(True)
+
+
+def star_counts(img, depth, good, cat, w, cv, fr, tm, per_s, a, out, start):
+    """Stars by Gaia G. Parts of the night that lost the stars are left out, or the
+    chart would measure the cloud rather than the camera."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    raw = img.mean(axis=0)
+    H, W = raw.shape
+    ra, dec, g, bprp = cat.T
+    px, py = w.all_world2pix(np.c_[ra, dec], 0).T
+    ins = (px >= 30) & (px < W - 30) & (py >= 30) & (py < H - 30)
+    ins[ins] = good[py[ins].astype(int), px[ins].astype(int)]
+    ra, dec, g, bprp, px, py = ra[ins], dec[ins], g[ins], bprp[ins], px[ins], py[ins]
+
+    pole_c = np.array([-cv.x0 / cv.scale, -cv.y0 / cv.scale])
+    yy, xx = np.mgrid[:H, :W]
+    half_diag = np.hypot(cv.W, cv.H) / 2
+    off_pole = np.hypot((cv.W - 1) / 2 - cv.pole[0], (cv.H - 1) / 2 - cv.pole[1]) > half_diag
+    clear = good.copy()
+    lost = []
+    if off_pole:
+        def crossing(x, y):          # hours from mid-night at which this sky crossed the field's centre
+            return np.arctan2(x - pole_c[0], pole_c[1] - y) / per_s / 3600
+        bright = g < 10.5
+        hrs = crossing(px[bright], py[bright])
+        zp = []
+        for x, y, m in zip(px[bright], py[bright], g[bright]):
+            f, e = aperture(raw, x, y, good)
+            zp.append(f * 10 ** (0.4 * m) if np.isfinite(f) else np.nan)
+        zp = np.array(zp)
+        ok = np.isfinite(zp) & (zp > -np.inf)
+        ref = np.percentile(zp[ok], 75) if ok.sum() > 3 else np.nan
+        edges = np.arange(np.floor(hrs.min()), np.ceil(hrs.max()) + 1, 1.0)
+        crosst = crossing(xx, yy)
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            s = (hrs >= lo) & (hrs < hi) & ok
+            if s.sum() >= 2 and np.median(zp[s]) < 0.3 * ref:
+                clear &= ~((crosst >= lo) & (crosst < hi))
+                lost.append(((tm + timedelta(hours=float(lo))).strftime("%H:%M"), (tm + timedelta(hours=float(hi))).strftime("%H:%M")))
+        log(start, "hours without stars (UTC):", lost or "none")
+    ins = clear[py.astype(int), px.astype(int)]
+    ra, dec, g, bprp, px, py = ra[ins], dec[ins], g[ins], bprp[ins], px[ins], py[ins]
+
+    x, y, _, area, *_ = blobs(img, good)
+    inc = clear[y.astype(int), x.astype(int)] if len(x) else np.zeros(0, bool)
+    x, y, area = x[inc], y[inc], area[inc]
+    flux = np.array([aperture(raw, a_, b_, good)[0] for a_, b_ in zip(x, y)])
+    br = g < 12.5
+    bx, by, bg, bidx = px[br], py[br], g[br], np.nonzero(br)[0]
+    matched = np.zeros(len(x), bool); hit = np.zeros(len(g), bool); dg = np.full(len(x), np.nan)
+    for i in range(len(x)):
+        d = np.hypot(bx - x[i], by - y[i])
+        near = np.nonzero(d < 5)[0]
+        if len(near):
+            j = near[np.argmin(bg[near])]
+            matched[i] = True; hit[bidx[j]] = True; dg[i] = bg[j]
+    rng = np.random.default_rng(1)
+    chance = np.mean([sum((np.hypot(bx - p + dx, by - q + dy) < 5).any() for p, q in zip(x, y))
+                      for dx, dy in rng.uniform(40, 120, (40, 2)) * rng.choice([-1, 1], (40, 2))]) if len(x) else 0
+    good_flux = matched & (flux > 0)
+    zps = dg[good_flux] + 2.5 * np.log10(flux[good_flux]) if good_flux.any() else np.zeros(0)
+    hc, _ = np.histogram(g, HIST_BINS); hd, _ = np.histogram(g[hit], HIST_BINS)
+    g50 = None
+    cen = HIST_BINS[:-1] + 0.25
+    pct = np.where(hc > 0, hd / np.maximum(hc, 1), np.nan)
+    last = None
+    for c_, p_, n_ in zip(cen, pct, hc):
+        if n_ < 2:
+            continue
+        if p_ < 0.5:
+            g50 = float(c_) if last is None else float(last[0] + (last[1] - 0.5) / (last[1] - p_) * (c_ - last[0]))
+            break
+        last = (c_, p_)
+    payload = {"g50": None if g50 is None else round(g50, 2), "gaia_in_sky_g125": int(hit.size and br.sum()),
+               "detected": int(len(x)), "matched": int(matched.sum()), "chance_matches": round(float(chance), 1),
+               "zero_point_g": round(float(np.median(zps)), 2) if len(zps) else None,
+               "bins_g": [round(float(b), 1) for b in HIST_BINS], "gaia": [int(v) for v in hc], "found": [int(v) for v in hd],
+               "hours_without_stars_utc": lost, "focus": fr.focus, "frames": a["frames"], "exposure_s": fr.exptime,
+               "noise_green": a["noise_green"]}
+    (out / "star-counts.json").write_text(json.dumps(payload, indent=1))
+
+    plotstyle(plt)
+    fig, ax = plt.subplots(figsize=(11, 6.2), dpi=120, facecolor="#000000")
+    axstyle(ax)
+    wd = 0.2
+    ax.bar(cen - wd / 2 - 0.01, hd, wd, color="#007AFF", label=f"Gaia stars detected in the still ({int(hit.sum())})")
+    ax.bar(cen + wd / 2 + 0.01, hc, wd, color="#8E8E93", label=f"All Gaia DR3 stars, same sky ({int(br.sum())} to G 12.5)")
+    ax.grid(axis="y", color="#2C2C2E", linewidth=1)
+    ax.set_xticks(HIST_BINS[::2]); ax.set_xlim(3.9, 12.6)
+    ax.set_xlabel("Gaia G magnitude (fainter to the right)")
+    ax.set_ylabel("Stars per 0.5 mag")
+    half = f", half found at G {g50:.1f}" if g50 else ""
+    ax.set_title(f"fshq, night of {a['night']}: stars by Gaia G{half}", loc="left", fontsize=13, color="#E0E0E0")
+    ax.legend(loc="upper left", frameon=False, labelcolor="#E0E0E0")
+    fig.tight_layout()
+    fig.savefig(out / "star-counts.png", facecolor="#000000")
+    plt.close(fig)
+    log(start, f"star counts: g50 {g50}, detected {len(x)}, matched {int(matched.sum())}, chance {chance:.1f}")
+
+    # colours: separate neighbours only, bright enough in all three channels
+    rows = []
+    for j in np.argsort(g):
+        if g[j] > 11 or not np.isfinite(bprp[j]):
+            continue
+        d2 = np.hypot(px - px[j], py - py[j])
+        if ((d2 > 0) & (d2 < 30) & (g < g[j] + 2)).any():
+            continue
+        fe = [aperture(img[c], px[j], py[j], good) for c in range(3)]
+        f = np.array([v[0] for v in fe]); e = np.array([v[1] for v in fe])
+        if np.isfinite(f).all() and (f / np.maximum(e, 1e-9)).min() >= 10:
+            rows.append((g[j], bprp[j], px[j], py[j], *f))
+    if len(rows) < 8:
+        log(start, f"star colours: only {len(rows)} stars, skipped")
+        return
+    G, C, X, Y, FR, FG, FB = np.array(rows).T
+    our = -2.5 * np.log10(FB / FR)
+    fit = np.polyfit(C, our, 1)
+    res = our - np.polyval(fit, C)
+    scat = float(1.4826 * np.median(np.abs(res - np.median(res))))
+    (out / "star-colours.json").write_text(json.dumps({
+        "slope": round(float(fit[0]), 3), "offset": round(float(fit[1]), 3), "scatter": round(scat, 3), "stars": len(G),
+        "columns": ["G", "bp_rp", "our_b_r", "x", "y"],
+        "rows": [[round(float(v), 3) for v in r] for r in zip(G, C, our, X, Y)]}, indent=0))
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(14, 6), dpi=120, facecolor="#000000")
+    axstyle(a1); axstyle(a2)
+    bins = np.arange(np.floor(our.min() * 4) / 4, np.ceil(our.max() * 4) / 4 + 0.01, 0.25)
+    a1.hist(our, bins, color="#007AFF", rwidth=0.8)
+    a1.grid(axis="y", color="#2C2C2E")
+    a1.set_xlabel("Our colour, B−R magnitudes (bluer to the left, zero uncalibrated)")
+    a1.set_ylabel("Stars per 0.25 mag")
+    a1.set_title(f"{len(G)} stars by colour", loc="left", fontsize=13)
+    a2.grid(color="#2C2C2E")
+    xl = np.array([C.min(), C.max()])
+    a2.plot(xl, np.polyval(fit, xl), color="#8E8E93", linewidth=2, zorder=1)
+    a2.scatter(C, our, s=64, color="#007AFF", edgecolors="#000000", linewidths=2, zorder=2)
+    a2.set_xlabel("Gaia BP−RP (bluer to the left)")
+    a2.set_ylabel("Our B−R magnitudes")
+    a2.set_title(f"Our colour against Gaia: slope {fit[0]:.2f}, scatter {scat:.2f} mag", loc="left", fontsize=13)
+    fig.suptitle(f"fshq, night of {a['night']}, no IR filter", x=0.01, ha="left", color="#8E8E93", fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out / "star-colours.png", facecolor="#000000")
+    plt.close(fig)
+    log(start, f"star colours: slope {fit[0]:.2f}, scatter {scat:.2f}, {len(G)} stars")
+
+
+def crop_sheet(boxes, nbox, path):
+    """brightest stars, each stacked on itself in the camera's axes, so a defocused
+    star shows the shape of the mirror. Ordered blue to red by the stars' own light."""
+    use = np.nonzero(nbox >= 10)[0]
+    if not len(use):
+        return 0
+    tiles = []
+    for b in use:
+        cube = boxes[b] / nbox[b]
+        cube = cube - np.median(cube, axis=(1, 2), keepdims=True)
+        gy, gx = np.mgrid[-CROP_R:CROP_R + 1, -CROP_R:CROP_R + 1]
+        inner = np.hypot(gx, gy) < CROP_R * 0.8
+        f = cube.reshape(3, -1)[:, inner.ravel()]
+        fr_, fb = np.clip(f[0], 0, None).sum(), np.clip(f[2], 0, None).sum()
+        colour = -2.5 * np.log10(max(fb, 1e-3) / max(fr_, 1e-3))
+        rgb = cube * WB[:, None, None]
+        top = np.percentile(rgb.mean(axis=0), 99.8)
+        noise = max(1.4826 * np.median(np.abs(rgb.mean(axis=0))), 1e-3)
+        tile = np.clip(np.arcsinh(np.clip(rgb, 0, None) / (2 * noise)) / np.arcsinh(max(top, 3 * noise) / (2 * noise)), 0, 1)
+        tile = (255 * tile.transpose(1, 2, 0)).astype(np.uint8)
+        tiles.append((colour, np.asarray(Image.fromarray(tile).resize((242, 242), Image.BICUBIC))))
+    tiles.sort(key=lambda t: t[0])
+    cols = 6
+    rows = (len(tiles) + cols - 1) // cols
+    gap = 8
+    sheet = np.zeros((rows * (242 + gap) + gap, cols * (242 + gap) + gap, 3), np.uint8)
+    for i, (_, t) in enumerate(tiles):
+        r, c = divmod(i, cols)
+        sheet[gap + r * (242 + gap):gap + r * (242 + gap) + 242, gap + c * (242 + gap):gap + c * (242 + gap) + 242] = t
+    Image.fromarray(sheet).save(path, quality=92)
+    return len(tiles)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--night", required=True, metavar="YYYY-MM-DD")
+    ap.add_argument("--out", type=Path, help="default: the night dir")
+    ap.add_argument("--step", type=int, help=f"use 1 frame in STEP; default keeps at most {MAX_FRAMES}")
+    a = ap.parse_args()
+    os.nice(15)
+    start = time.time()
+    cfg = CameraConfig.load(a.camera)
+    root = Path(cfg.frames_root)
+    night_dir = root / "night" / a.night
+    out = a.out or night_dir
+    out.mkdir(parents=True, exist_ok=True)
+    fr = Frames(night_dir, as_pattern(cfg.bayer))
+    if len(fr.items) < 100:
+        log(start, f"only {len(fr.items)} frames in {night_dir}")
+        return 3
+    step = a.step or max(1, int(np.ceil(fr.n / MAX_FRAMES)))
+    picks = list(range(0, fr.n, step))
+    log(start, f"{fr.n} frames, {fr.exptime:.1f} s, using {len(picks)}, focus {fr.focus!r}")
+
+    per_s = np.radians(SIDEREAL_ARCSEC_PER_S / 3600)
+    per_frame = per_s * fr.cadence
+    ref = []
+    for c in range(3):
+        cube = np.array([fr.channels(i)[c] for i in picks[::max(1, len(picks) // 50)]])
+        cube -= np.array([level(p) for p in cube])[:, None, None]
+        ref.append(np.median(cube, axis=0))
+        del cube
+    log(start, "fixed pattern done")
+
+    candidates, tried = find_pole(fr, ref, per_s)
+    log(start, "pole tries (score, x, y):", [tuple(round(float(v), 1) for v in t) for t in tried])
+    if not candidates:
+        log(start, "no pole: not enough stars")
+        return 3
+    seq_first, seq_last = 1, int(round(fr.seq(fr.n - 1)))
+    seq_mid = (seq_first + seq_last) // 2
+
+    # keep the candidate that stacks sharpest, then refine it the same way
+    sample = picks[::max(1, len(picks) // 50)]
+    res = {}
+    for i in sample:
+        g = fr.channels(i)[1] - ref[1]
+        res[i] = g - background(g)
+
+    def sharpness(p):
+        cv = Canvas(ref[0].shape, p, per_frame, seq_first, seq_mid, seq_last)
+        size = cv.out_h * OUT_W
+        s, n = np.zeros(size), np.zeros(size)
+        for i in sample:
+            idx, ok = cv.indices(fr.seq(i))
+            s += np.bincount(idx[ok], res[i][ok], minlength=size)
+            n += np.bincount(idx[ok], minlength=size)
+        floor = np.median(n[n > 0])
+        m = s[n >= floor] / n[n >= floor]
+        return float((m[m > np.percentile(m, 99.5)] ** 2).sum())
+
+    pole = max(candidates, key=sharpness)
+    log(start, "pole", np.round(pole, 1))
+    best = (0, pole)
+    for dx in (-100, -50, 0, 50, 100):
+        for dy in (-100, -50, 0, 50, 100):
+            p = (pole[0] + dx, pole[1] + dy)
+            v = sharpness(p)
+            if v > best[0]:
+                best = (v, p)
+    pole = best[1]
+    del res
+    log(start, "pole refined", np.round(pole, 1))
+    cv = Canvas(ref[0].shape, pole, per_frame, seq_first, seq_mid, seq_last)
+
+    # first pass, thin: finds the stars for the background mask and the crops
+    thin = picks[::max(1, len(picks) // 300)]
+    img1, depth1 = build(fr, ref, cv, thin, start=start)
+    med1 = np.median(depth1[depth1 > 0])
+    good1 = depth1 >= 0.5 * med1
+    l = luminance_sigma(img1, good1)
+    sm = ndi.gaussian_filter(l, 2)
+    star_mask = ndi.binary_dilation((sm > 3 * 1.4826 * np.median(np.abs(sm[good1]))) & good1, iterations=8)
+    x, y, f, *_ = blobs(img1, good1)
+    crops = list(zip(x[:CROPS], y[:CROPS]))
+    log(start, f"first pass: {len(thin)} frames, {len(x)} objects, mask {star_mask[good1].mean():.3f}")
+
+    img, depth, boxes, nbox = build(fr, ref, cv, picks, mask=star_mask, crops=crops, start=start)
+    med = np.median(depth[depth > 0])
+    good = depth >= 0.5 * med
+    noise = {n: round(float(1.4826 * np.median(np.abs(img[c][good]))), 4) for c, n in enumerate("RGB")}
+    log(start, "stack done; noise", noise)
+    Image.fromarray(stretch(img, depth, good, med)).save(out / "night-still.jpg", quality=92)
+    n = crop_sheet(boxes, nbox, out / "star-crops.jpg")
+    log(start, f"still and {n} crops written")
+
+    tm = fr.t0 + timedelta(seconds=(seq_mid - 1) * fr.cadence)
+    geom = {"seq_first": seq_first, "seq_mid": seq_mid, "seq_last": seq_last,
+            "t_mid": tm.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-5] + "Z", "cadence": round(fr.cadence, 4),
+            "pole": [round(pole[0], 1), round(pole[1], 1)], "frame_size": [cv.W, cv.H],
+            "arcsec_per_superpixel": SUPERPIXEL_ARCSEC, "arcsec_per_px": None, "polaris": None,
+            "out_width": OUT_W, "border": BORDER}
+
+    x, y, f, *_ = blobs(img, good)
+    w = None
+    with tempfile.TemporaryDirectory(dir=str(out)) as td:
+        if len(x) >= 8:
+            try:
+                w = solve(x, y, f, cv.out_h, cv.scale, td)
+            except subprocess.SubprocessError as e:
+                log(start, "solve:", e)
+    if w is None:
+        log(start, "plate solve failed; no star counts tonight")
+    else:
+        arc = float(np.sqrt(abs(np.linalg.det(w.pixel_scale_matrix))) * 3600)
+        px_, py_ = w.all_world2pix([list(POLARIS)], 0)[0]
+        geom["arcsec_per_px"] = round(arc, 3)
+        if -2000 < px_ < 4000 and -2000 < py_ < 4000:
+            geom["polaris"] = [round(float(px_), 1), round(float(py_), 1)]
+        ra_c, dec_c = w.all_pix2world([[OUT_W / 2, cv.out_h / 2]], 0)[0]
+        radius = float(np.hypot(OUT_W, cv.out_h) / 2 * arc / 3600) + 0.3
+        log(start, f"solved: {arc:.3f} arcsec/px, centre {ra_c:.2f} {dec_c:+.2f}, radius {radius:.2f}")
+        cat = gaia_cone(root / "catalogue", float(ra_c), float(dec_c), radius, start)
+        if cat is None:
+            log(start, "Gaia unreachable; no star counts tonight")
+        else:
+            star_counts(img, depth, good, cat, w, cv, fr, tm, per_s,
+                        {"night": a.night, "frames": len(picks), "noise_green": noise["G"]}, out, start)
+    (out / "night-still.json").write_text(json.dumps(geom, indent=1))
+    log(start, "done")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
