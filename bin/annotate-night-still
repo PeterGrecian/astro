@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""annotate-night-still: put the clock and a scale on a derotated whole-night still.
+
+The still is an arch: the sky is held fixed and turned so the field's mid-night
+position sits straight above the celestial pole. The field then swings clockwise
+about the pole, so the evening is bottom left and dawn bottom right. This adds:
+  - a timeline round the outside of the arch, hours in London time, each tick
+    marking where the centre of the field was at that moment,
+  - evening and dawn labels at the two ends,
+  - the celestial pole, and a scale bar in degrees.
+
+The geometry must match the still's stacker (astro/scratch/fshq/night_still.py):
+pole in superpixels of the frame, frame size, middle frame and its time, and the
+output width and border. Nothing here reads the frames.
+
+    annotate-night-still in.png out.jpg --t-mid 2026-10-30T23:52:42.8Z \
+        --seq-first 1 --seq-mid 7449 --seq-last 14801
+"""
+import argparse
+from datetime import datetime, timedelta
+from math import atan2, cos, degrees, hypot, pi, radians, sin
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from PIL import Image, ImageDraw, ImageFont
+
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+SIDEREAL_ARCSEC_PER_S = 15.0411
+TEXT, SECONDARY, ACCENT = "#E0E0E0", "#8E8E93", "#FF9500"
+LONDON = ZoneInfo("Europe/London")
+
+
+def geometry(a):
+    """Output pixel of the pole, superpixels per output px, field radii."""
+    w, h = a.frame_size
+    px, py = a.pole
+    per_frame = radians(SIDEREAL_ARCSEC_PER_S * a.cadence / 3600)
+    fc = ((w - 1) / 2 - px, (h - 1) / 2 - py)
+    spin = -pi / 2 - atan2(fc[1], fc[0])
+    corners = [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)]
+    xs, ys = [], []
+    for n in range(a.seq_first, a.seq_last + 1, 100):
+        th = per_frame * (n - a.seq_mid) + spin
+        c, s = cos(th), sin(th)
+        for x, y in corners:
+            dx, dy = x - px, y - py
+            xs.append(c * dx - s * dy)
+            ys.append(s * dx + c * dy)
+    x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+    scale = (x1 - x0 + 1) / a.out_width
+    out_h = int((y1 - y0 + 1) / scale) + 1
+    radius = max(hypot(x - px, y - py) for x, y in corners) / scale
+    return (-x0 / scale + a.border, -y0 / scale + a.border), scale, radius, out_h
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("input", type=Path)
+    ap.add_argument("output", type=Path)
+    ap.add_argument("--t-mid", required=True, help="UTC time of the middle frame")
+    ap.add_argument("--seq-first", type=int, required=True)
+    ap.add_argument("--seq-mid", type=int, required=True)
+    ap.add_argument("--seq-last", type=int, required=True)
+    ap.add_argument("--cadence", type=float, default=3.0, help="seconds per frame")
+    ap.add_argument("--pole", type=float, nargs=2, default=(-502, -1763),
+                    help="pole in superpixels of the frame")
+    ap.add_argument("--frame-size", type=int, nargs=2, default=(1014, 760))
+    ap.add_argument("--arcsec-per-superpixel", type=float, default=4.26)
+    ap.add_argument("--out-width", type=int, default=2000)
+    ap.add_argument("--border", type=int, default=100)
+    a = ap.parse_args()
+
+    (pole_x, pole_y), scale, field_r, out_h = geometry(a)
+    im = Image.open(a.input).convert("RGB")
+    if im.size != (a.out_width + 2 * a.border, out_h + 2 * a.border):
+        raise SystemExit(f"{a.input}: {im.size} does not match the geometry "
+                         f"({a.out_width + 2 * a.border}, {out_h + 2 * a.border})")
+    # Room outside the stacker's border for the timeline's labels.
+    pad_x, pad_top, pad_bottom = 70, 130, 40
+    canvas = Image.new("RGB", (im.width + 2 * pad_x, im.height + pad_top + pad_bottom))
+    canvas.paste(im, (pad_x, pad_top))
+    pole_x += pad_x
+    pole_y += pad_top
+    d = ImageDraw.Draw(canvas)
+    small, big = ImageFont.truetype(FONT, 30), ImageFont.truetype(FONT, 36)
+
+    t_mid = datetime.fromisoformat(a.t_mid.replace("Z", "+00:00"))
+    t_first = t_mid + timedelta(seconds=a.cadence * (a.seq_first - a.seq_mid))
+    t_last = t_mid + timedelta(seconds=a.cadence * (a.seq_last - a.seq_mid))
+
+    def angle(t):
+        """Direction of the field's centre at t; -90 deg (up) at mid-night.
+        Later is clockwise on screen: y runs down, so the angle increases."""
+        return radians(-90 + SIDEREAL_ARCSEC_PER_S / 3600
+                       * (t - t_mid).total_seconds())
+
+    def at(t, r):
+        th = angle(t)
+        return pole_x + r * cos(th), pole_y + r * sin(th)
+
+    r = field_r + 22
+    arc = [at(t_first + (t_last - t_first) * i / 240, r) for i in range(241)]
+    d.line(arc, fill=SECONDARY, width=3)
+
+    # Quarter hours by London clock.
+    t = t_first.astimezone(LONDON).replace(second=0, microsecond=0)
+    t += timedelta(minutes=15 - t.minute % 15)
+    while t <= t_last:
+        hour = t.minute == 0
+        d.line([at(t, r), at(t, r + (22 if hour else 9))], fill=TEXT if hour else SECONDARY,
+               width=4 if hour else 2)
+        if hour:
+            x, y = at(t, r + 62)
+            d.text((x, y), t.strftime("%H:%M"), fill=TEXT, font=small, anchor="mm")
+        t += timedelta(minutes=15)
+
+    # The two ends, inside the arch's feet.
+    inner_r = 2 * hypot(*fc_radius(a)) / scale - field_r
+    for when, word, anchor in ((t_first, "evening", "lm"), (t_last, "dawn", "rm")):
+        x, y = at(when, inner_r)
+        d.text((x, y), f"{word} {when.astimezone(LONDON):%H:%M}", fill=ACCENT, font=big,
+               anchor=anchor)
+
+    # The pole.
+    d.line([(pole_x - 18, pole_y), (pole_x + 18, pole_y)], fill=TEXT, width=2)
+    d.line([(pole_x, pole_y - 18), (pole_x, pole_y + 18)], fill=TEXT, width=2)
+    d.text((pole_x, pole_y + 44), "celestial pole", fill=SECONDARY, font=small, anchor="mm")
+
+    # One degree, above the pole, inside the arch.
+    deg_px = 3600 / (scale * a.arcsec_per_superpixel)
+    y = pole_y - 190
+    x0, x1 = pole_x - deg_px / 2, pole_x + deg_px / 2
+    d.line([(x0, y), (x1, y)], fill=TEXT, width=4)
+    for x in (x0, pole_x, x1):
+        d.line([(x, y - 12), (x, y + 12)], fill=TEXT, width=3)
+    d.text((pole_x, y - 42), "1°", fill=TEXT, font=big, anchor="mm")
+    d.text((pole_x, y + 42), "the Moon is about ½°", fill=SECONDARY, font=small, anchor="mm")
+
+    canvas.save(a.output, quality=90)
+    print(f"{a.output}: {canvas.size}, pole at ({pole_x:.0f}, {pole_y:.0f}), "
+          f"{deg_px:.0f} px per degree, arcs {degrees(angle(t_first)):.0f} to "
+          f"{degrees(angle(t_last)):.0f} deg")
+
+
+def fc_radius(a):
+    """Frame centre relative to the pole, superpixels."""
+    w, h = a.frame_size
+    return (w - 1) / 2 - a.pole[0], (h - 1) / 2 - a.pole[1]
+
+
+if __name__ == "__main__":
+    main()

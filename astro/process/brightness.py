@@ -380,7 +380,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     ax_sky.set_yscale("log", base=2)
     ax_sky.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
-    ax_sky.set_ylabel(f"stops above {zero_label} ({pedestal:.0f})")
+    ax_sky.set_ylabel("sky brightness, bits (stops)")
     title_suffix = " & environment" if has_env else ""
     ax_sky.set_title(f"{camera} — night {night} — per-frame brightness{title_suffix}")
     ax_sky.grid(True, alpha=0.25, linestyle=":")
