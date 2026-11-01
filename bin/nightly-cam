@@ -31,6 +31,7 @@ from astro.nightdir import last_completed_night
 from astro.frames import list_night_frames, night_output_dir
 from astro.process import bayer
 from astro.process import brightness
+from astro.present import scalebar
 from astro.process.badpix import compute_bad_pixel_mask, write_bad_mask
 from astro.process.derot import derot_stack, write_derot_fits
 from astro.present.render import render_asinh_jpeg, render_asinh_jpeg_rgb
@@ -71,6 +72,9 @@ def make_render(cfg):
             result = render_asinh_jpeg_rgb(out, dst_path, **kw)
         else:
             result = render_asinh_jpeg(out, dst_path, **kw)
+        # A publication crop would change the scale, so only an uncropped frame gets a bar.
+        if cfg.get("field_width_deg") and out.shape[:2] == img.shape[:2]:
+            scalebar.stamp(dst_path, float(cfg.get("field_width_deg")))
         if has_policy:
             privacy_mod.mark_ok(dst_path)
         return result

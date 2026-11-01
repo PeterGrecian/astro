@@ -7,6 +7,7 @@ Plot conventions (GLOBAL.md / astro CLAUDE.md): x-axis in Europe/London,
 y log base 2 so each gridline is one stop.
 """
 import csv
+import json
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -238,6 +239,66 @@ def read_csv(csv_path: Path):
     return out
 
 
+def excluded_spells(night_dir):
+    """Spells listed in a night's excluded-frames.json, such as a light left on:
+    [(first_utc, last_utc, reason)]. Empty when the night has no list."""
+    f = Path(night_dir) / "excluded-frames.json"
+    if not f.exists():
+        return []
+    out = []
+    for r in json.loads(f.read_text())["ranges"]:
+        lo = datetime.fromisoformat(r["first_utc"].replace("Z", "+00:00"))
+        hi = datetime.fromisoformat(r["last_utc"].replace("Z", "+00:00")) + timedelta(seconds=1)
+        out.append((lo, hi, r.get("reason", "")))
+    return out
+
+
+def in_spells(t, spells):
+    return any(lo <= t <= hi for lo, hi, _ in spells)
+
+
+BASELINE_BIN_MIN = 15
+
+
+def darkest_baseline(cfg, pedestal):
+    """The darkest sky yet at each clock time, in signal per second: for each
+    15-minute bin of London time, the lowest of the nights' bin medians.
+
+    Only nights from camera.json's brightness_baseline_since count, because
+    another sensor or gain is not comparable. Listed spells and closed-cover
+    frames are left out. Returns ({minutes since midnight: per_s}, n_nights, since),
+    or None when the camera sets no start date."""
+    since = cfg.get("brightness_baseline_since") if cfg is not None else None
+    if not since:
+        return None
+    best, n_nights = {}, 0
+    for night, path in find_night_csvs(cfg):
+        if night < since:
+            continue
+        spells = excluded_spells(path.parent)
+        bins = {}
+        with open(path, newline="") as fh:
+            for r in csv.DictReader(fh):
+                if r.get("cover") in ("closed", "moving"):
+                    continue
+                try:
+                    t = datetime.fromisoformat(r["iso_utc"])
+                    v = (float(r["mean"]) - pedestal) / float(r["exptime"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if in_spells(t, spells):
+                    continue
+                t = t.astimezone(LONDON)
+                k = (t.hour * 60 + t.minute) // BASELINE_BIN_MIN * BASELINE_BIN_MIN
+                bins.setdefault(k, []).append(v)
+        if bins:
+            n_nights += 1
+        for k, vs in bins.items():
+            m = float(np.median(vs))
+            best[k] = min(best.get(k, m), m)
+    return (best, n_nights, since) if best else None
+
+
 def plot_night(rows, night: str, camera: str, out_path: Path,
                pedestal: float | None = None,
                stacked_window_utc: tuple[str, str] | None = None,
@@ -273,6 +334,8 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     box_rhs = []
     sens_temps = []
     exptimes = []
+    spells = excluded_spells(out_path.parent)
+    spell_peak = [None] * len(spells)
     for r in rows:
         iso = _val(r, 1, "iso_utc")
         if not iso:
@@ -283,6 +346,10 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
             continue
         m = _val(r, 3, "mean")
         if m is None:
+            continue
+        hit = next((i for i, sp in enumerate(spells) if sp[0] <= t <= sp[1]), None)
+        if hit is not None:      # meaningless as sky: drawn below as a torn-off spell
+            spell_peak[hit] = max(spell_peak[hit] or 0.0, float(m))
             continue
         times.append(t)
         means.append(float(m))
@@ -441,8 +508,46 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
         except (ValueError, TypeError):
             pass
 
+    # Darkest sky yet at each clock time, on this night's exposure basis
+    baseline = darkest_baseline(cfg, pedestal) if zero_label == "black level" else None
+    ex_now = np.array(exptimes)
+    ex_now = ex_now[np.isfinite(ex_now) & (ex_now > 0)]
+    if baseline and ex_now.size:
+        night_day = datetime.fromisoformat(night).replace(tzinfo=LONDON)
+        pts = []
+        for k, per_s in baseline[0].items():
+            day = night_day + timedelta(days=1 if k < 12 * 60 else 0)
+            tb = day.replace(hour=k // 60, minute=k % 60)
+            if min(times) - timedelta(minutes=BASELINE_BIN_MIN) <= tb <= max(times):
+                pts.append((tb, max(per_s * float(np.median(ex_now)), 0.5)))
+        pts.sort()
+        if pts:
+            ax_sky.step([p[0] for p in pts], [p[1] for p in pts], where="post",
+                        color="#3A3A3C", linewidth=1.3, zorder=6)
+
+    # Spells left out: torn off at the top rather than stretching the axis to them
+    for (lo, hi, reason), peak in zip(spells, spell_peak):
+        if peak is None:
+            continue
+        x0, x1 = mdates.date2num(lo), mdates.date2num(hi)
+        ax_sky.axvspan(lo, hi, color="#8E8E93", alpha=0.18, zorder=1)
+        teeth = 6
+        xs = np.linspace(x0, x1, 2 * teeth + 1)
+        ys = 0.89 + 0.03 * (np.arange(2 * teeth + 1) % 2)
+        ax_sky.fill(np.r_[xs, x1, x0], np.r_[ys, 1.0, 1.0], color="white", zorder=7,
+                    transform=ax_sky.get_xaxis_transform(), clip_on=True)
+        ax_sky.plot(xs, ys, color="#3A3A3C", linewidth=0.9, zorder=8,
+                    transform=ax_sky.get_xaxis_transform())
+        peak_bits = math.log2(max(peak - pedestal, 0.5))
+        ax_sky.text(x1, 0.86, f" left out: {reason.split(';')[0].split('(')[0].strip()}, "
+                    f"reached {peak_bits:.1f} bits", fontsize=8, color="#3A3A3C", ha="left", va="top",
+                    transform=ax_sky.get_xaxis_transform(), zorder=9)
+
     # Legend on sky plot
     legend_elements = []
+    if baseline and ex_now.size:
+        legend_elements.append(Line2D([0], [0], color='#3A3A3C', linewidth=1.3,
+                                      label=f'darkest yet at this clock time ({baseline[1]} nights since {baseline[2]})'))
     if np.any(open_mask):
         legend_elements.append(Line2D([0], [0], marker='o', color='w',
                                       markerfacecolor='#007AFF', markersize=6,

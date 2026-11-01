@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 from astro.process.brightness import sky_mag_for
 from astro.process.brightness import (chart_zero, darkest_anchor,
-                                      daylight_keep_mask, find_night_csvs,
+                                      daylight_keep_mask, excluded_spells, find_night_csvs, in_spells,
                                       lsb_align)
 
 LONDON = ZoneInfo("Europe/London")
@@ -52,6 +52,7 @@ def load_curve(csv_path: Path, pedestal=None):
     lsb_align, which uses it to disarm the MSB test on sensors whose
     black level is itself above the cut (canon)."""
     rows = []
+    spells = excluded_spells(csv_path.parent)
     with open(csv_path, newline="") as f:
         for row in csv.DictReader(f):
             try:
@@ -59,6 +60,8 @@ def load_curve(csv_path: Path, pedestal=None):
                 if t.tzinfo is None:
                     t = t.replace(tzinfo=timezone.utc)
                 v = float(row["mean"])
+                if in_spells(t, spells):
+                    continue
                 rows.append((t.astimezone(LONDON), v))
             except (KeyError, ValueError):
                 continue
