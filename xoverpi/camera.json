@@ -106,15 +106,23 @@
   "location_file": "location.json",
   "privacy_file": null,
   "subcams": null,
-  "position_index": 2,
+  "position_index": 4,
   "position_registry": {
     "1": {
       "dates": "2026-09-14..2026-10-13",
       "notes": "OV5647 at prime focus."
     },
     "2": {
-      "dates": "2026-10-30..",
+      "dates": "2026-10-30",
       "notes": "hqfs (IMX477): cast collar and IR filter removed 2026-10-29, sensor no longer dust-sealed. Own bandpass, reaching into the near-infrared. Focus set in daylight to about 2.9 mm inward of a ball at ~32 m (2026-10-30), good to about 0.5 mm; first stars must refine it. Focus, flats and the dots offset all restart."
+    },
+    "3": {
+      "dates": "2026-10-31",
+      "notes": "Scope moved before this night; pole 2.40 deg from field centre, straight down in frame axes. These frames carry POSINDEX 2 in their headers."
+    },
+    "4": {
+      "dates": "2026-11-01..",
+      "notes": "FirstScope adjusted and camera rigidly mounted (Peter, 2026-11-01), eyepiece extension 7.09 mm. Pointing not yet solved; the first clear night gives it."
     }
   }
 }
