@@ -1,0 +1,290 @@
+#!/usr/bin/env python3
+"""night-still-composite: every night's still on one sky, about the true pole.
+
+Each night's still is already a fixed picture of the sky, but its arch points its own way, so two
+nights can overlap little and share few stars. Each is placed on its own: a rough plate solve pairs
+its stars with Gaia, then a similarity is fitted in the tangent plane at the pole of date. The rough
+solve is only for pairing. A solve whose stars fill part of an arch extrapolates badly to the pole
+(two solves of 2026-10-31 put Polaris 26 px apart), while this fit left 1.1-1.4 px rms and each
+still's pole about 40 arcsec from the true pole.
+
+Polaris is straight down from the pole. Where nights overlap the deepest (star-counts g50) shows;
+they are not stacked. A night that fits badly is left out and named in the log.
+
+    night-still-composite --camera xoverpi [--publish]
+
+Writes <frames_root>/night-still-composite.jpg and .json, and in each night's dir its fit.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+import warnings
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+
+warnings.filterwarnings("ignore")
+
+import astropy.units as u                            # noqa: E402
+import cv2                                           # noqa: E402
+import numpy as np                                   # noqa: E402
+from astropy.coordinates import FK5, SkyCoord        # noqa: E402
+from astropy.io import fits                          # noqa: E402
+from astropy.table import Table                      # noqa: E402
+from astropy.time import Time                        # noqa: E402
+from astropy.wcs import WCS                          # noqa: E402
+from PIL import Image, ImageDraw, ImageFont          # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from astro.config import CameraConfig                # noqa: E402
+
+_loader = importlib.machinery.SourceFileLoader(
+    "annotate_night_still", str(Path(__file__).resolve().parent / "annotate-night-still"))
+_spec = importlib.util.spec_from_loader(_loader.name, _loader)
+ann = importlib.util.module_from_spec(_spec)
+_loader.exec_module(ann)
+
+POLARIS = (37.9546, 89.2641)
+SURROUND = (0x40, 0x40, 0x40)    # as the nightly stills on the page
+GREY = "#8E8E93"
+MIN_PAIRS = 15                   # 10-31, with half its night under cloud, has 27
+MAX_RMS_PX = 3.0
+MAX_G = 12.5
+FOOT = 110                       # below the sky, for the scale and the caption
+EDGE_FADE_PX = 40                # overlap feather, so no seam shows
+
+
+def plane(ra, dec, equinox):
+    """Tangent plane at the pole of date, arcsec, as complex numbers."""
+    c = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs").transform_to(FK5(equinox=equinox))
+    r = np.degrees(np.tan(np.radians(90.0 - c.dec.deg))) * 3600
+    return r * np.exp(1j * np.radians(c.ra.deg))
+
+
+def detect(gray, mask):
+    g = gray.astype(np.float32)
+    r = g - cv2.GaussianBlur(g, (0, 0), 15)
+    r[mask == 0] = 0
+    sm = cv2.GaussianBlur(r, (0, 0), 2)
+    s = 1.4826 * np.median(np.abs(sm[mask > 0]))
+    n, lab, st, cen = cv2.connectedComponentsWithStats((sm > 6 * s).astype(np.uint8), connectivity=8)
+    if n < 2:
+        return np.zeros(0), np.zeros(0), np.zeros(0)
+    area = st[1:, cv2.CC_STAT_AREA]
+    flux = np.bincount(lab.ravel(), np.clip(r, 0, None).ravel(), minlength=n)[1:]
+    keep = (area >= 8) & (area < 2000)
+    o = np.argsort(-flux[keep])
+    return cen[1:][keep][o, 0], cen[1:][keep][o, 1], flux[keep][o]
+
+
+def rough_solve(night_dir, x, y, flux, shape, arc):
+    """Cached beside the still, and only used to pair stars with the catalogue."""
+    cached = night_dir / "night-still.wcs"
+    still = night_dir / "night-still.jpg"
+    if not cached.exists() or cached.stat().st_mtime < still.stat().st_mtime:
+        with tempfile.TemporaryDirectory(dir=str(night_dir)) as td:
+            Table({"X": x + 1, "Y": y + 1, "FLUX": flux}).write(f"{td}/s.xy.fits", overwrite=True)
+            subprocess.run(["solve-field", "--overwrite", "--no-plots", "--scale-units", "arcsecperpix",
+                            "--scale-low", str(arc * .95), "--scale-high", str(arc * 1.05),
+                            "--width", str(shape[1]), "--height", str(shape[0]),
+                            "--x-column", "X", "--y-column", "Y", "--sort-column", "FLUX",
+                            "--cpulimit", "200", "--dir", td, f"{td}/s.xy.fits"],
+                           capture_output=True, text=True, timeout=300)
+            p = Path(td) / "s.xy.wcs"
+            if not p.exists():
+                return None
+            cached.write_bytes(p.read_bytes())
+    return WCS(fits.getheader(cached))
+
+
+def fit_gaia(z, pred, sky, inside):
+    """Similarity z = c*sky + d (or of conj(sky)), tightening the pairing as it goes."""
+    c, d, parity, res = None, 0j, 0, np.zeros(0)
+    for it in range(6):
+        tol = max(3.0, 12.0 * 0.7 ** it)
+        dist = np.abs(z[:, None] - pred[inside][None])
+        j = dist.argmin(axis=1)
+        ok = dist[np.arange(len(z)), j] < tol
+        if ok.sum() < 3:
+            return None
+        zz, ss = z[ok], sky[inside][j[ok]]
+        best = None
+        for par in (0, 1):
+            w = np.conj(ss) if par else ss
+            cc, dd = np.linalg.lstsq(np.vstack([w, np.ones(len(w))]).T, zz, rcond=None)[0]
+            r = np.abs(zz - cc * w - dd)
+            if best is None or np.median(r) < best[0]:
+                best = (np.median(r), par, cc, dd, r)
+        _, parity, c, d, res = best
+        pred = c * (np.conj(sky) if parity else sky) + d
+    return {"re": float(c.real), "im": float(c.imag), "dx": float(d.real), "dy": float(d.imag), "parity": parity,
+            "pairs": len(res), "rms_px": float(np.sqrt((res ** 2).mean())),
+            "arcsec_per_px": float(1 / abs(c)), "pole_error_arcsec": float(abs(d) / abs(c))}
+
+
+def place(night_dir, gaia, equinox):
+    g = json.loads((night_dir / "night-still.json").read_text())
+    if not g.get("arcsec_per_px"):
+        return None, "no plate solve in night-still.json"
+    a = SimpleNamespace(**g)
+    (px, py), scale, _, _ = ann.geometry(a)
+    still = night_dir / "night-still.jpg"
+    img = cv2.imread(str(still))
+    h, w = img.shape[:2]
+    mask = np.array(ann.field_mask(a, (w, h), (px, py), scale))
+    fit_file = night_dir / "night-still-fit.json"
+    fit = None
+    if fit_file.exists() and fit_file.stat().st_mtime >= still.stat().st_mtime:
+        fit = json.loads(fit_file.read_text())
+    else:
+        x, y, flux = detect(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), mask)
+        if len(x) < MIN_PAIRS:
+            return None, f"only {len(x)} stars"
+        wcs = rough_solve(night_dir, x, y, flux, (h, w), g["arcsec_per_px"])
+        if wcs is None:
+            return None, "rough solve failed"
+        gx, gy = wcs.all_world2pix(gaia[:, 0], gaia[:, 1], 0)
+        inside = (gx >= 0) & (gx < w) & (gy >= 0) & (gy < h)
+        inside[inside] = mask[gy[inside].astype(int), gx[inside].astype(int)] > 0
+        sky = plane(gaia[:, 0], gaia[:, 1], equinox)
+        fit = fit_gaia((x - px) + 1j * (y - py), gx + 1j * gy - (px + 1j * py), sky, inside)
+        if fit is None:
+            return None, "no stars paired with Gaia"
+        fit_file.write_text(json.dumps(fit, indent=1))
+    if fit["pairs"] < MIN_PAIRS or fit["rms_px"] > MAX_RMS_PX:
+        return None, f"fit too poor: {fit['pairs']} pairs, rms {fit['rms_px']:.2f} px"
+    depth = None
+    counts = night_dir / "star-counts.json"
+    if counts.exists():
+        depth = json.loads(counts.read_text()).get("g50")
+    return SimpleNamespace(name=night_dir.name, img=img, mask=mask, pole=(px, py), fit=fit,
+                           g50=depth if depth is not None else 0.0), None
+
+
+def nice_dates(names):
+    days = [datetime.strptime(n, "%Y-%m-%d") for n in sorted(names)]
+    first, last = days[0], days[-1]
+    if len(days) == 1:
+        return f"{last.day} {last:%b %Y}"
+    if (first.year, first.month) == (last.year, last.month):
+        return f"{first.day} to {last.day} {last:%b %Y}"
+    return f"{first.day} {first:%b} to {last.day} {last:%b %Y}"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--camera", required=True)
+    ap.add_argument("--publish", action="store_true")
+    a = ap.parse_args()
+    cfg = CameraConfig.load(a.camera)
+    root = Path(cfg.frames_root)
+    dirs = sorted(p.parent for p in (root / "night").glob("*/night-still.json")
+                  if (p.parent / "night-still.jpg").exists())
+    if len(dirs) < 2:
+        print(f"{len(dirs)} night(s) with a still: nothing to composite yet")
+        return 0
+
+    gaia = [np.load(p, allow_pickle=True)[:, :3] for p in sorted((root / "catalogue").glob("gaia_*.npy"))]
+    if not gaia:
+        print("no Gaia catalogue under", root / "catalogue")
+        return 3
+    gaia = np.unique(np.vstack(gaia).astype(float).round(6), axis=0)
+    gaia = gaia[gaia[:, 2] < MAX_G]
+    equinox = Time(datetime.now().year + datetime.now().timetuple().tm_yday / 365.25, format="jyear")
+
+    nights = []
+    for d in dirs:
+        n, why = place(d, gaia, equinox)
+        if n is None:
+            print(f"{d.name}: left out, {why}")
+            continue
+        f = n.fit
+        print(f"{d.name}: {f['pairs']} stars paired, rms {f['rms_px']:.2f} px, {f['arcsec_per_px']:.3f}\"/px, "
+              f"still's pole {f['pole_error_arcsec']:.0f}\" from true, g50 {n.g50}")
+        nights.append(n)
+    if len(nights) < 2:
+        print("fewer than two nights placed: no composite")
+        return 0
+    nights.sort(key=lambda n: -n.g50)
+
+    arc = min(n.fit["arcsec_per_px"] for n in nights)
+    s_pol = plane(np.array([POLARIS[0]]), np.array([POLARIS[1]]), equinox)[0]
+    k = np.exp(1j * (np.pi / 2 - np.angle(s_pol))) / arc   # canvas = k * sky: Polaris straight down
+    # Sky as far out as any night reaches, measured on each still.
+    r_px = 0.0
+    for n in nights:
+        ys, xs = np.nonzero(n.mask[::8, ::8])
+        rel = xs * 8.0 + 1j * ys * 8.0 - (n.pole[0] + 1j * n.pole[1])
+        r_px = max(r_px, float(np.abs(rel).max()) * n.fit["arcsec_per_px"] / arc)
+    size = 2 * int(r_px) + 80
+    cx = cy = size / 2
+
+    canvas = np.zeros((size, size, 3), np.float32)
+    weight = np.zeros((size, size), np.float32)
+    for n in nights:
+        c = complex(n.fit["re"], n.fit["im"])
+        d = complex(n.fit["dx"], n.fit["dy"])
+        if n.fit["parity"]:
+            print(f"{n.name}: mirrored against the sky, left out")
+            continue
+        m = c / k    # still = m * (canvas - centre) + d + pole
+        tx = d.real + n.pole[0] - m.real * cx + m.imag * cy
+        ty = d.imag + n.pole[1] - m.imag * cx - m.real * cy
+        M = np.array([[m.real, -m.imag, tx], [m.imag, m.real, ty]], np.float32)
+        flags = cv2.INTER_LANCZOS4 | cv2.WARP_INVERSE_MAP
+        im = cv2.warpAffine(n.img, M, (size, size), flags=flags, borderValue=(0, 0, 0)).astype(np.float32)
+        ma = cv2.warpAffine(n.mask, M, (size, size), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP, borderValue=0)
+        ma = cv2.erode((ma > 200).astype(np.uint8), np.ones((9, 9), np.uint8))
+        take = np.clip(cv2.distanceTransform(ma, cv2.DIST_L2, 3) / EDGE_FADE_PX, 0, 1) * (1 - weight)
+        canvas += im * take[..., None]
+        weight += take
+    grey = np.array(SURROUND[::-1], np.float32)
+    bgr = np.clip(canvas + (1 - weight[..., None]) * grey, 0, 255).astype(np.uint8)
+
+    out = Image.new("RGB", (size, size + FOOT), SURROUND)
+    out.paste(Image.fromarray(bgr[..., ::-1]), (0, 0))
+    d = ImageDraw.Draw(out)
+    font = ImageFont.truetype(ann.FONT, 34)
+    d.line([(cx - 18, cy), (cx + 18, cy)], fill=GREY, width=2)
+    d.line([(cx, cy - 18), (cx, cy + 18)], fill=GREY, width=2)
+    d.text((cx, cy - 44), "celestial pole", fill=GREY, font=font, anchor="mm")
+    pol = k * s_pol
+    px, py = cx + pol.real, cy + pol.imag
+    d.ellipse([px - 18, py - 18, px + 18, py + 18], outline=GREY, width=2)
+    d.text((px + 32, py), "Polaris", fill=GREY, font=font, anchor="lm")
+    # One degree, at the foot, as on the nightly stills: |--- 1 deg ---|
+    deg = 3600 / arc
+    y = size + FOOT // 2
+    x0, x1 = cx - deg / 2, cx + deg / 2
+    gap = d.textlength("1°", font=font) / 2 + 12
+    d.line([(x0, y), (cx - gap, y)], fill=GREY, width=2)
+    d.line([(cx + gap, y), (x1, y)], fill=GREY, width=2)
+    for x in (x0, x1):
+        d.line([(x, y - 12), (x, y + 12)], fill=GREY, width=2)
+    d.text((cx, y), "1°", fill=GREY, font=font, anchor="mm")
+    names = [n.name for n in nights]
+    d.text((30, y), f"{len(names)} nights, {nice_dates(names)}", fill=GREY, font=font, anchor="lm")
+
+    jpg = root / "night-still-composite.jpg"
+    out.save(jpg, quality=90)
+    meta = root / "night-still-composite.json"
+    meta.write_text(json.dumps({"nights": sorted(names), "deepest_first": names, "arcsec_per_px": arc,
+                                "size": [size, size + FOOT], "polaris": [px, py]}, indent=1))
+    print(f"{jpg}: {out.size}, {100 * (weight > .5).mean():.0f}% of the square is sky, {deg:.0f} px per degree")
+    if a.publish:
+        import boto3
+        s3 = boto3.client("s3")
+        bucket = cfg.s3["bucket"]
+        prefix = cfg.s3["prefix"].strip("/").rsplit("/", 1)[0]
+        s3.upload_file(str(jpg), bucket, f"{prefix}/night-still-composite.jpg", ExtraArgs={"ContentType": "image/jpeg"})
+        s3.upload_file(str(meta), bucket, f"{prefix}/night-still-composite.json", ExtraArgs={"ContentType": "application/json"})
+        print(f"published s3://{bucket}/{prefix}/night-still-composite.jpg")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

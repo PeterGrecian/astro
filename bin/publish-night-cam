@@ -563,6 +563,12 @@ if stale:
         print(f"deleted stale s3://{bucket}/{key}")
 PYEOF
 
+# Every night's still on one sky, the last of the set the site swipes through.
+if [[ "$CAMERA" == "xoverpi" ]]; then
+    echo "--- night still composite"
+    "$PY" "$HERE/night-still-composite" --camera "$CAMERA" --publish || echo "night-still-composite FAILED; the site keeps the last one"
+fi
+
 # Refresh the multi-night combined brightness plot at the camera prefix.
 echo "--- combined brightness (multi-night)"
 "$PY" "$HERE/combined-brightness" --camera "$CAMERA" --publish || true
