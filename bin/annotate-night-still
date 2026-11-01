@@ -172,10 +172,11 @@ def main():
         d.ellipse([x - 18, y - 18, x + 18, y + 18], outline=ink, width=2)
         d.text((x - 32, y), "Polaris", fill=ink, font=small, anchor="rm")
 
-    # One degree, above the pole, inside the arch: |--- 1 deg ---|
+    # One degree, at the foot of the picture, clear of the pole and Polaris
+    # (Peter, 2026-11-01): |--- 1 deg ---|
     arcsec_per_px = a.arcsec_per_px or scale * a.arcsec_per_superpixel
     deg_px = 3600 / arcsec_per_px
-    y = pole_y - 190
+    y = canvas.height - 45
     x0, x1 = pole_x - deg_px / 2, pole_x + deg_px / 2
     gap = d.textlength("1\u00b0", font=small) / 2 + 12
     d.line([(x0, y), (pole_x - gap, y)], fill=ink, width=2)
