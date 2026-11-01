@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""10-minute test stack, fshq 2026-10-30: derotate about the celestial pole, compare with a plain stack."""
+"""10-minute test stack, hqfs 2026-10-30: derotate about the celestial pole, compare with a plain stack."""
 import glob, os
 import numpy as np
 from astropy.io import fits

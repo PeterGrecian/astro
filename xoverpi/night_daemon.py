@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""xoverpi-night — night capture for the IMX477 (fshq) at prime focus of the FirstScope.
+"""xoverpi-night — night capture for the IMX477 (hqfs) at prime focus of the FirstScope.
 
-Written for the OV5647; fshq replaced it on 2026-10-14. Notes below that quote
+Written for the OV5647; hqfs replaced it on 2026-10-14. Notes below that quote
 OV5647 numbers are that history, not this sensor.
 
 Derived from eclipticam/v1_night_daemon.py, which is the estate's other OV5647
@@ -84,7 +84,7 @@ EXPOSURE_MAX_US = 60_000_000
 # duty-cycle note above before setting this to a list.
 EXPOSURES = [float(x) for x in
              os.environ.get("XOVER_EXPOSURES", "12.0").split(",")]
-GAIN = float(os.environ.get("XOVER_GAIN", 2.0))   # first guess for fshq, unmeasured on stars
+GAIN = float(os.environ.get("XOVER_GAIN", 2.0))   # first guess for hqfs, unmeasured on stars
 COADD_N = int(os.environ.get("XOVER_COADD_N", 1))
 BINNED = os.environ.get("XOVER_BINNED", "1") != "0"
 MIN_FREE_GB = float(os.environ.get("XOVER_MIN_FREE_GB", 2.0))

@@ -8,7 +8,7 @@ about the pole, so the evening is bottom left and dawn bottom right. This adds:
     the centre of the field was at that moment,
   - the celestial pole, Polaris if its position is given, and a degree scale.
 
-The geometry must match the still's stacker (astro/scratch/fshq/night_still.py):
+The geometry must match the still's stacker (astro/scratch/hqfs/night_still.py):
 pole in superpixels of the frame, frame size, middle frame and its time, and the
 output width and border. Nothing here reads the frames.
 

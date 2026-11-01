@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fshq first night: sky level, star count and star shape, sampled through the night."""
+"""hqfs first night: sky level, star count and star shape, sampled through the night."""
 import glob, os, sys
 import numpy as np
 from astropy.io import fits

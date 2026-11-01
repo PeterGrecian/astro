@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Identify the rings in the fshq night still: match against Tycho-2 about the pole, rotation unknown."""
+"""Identify the rings in the hqfs night still: match against Tycho-2 about the pole, rotation unknown."""
 import csv, io, os, urllib.parse, urllib.request
 for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
     os.environ[v] = "1"

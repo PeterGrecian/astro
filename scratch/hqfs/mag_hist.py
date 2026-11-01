@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Star count against magnitude in the fshq 1-in-10 still, clear part of the night, against Gaia DR3."""
+"""Star count against magnitude in the hqfs 1-in-10 still, clear part of the night, against Gaia DR3."""
 import os, warnings
 os.environ["OMP_NUM_THREADS"] = "1"
 os.nice(15)
@@ -98,7 +98,7 @@ ax.tick_params(length=0)
 ax.set_xticks(bins[::2]); ax.set_xlim(3.9, 12.6)
 ax.set_xlabel("Gaia G magnitude (fainter to the right)")
 ax.set_ylabel("Stars per 0.5 mag")
-ax.set_title("fshq, night of 2026-10-30: stars by Gaia G, clear part of the night (before 03:45), 1 frame in 10", loc="left", fontsize=13, color="#E0E0E0")
+ax.set_title("hqfs, night of 2026-10-30: stars by Gaia G, clear part of the night (before 03:45), 1 frame in 10", loc="left", fontsize=13, color="#E0E0E0")
 ax.legend(loc="upper left", frameon=False, labelcolor="#E0E0E0")
 fig.tight_layout()
 fig.savefig(f"{OUT}/mag_hist.png", facecolor="#000000")

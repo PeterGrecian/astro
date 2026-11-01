@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stripes in fshq night frames: size of row and column banding against pixel noise, fixed or changing frame to frame."""
+"""Stripes in hqfs night frames: size of row and column banding against pixel noise, fixed or changing frame to frame."""
 import glob
 import numpy as np
 from astropy.io import fits

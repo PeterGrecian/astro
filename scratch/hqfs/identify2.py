@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plate-solve the fshq night still from its ring centroids (astrometry.net, Tycho-2), then name the rings from HYG."""
+"""Plate-solve the hqfs night still from its ring centroids (astrometry.net, Tycho-2), then name the rings from HYG."""
 import csv, os, subprocess
 for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
     os.environ[v] = "1"

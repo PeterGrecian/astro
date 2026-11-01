@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Star colours from the fshq all-frames still: our B-R against Gaia BP-RP, colour histogram, white balance."""
+"""Star colours from the hqfs all-frames still: our B-R against Gaia BP-RP, colour histogram, white balance."""
 import os, warnings, csv
 os.environ["OMP_NUM_THREADS"] = "1"
 os.nice(15)
@@ -108,6 +108,6 @@ a2.plot(xl, np.polyval(fit, xl), color="#8E8E93", linewidth=2, zorder=1)
 a2.scatter(C, br, s=64, color="#007AFF", edgecolors="#000000", linewidths=2, zorder=2)
 a2.set_xlabel("Gaia BP−RP (bluer to the left)"); a2.set_ylabel("Our B−R magnitudes")
 a2.set_title(f"Our colour against Gaia: slope {fit[0]:.2f}, scatter {1.4826 * np.median(np.abs(res - np.median(res))):.2f} mag", loc="left", fontsize=13)
-fig.suptitle("fshq, night of 2026-10-30, all frames, before 03:45, no IR filter", x=0.01, ha="left", color="#8E8E93", fontsize=11)
+fig.suptitle("hqfs, night of 2026-10-30, all frames, before 03:45, no IR filter", x=0.01, ha="left", color="#8E8E93", fontsize=11)
 fig.tight_layout(rect=(0, 0, 1, 0.96))
 fig.savefig(f"{OUT}/star_colours.png", facecolor="#000000")

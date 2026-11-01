@@ -1,11 +1,11 @@
 {
   "name": "xoverpi",
-  "label": "FirstScope fshq",
+  "label": "FirstScope hqfs",
   "host": "xoverpi",
   "sensor": "IMX477",
   "bayer": "SBGGR12",
-  "bayer_order_notes": "fshq frames are truly SBGGR: asking libcamera for SRGGB12 on this camera delivers SBGGR12 (astro-capture 2026-10-31: raw stream reports SBGGR12, sensor rotation 180; stars against Gaia BP-RP give a B-R slope of +0.48 swapped, -0.48 as labelled). FITS BAYERPAT says SRGGB on frames from 2026-10-30: the header is wrong. The pipeline reads the order from here, not from the header.",
-  "bayer_notes": "fshq, Raspberry Pi HQ camera, since 2026-10-14. The OV5647 notes in this file describe the earlier sensor (2026-09-14..2026-10-13).",
+  "bayer_order_notes": "hqfs frames are truly SBGGR: asking libcamera for SRGGB12 on this camera delivers SBGGR12 (astro-capture 2026-10-31: raw stream reports SBGGR12, sensor rotation 180; stars against Gaia BP-RP give a B-R slope of +0.48 swapped, -0.48 as labelled). FITS BAYERPAT says SRGGB on frames from 2026-10-30: the header is wrong. The pipeline reads the order from here, not from the header.",
+  "bayer_notes": "hqfs, Raspberry Pi HQ camera, since 2026-10-14. The OV5647 notes in this file describe the earlier sensor (2026-09-14..2026-10-13).",
   "pedestal": 200,
   "pedestal_notes": "CHART FLOOR ONLY, same place as hq16's 200 (same sensor, 12-bit). Charts count stops from black_level (brightness.chart_zero).",
   "max_neutral": 1.0,
@@ -18,7 +18,7 @@
   "sky_clear_ref_exptime": 12,
   "sky_clear_ref_exptime_notes": "Darkest-sky bits in summary.json are put on a 12 s basis, the sub length from 2026-10-31, so nights compare; 10-30's 3 s subs read 2 bits higher than they measured.",
   "black_level": 256,
-  "black_level_notes": "Taken from eclipticam-hq16 (same sensor, 12-bit). NOT yet measured on fshq: take darks.",
+  "black_level_notes": "Taken from eclipticam-hq16 (same sensor, 12-bit). NOT yet measured on hqfs: take darks.",
   "resolution": [
     4056,
     3040
@@ -69,7 +69,7 @@
     "focus_reachable": true,
     "focus_reachable_notes": "CONFIRMED 2026-09-14 by imaging a sycamore at 35 m: the sensor reaches focus at prime focus and the image circle covers the full frame with no vignetting. This was flagged as a potentially fatal unknown and is now closed. Focusing at 35 m sits f^2/(d-f) = 300^2/(35000-300) = 2.59 mm OUTSIDE the infinity position, so going from the tree to stars means racking IN 2.59 mm.",
     "ir_cut": false,
-    "ir_cut_notes": "fshq had its IR filter removed with the collar on 2026-10-29, so this is a panchromatic camera reaching into the near-infrared. Earlier OV5647 notes: The OV5647's IR-cut filter lives in the lens assembly, which is removed to reach prime focus - so this is now a panchromatic camera. Measured on the 35 m frames: R/G 1.16-1.32 and B/G 1.06-1.10 on a foliage scene that should be strongly green-dominant, the near-IR wood effect. For a MIRROR this is close to free signal (no chromatic aberration to smear the extra band), but colour is meaningless and NIR skyglow adds background.",
+    "ir_cut_notes": "hqfs had its IR filter removed with the collar on 2026-10-29, so this is a panchromatic camera reaching into the near-infrared. Earlier OV5647 notes: The OV5647's IR-cut filter lives in the lens assembly, which is removed to reach prime focus - so this is now a panchromatic camera. Measured on the 35 m frames: R/G 1.16-1.32 and B/G 1.06-1.10 on a foliage scene that should be strongly green-dominant, the near-IR wood effect. For a MIRROR this is close to free signal (no chromatic aberration to smear the extra band), but colour is meaningless and NIR skyglow adds background.",
     "notes": "Celestron FirstScope, International Year of Astronomy 2009 edition (21024-IYA). NO tracking and NO finder - both are operational constraints on the capture design, not footnotes. The absent finder is the live obstacle to acquiring a target in a 0.69 x 0.52 deg field (1.3 x 1.0 moon diameters)."
   },
   "drift": {
@@ -110,7 +110,7 @@
     },
     "2": {
       "dates": "2026-10-30..",
-      "notes": "fshq (IMX477): cast collar and IR filter removed 2026-10-29, sensor no longer dust-sealed. Own bandpass, reaching into the near-infrared. Focus set in daylight to about 2.9 mm inward of a ball at ~32 m (2026-10-30), good to about 0.5 mm; first stars must refine it. Focus, flats and the dots offset all restart."
+      "notes": "hqfs (IMX477): cast collar and IR filter removed 2026-10-29, sensor no longer dust-sealed. Own bandpass, reaching into the near-infrared. Focus set in daylight to about 2.9 mm inward of a ball at ~32 m (2026-10-30), good to about 0.5 mm; first stars must refine it. Focus, flats and the dots offset all restart."
     }
   }
 }

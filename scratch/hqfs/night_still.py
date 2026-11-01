@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fshq 2026-10-30, whole-night still: every frame, derotated about the pole, 2k colour, no deconvolution.
+"""hqfs 2026-10-30, whole-night still: every frame, derotated about the pole, 2k colour, no deconvolution.
 Known stars, found in the 1-in-10 still, are masked out of the background estimate."""
 import glob, os, time
 for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):

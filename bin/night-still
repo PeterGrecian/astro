@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """night-still: the whole night derotated about the pole, and what it shows.
 
-For an untracked camera near the pole (fshq). Reads each night's frames once,
+For an untracked camera near the pole (hqfs). Reads each night's frames once,
 then writes to the night dir:
   night-still.jpg     colour still, 2000 px wide plus a black border
   night-still.json    its geometry, the arguments bin/annotate-night-still takes
@@ -42,7 +42,7 @@ import numpy as np                                   # noqa: E402
 from astropy.io import fits                          # noqa: E402
 from astropy.table import Table                      # noqa: E402
 from astropy.wcs import WCS                          # noqa: E402
-from PIL import Image                                # noqa: E402
+from PIL import Image, ImageDraw, ImageFont          # noqa: E402
 from scipy import ndimage as ndi                     # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -60,6 +60,7 @@ MIRRORS = ("vizier.idia.ac.za", "vizier.cds.unistra.fr", "vizier.cfa.harvard.edu
 HIST_BINS = np.arange(4.0, 12.51, 0.5)
 CROPS = 24
 CROP_R = 60              # superpixels
+TILE = 242               # sheet pixels
 
 
 def log(start, *a):
@@ -77,6 +78,17 @@ class Frames:
             if m:
                 items.append((m[1], int(m[2]), f))
         items.sort()
+        # excluded-frames.json in the night dir lists spells to leave out, such as a light left on.
+        # Dropping them here is safe for the sky clock: when() works from run and sequence number.
+        skip = Path(night_dir) / "excluded-frames.json"
+        if skip.exists():
+            def key(name):
+                m = re.match(r"(?:.*/)?(\d{8}T\d{6}Z)-(\d+)\.fits\.fz$", name)
+                return m[1], int(m[2])
+            spans = [(key(r["first_file"]), key(r["last_file"])) for r in json.loads(skip.read_text())["ranges"]]
+            kept = [i for i in items if not any(a <= (i[0], i[1]) <= b for a, b in spans)]
+            print(f"excluded-frames.json: left out {len(items) - len(kept)} of {len(items)} frames", flush=True)
+            items = kept
         self.items = items
         if not items:
             return
@@ -481,7 +493,7 @@ def star_counts(img, depth, good, cat, w, cv, fr, tm, per_s, a, out, start):
     ax.set_xlabel("Gaia G magnitude (fainter to the right)")
     ax.set_ylabel("Stars per 0.5 mag")
     half = f", half found at G {g50:.1f}" if g50 else ""
-    ax.set_title(f"fshq, night of {a['night']}: stars by Gaia G{half}", loc="left", fontsize=13, color="#E0E0E0")
+    ax.set_title(f"hqfs, night of {a['night']}: stars by Gaia G{half}", loc="left", fontsize=13, color="#E0E0E0")
     ax.legend(loc="upper left", frameon=False, labelcolor="#E0E0E0")
     fig.tight_layout()
     fig.savefig(out / "star-counts.png", facecolor="#000000")
@@ -527,11 +539,25 @@ def star_counts(img, depth, good, cat, w, cv, fr, tm, per_s, a, out, start):
     a2.set_xlabel("Gaia BP−RP (bluer to the left)")
     a2.set_ylabel("Our B−R magnitudes")
     a2.set_title(f"Our colour against Gaia: slope {fit[0]:.2f}, scatter {scat:.2f} mag", loc="left", fontsize=13)
-    fig.suptitle(f"fshq, night of {a['night']}, no IR filter", x=0.01, ha="left", color="#8E8E93", fontsize=11)
+    fig.suptitle(f"hqfs, night of {a['night']}, no IR filter", x=0.01, ha="left", color="#8E8E93", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out / "star-colours.png", facecolor="#000000")
     plt.close(fig)
     log(start, f"star colours: slope {fit[0]:.2f}, scatter {scat:.2f}, {len(G)} stars")
+
+
+def scale_footer(sheet):
+    """every close-up carries a scale (house rule): the bar is drawn at the tiles' own size"""
+    per_px = SUPERPIXEL_ARCSEC * (2 * CROP_R + 1) / TILE      # arcsec per sheet pixel
+    bar = int(round(5 * 60 / per_px))
+    h, w = sheet.shape[:2]
+    foot = Image.new("RGB", (w, 44), "black")
+    d = ImageDraw.Draw(foot)
+    d.rectangle((8, 16, 8 + bar, 21), fill=(224, 224, 224))
+    tile_arcmin = TILE * per_px / 60
+    d.text((bar + 20, 12), f"5 arcmin   each tile {tile_arcmin:.1f} arcmin across, "
+           f"{per_px:.2f} arcsec per pixel here", fill=(224, 224, 224), font=ImageFont.load_default(16))
+    return np.vstack([sheet, np.asarray(foot)])
 
 
 def crop_sheet(boxes, nbox, path):
@@ -554,16 +580,16 @@ def crop_sheet(boxes, nbox, path):
         noise = max(1.4826 * np.median(np.abs(rgb.mean(axis=0))), 1e-3)
         tile = np.clip(np.arcsinh(np.clip(rgb, 0, None) / (2 * noise)) / np.arcsinh(max(top, 3 * noise) / (2 * noise)), 0, 1)
         tile = (255 * tile.transpose(1, 2, 0)).astype(np.uint8)
-        tiles.append((colour, np.asarray(Image.fromarray(tile).resize((242, 242), Image.BICUBIC))))
+        tiles.append((colour, np.asarray(Image.fromarray(tile).resize((TILE, TILE), Image.BICUBIC))))
     tiles.sort(key=lambda t: t[0])
     cols = 6
     rows = (len(tiles) + cols - 1) // cols
     gap = 8
-    sheet = np.zeros((rows * (242 + gap) + gap, cols * (242 + gap) + gap, 3), np.uint8)
+    sheet = np.zeros((rows * (TILE + gap) + gap, cols * (TILE + gap) + gap, 3), np.uint8)
     for i, (_, t) in enumerate(tiles):
         r, c = divmod(i, cols)
-        sheet[gap + r * (242 + gap):gap + r * (242 + gap) + 242, gap + c * (242 + gap):gap + c * (242 + gap) + 242] = t
-    Image.fromarray(sheet).save(path, quality=92)
+        sheet[gap + r * (TILE + gap):gap + r * (TILE + gap) + TILE, gap + c * (TILE + gap):gap + c * (TILE + gap) + TILE] = t
+    Image.fromarray(scale_footer(sheet)).save(path, quality=92)
     return len(tiles)
 
 

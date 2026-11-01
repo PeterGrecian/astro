@@ -406,7 +406,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     done
 fi
 
-# --- 2a. night still: fshq's whole night derotated about the pole, and what it
+# --- 2a. night still: hqfs's whole night derotated about the pole, and what it
 # shows (bin/night-still, astro-capture). Exit 3 means no stars, so no still; any
 # failure costs this product, never the night. Built only if missing, so a
 # re-publish does not redo it. SKIP_NIGHT_STILL=1 skips it.
@@ -479,7 +479,7 @@ names = [
     "brightness.png",
     "max.jpg",
     "derot.jpg",
-    # fshq: astro-capture's derotated still and star-count chart, once its
+    # hqfs: astro-capture's derotated still and star-count chart, once its
     # commands write them to the night dir. Absent files are simply skipped.
     "night-still.jpg",
     "night-still.json",

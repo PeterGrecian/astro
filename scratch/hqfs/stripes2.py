@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed and per-frame banding in fshq frames, ignoring the ends of each line profile."""
+"""Fixed and per-frame banding in hqfs frames, ignoring the ends of each line profile."""
 import numpy as np
 from astropy.io import fits
 

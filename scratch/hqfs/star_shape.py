@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Are the fshq detections stars? Remove fixed pattern, track objects between frames, show the brightest."""
+"""Are the hqfs detections stars? Remove fixed pattern, track objects between frames, show the brightest."""
 import glob, os
 import numpy as np
 from astropy.io import fits
