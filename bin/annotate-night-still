@@ -24,7 +24,7 @@ from math import atan2, cos, hypot, pi, radians, sin
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 SIDEREAL_ARCSEC_PER_S = 15.0411
@@ -54,6 +54,27 @@ def geometry(a):
     out_h = int((y1 - y0 + 1) / scale) + 1
     radius = max(hypot(x - px, y - py) for x, y in corners) / scale
     return (-x0 / scale + a.border, -y0 / scale + a.border), scale, radius, out_h
+
+
+def field_mask(a, size, offset, scale):
+    """White where the stack has sky: the frame's rectangle swept about the pole,
+    in the still's pixels. Everything else is surround."""
+    w, h = a.frame_size
+    px, py = a.pole
+    per_frame = radians(SIDEREAL_ARCSEC_PER_S * a.cadence / 3600)
+    fc = ((w - 1) / 2 - px, (h - 1) / 2 - py)
+    spin = -pi / 2 - atan2(fc[1], fc[0])
+    mask = Image.new("L", size, 0)
+    d = ImageDraw.Draw(mask)
+    # A step of about 0.1 deg: far smaller than the frame, so the union is solid.
+    step = max(1, int(radians(0.1) / per_frame))
+    for n in list(range(a.seq_first, a.seq_last, step)) + [a.seq_last]:
+        th = per_frame * (n - a.seq_mid) + spin
+        c, s = cos(th), sin(th)
+        d.polygon([(offset[0] + (c * (x - px) - s * (y - py)) / scale,
+                    offset[1] + (s * (x - px) + c * (y - py)) / scale)
+                   for x, y in ((0, 0), (w - 1, 0), (w - 1, h - 1), (0, h - 1))], fill=255)
+    return mask
 
 
 def clock(t):
@@ -87,6 +108,8 @@ def main():
                     help="Polaris in the stacker's canvas, before its border")
     ap.add_argument("--out-width", type=int, default=2000)
     ap.add_argument("--border", type=int, default=100)
+    ap.add_argument("--surround", default="#000000",
+                    help="colour outside the arch; the arch itself is left untouched")
     a = ap.parse_args()
     if a.geometry:
         for key, value in json.loads(a.geometry.read_text()).items():
@@ -102,8 +125,12 @@ def main():
                          f"({a.out_width + 2 * a.border}, {out_h + 2 * a.border})")
     # Room outside the stacker's border for the timeline's labels.
     pad_x, pad_top, pad_bottom = 70, 130, 40
-    canvas = Image.new("RGB", (im.width + 2 * pad_x, im.height + pad_top + pad_bottom))
-    canvas.paste(im, (pad_x, pad_top))
+    surround = ImageColor.getrgb(a.surround)
+    canvas = Image.new("RGB", (im.width + 2 * pad_x, im.height + pad_top + pad_bottom), surround)
+    canvas.paste(im, (pad_x, pad_top), field_mask(a, im.size, (pole_x, pole_y), scale))
+    # Mid grey on black, so the stars stay the brightest thing; near black on a
+    # surround that mid grey would vanish into.
+    ink = GREY if sum(surround) / 3 < 80 else "#1C1C1E"
     pole_x += pad_x
     pole_y += pad_top
     d = ImageDraw.Draw(canvas)
@@ -128,13 +155,13 @@ def main():
     t += timedelta(hours=1)
     while t <= t_last:
         x, y = at(t, field_r + 42)
-        d.text((x, y), clock(t), fill=GREY, font=small, anchor="mm")
+        d.text((x, y), clock(t), fill=ink, font=small, anchor="mm")
         t += timedelta(hours=1)
 
     # The pole.
-    d.line([(pole_x - 18, pole_y), (pole_x + 18, pole_y)], fill=GREY, width=2)
-    d.line([(pole_x, pole_y - 18), (pole_x, pole_y + 18)], fill=GREY, width=2)
-    d.text((pole_x, pole_y + 44), "celestial pole", fill=GREY, font=small, anchor="mm")
+    d.line([(pole_x - 18, pole_y), (pole_x + 18, pole_y)], fill=ink, width=2)
+    d.line([(pole_x, pole_y - 18), (pole_x, pole_y + 18)], fill=ink, width=2)
+    d.text((pole_x, pole_y + 44), "celestial pole", fill=ink, font=small, anchor="mm")
 
     # Polaris, from a plate solve: usually in the empty middle of the arch.
     if a.polaris:
@@ -142,8 +169,8 @@ def main():
         if not (0 <= x < canvas.width and 0 <= y < canvas.height):
             a.polaris = None
     if a.polaris:
-        d.ellipse([x - 18, y - 18, x + 18, y + 18], outline=GREY, width=2)
-        d.text((x - 32, y), "Polaris", fill=GREY, font=small, anchor="rm")
+        d.ellipse([x - 18, y - 18, x + 18, y + 18], outline=ink, width=2)
+        d.text((x - 32, y), "Polaris", fill=ink, font=small, anchor="rm")
 
     # One degree, above the pole, inside the arch: |--- 1 deg ---|
     arcsec_per_px = a.arcsec_per_px or scale * a.arcsec_per_superpixel
@@ -151,11 +178,11 @@ def main():
     y = pole_y - 190
     x0, x1 = pole_x - deg_px / 2, pole_x + deg_px / 2
     gap = d.textlength("1\u00b0", font=small) / 2 + 12
-    d.line([(x0, y), (pole_x - gap, y)], fill=GREY, width=2)
-    d.line([(pole_x + gap, y), (x1, y)], fill=GREY, width=2)
+    d.line([(x0, y), (pole_x - gap, y)], fill=ink, width=2)
+    d.line([(pole_x + gap, y), (x1, y)], fill=ink, width=2)
     for x in (x0, x1):
-        d.line([(x, y - 12), (x, y + 12)], fill=GREY, width=2)
-    d.text((pole_x, y), "1\u00b0", fill=GREY, font=small, anchor="mm")
+        d.line([(x, y - 12), (x, y + 12)], fill=ink, width=2)
+    d.text((pole_x, y), "1\u00b0", fill=ink, font=small, anchor="mm")
 
     canvas.save(a.output, quality=90)
     print(f"{a.output}: {canvas.size}, pole at ({pole_x:.0f}, {pole_y:.0f}), "
