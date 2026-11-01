@@ -39,9 +39,9 @@ from matplotlib.ticker import FuncFormatter
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 from astro.process.brightness import sky_mag_for
-from astro.process.brightness import (chart_zero, darkest_anchor,
-                                      daylight_keep_mask, excluded_spells, find_night_csvs, in_spells,
-                                      lsb_align)
+from astro.process.brightness import (brightness_baselines, chart_zero, darkest_anchor,
+                                      daylight_keep_mask, draw_baselines, excluded_spells,
+                                      find_night_csvs, in_spells, lsb_align, night_exptime)
 
 LONDON = ZoneInfo("Europe/London")
 
@@ -75,21 +75,6 @@ def load_curve(csv_path: Path, pedestal=None):
     # change but are a bit-alignment change. See brightness.lsb_align.
     vals, _was_msb = lsb_align(np.array([r[1] for r in rows]), pedestal)
     return np.array([r[0] for r in rows]), vals
-
-
-def night_exptime(csv_path: Path):
-    """EXPTIME of the night's frames: the CSV's exptime column (nightly-cam
-    writes it from 2026-10-09), else the header of the first frame the CSV
-    names (older nights). None if neither is readable."""
-    try:
-        with open(csv_path, newline="") as f:
-            first = next(csv.DictReader(f))
-        if first.get("exptime"):
-            return float(first["exptime"])
-        from astropy.io import fits
-        return float(fits.getheader(first["filename"], 1)["EXPTIME"])
-    except Exception:
-        return None
 
 
 def to_anchor_axis(times, night_str: str):
@@ -286,6 +271,18 @@ def main():
     if not plotted:
         print("no curves plotted", file=sys.stderr)
         return 1
+
+    # Baselines: darkest ever and 4-week lowest, as of the latest night, on
+    # the same exposure basis as the curves. Drawn on the wall clock like them.
+    lo_x = min(a for a, _ in x_seen)
+    hi_x = max(b for _, b in x_seen)
+    if ref_exp:
+        def bin_x(k):
+            day = datetime(2000, 1, 1, 12, tzinfo=LONDON) + timedelta(days=1 if k < 720 else 0)
+            return to_anchor_axis([day.replace(hour=k // 60, minute=k % 60)], latest_night)[0]
+        for h in draw_baselines(ax, brightness_baselines(cfg, fixed_pedestal, latest_night),
+                                bin_x, float(ref_exp), lo_x, hi_x):
+            ax.plot([], [], color=h.get_color(), linewidth=h.get_linewidth(), label=h.get_label())
 
     ax.set_yscale("log", base=2)
     ax.yaxis.set_major_formatter(FuncFormatter(

@@ -8,7 +8,8 @@ y log base 2 so each gridline is one stop.
 """
 import csv
 import json
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -258,45 +259,153 @@ def in_spells(t, spells):
 
 
 BASELINE_BIN_MIN = 15
+BASELINE_MIN_FRAMES = 3     # a bin of one or two frames is noise, not a sky level
+BASELINE_RECENT_DAYS = 28
 
 
-def darkest_baseline(cfg, pedestal):
-    """The darkest sky yet at each clock time, in signal per second: for each
-    15-minute bin of London time, the lowest of the nights' bin medians.
-
-    Only nights from camera.json's brightness_baseline_since count, because
-    another sensor or gain is not comparable. Listed spells and closed-cover
-    frames are left out. Returns ({minutes since midnight: per_s}, n_nights, since),
-    or None when the camera sets no start date."""
-    since = cfg.get("brightness_baseline_since") if cfg is not None else None
-    if not since:
+def night_exptime(csv_path):
+    """EXPTIME of a night's frames: the CSV's exptime column (nightly-cam
+    writes it from 2026-10-09), else the header of the first frame the CSV
+    names (older nights). None if neither is readable."""
+    try:
+        with open(csv_path, newline="") as f:
+            first = next(csv.DictReader(f))
+        if first.get("exptime"):
+            return float(first["exptime"])
+        from astropy.io import fits
+        return float(fits.getheader(first["filename"], 1)["EXPTIME"])
+    except Exception:
         return None
-    best, n_nights = {}, 0
-    for night, path in find_night_csvs(cfg):
-        if night < since:
+
+
+@lru_cache(maxsize=None)
+def _night_bins(csv_path: str, mtime: float, pedestal: float, msb_pedestal):
+    """One night as {minutes since London midnight, 15-minute bin: median
+    signal per second}. Cached because replotting an archive asks for every
+    earlier night once per chart."""
+    path = Path(csv_path)
+    exptime = night_exptime(path)
+    if not exptime:
+        return {}
+    spells = excluded_spells(path.parent)
+    times, means = [], []
+    with open(path, newline="") as fh:
+        for r in csv.DictReader(fh):
+            if r.get("cover") in ("closed", "moving"):
+                continue
+            try:
+                t = datetime.fromisoformat(r["iso_utc"])
+                v = float(r["mean"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            if not in_spells(t, spells):
+                times.append(t.astimezone(LONDON))
+                means.append(v)
+    if not means:
+        return {}
+    # Some nights are stored MSB-aligned; without this they sit 6 stops high.
+    aligned, _ = lsb_align(means, msb_pedestal)
+    bins = {}
+    for t, v in zip(times, aligned):
+        k = (t.hour * 60 + t.minute) // BASELINE_BIN_MIN * BASELINE_BIN_MIN
+        bins.setdefault(k, []).append((float(v) - pedestal) / exptime)
+    return {k: float(np.median(vs)) for k, vs in bins.items()
+            if len(vs) >= BASELINE_MIN_FRAMES}
+
+
+def brightness_baselines(cfg, pedestal, night: str):
+    """The two baselines a camera's brightness charts draw, each in signal per
+    second by 15-minute bin of London clock time, as of `night`:
+
+      "ever":   the lowest of every night's bin medians since camera.json's
+                brightness_baseline_since, because another sensor or gain is
+                not comparable;
+      "recent": the same over the 28 days up to `night`, about one moon, so
+                some of them are moonless whatever the phase tonight.
+
+    Nights after `night` never count: a chart says the same thing whenever it
+    is replotted. Listed spells and closed-cover frames are left out. Returns
+    {"ever": (bins, n_nights, since), "recent": (bins, n_nights, since)}, or
+    {} when the camera sets no start date or has no usable night."""
+    since = cfg.get("brightness_baseline_since") if cfg is not None else None
+    if not since or pedestal is None:
+        return {}
+    recent_since = (date.fromisoformat(night)
+                    - timedelta(days=BASELINE_RECENT_DAYS - 1)).isoformat()
+    ever, recent, n_ever, n_recent = {}, {}, 0, 0
+    msb_pedestal = cfg.get("pedestal")
+    for n, path in find_night_csvs(cfg):
+        if n < since or n > night:
             continue
-        spells = excluded_spells(path.parent)
-        bins = {}
-        with open(path, newline="") as fh:
-            for r in csv.DictReader(fh):
-                if r.get("cover") in ("closed", "moving"):
-                    continue
-                try:
-                    t = datetime.fromisoformat(r["iso_utc"])
-                    v = (float(r["mean"]) - pedestal) / float(r["exptime"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if in_spells(t, spells):
-                    continue
-                t = t.astimezone(LONDON)
-                k = (t.hour * 60 + t.minute) // BASELINE_BIN_MIN * BASELINE_BIN_MIN
-                bins.setdefault(k, []).append(v)
-        if bins:
-            n_nights += 1
-        for k, vs in bins.items():
-            m = float(np.median(vs))
-            best[k] = min(best.get(k, m), m)
-    return (best, n_nights, since) if best else None
+        bins = _night_bins(str(path), path.stat().st_mtime, float(pedestal), msb_pedestal)
+        if not bins:
+            continue
+        n_ever += 1
+        for k, v in bins.items():
+            ever[k] = min(ever.get(k, v), v)
+        if n >= recent_since:
+            n_recent += 1
+            for k, v in bins.items():
+                recent[k] = min(recent.get(k, v), v)
+    if not ever:
+        return {}
+    return {"ever": (ever, n_ever, since),
+            "recent": (recent, n_recent, max(recent_since, since))}
+
+
+def brightness_night_exptime(cfg, night: str):
+    """night_exptime for `night` of this camera, or None."""
+    if cfg is None:
+        return None
+    for n, path in find_night_csvs(cfg):
+        if n == night:
+            return night_exptime(path)
+    return None
+
+
+BASELINE_STYLES = {
+    # Same grey family so they read as references, not as nights. Recent goes
+    # under and wider, so where they coincide both still show.
+    "recent": dict(color="#8E8E93", linewidth=2.2, zorder=5),
+    "ever": dict(color="#3A3A3C", linewidth=1.1, zorder=6),
+}
+
+
+def baseline_label(key, curve):
+    if key == "ever":
+        return f"darkest ever at this time ({curve[1]} nights since {curve[2]})"
+    return f"lowest of the last 4 weeks at this time ({curve[1]} nights)"
+
+
+def draw_baselines(ax, curves, to_x, exptime, lo=None, hi=None):
+    """Step-draw brightness_baselines() on `ax`, on an exposure basis of
+    `exptime` seconds. `to_x(minutes)` places a bin on the chart's time axis;
+    a bin outside lo..hi is not drawn and a bin no night covered breaks the
+    line. Returns legend handles for what was drawn."""
+    handles = []
+    for key in ("recent", "ever"):
+        if key not in curves:
+            continue
+        pts = sorted((to_x(k), max(per_s * exptime, 0.5))
+                     for k, per_s in curves[key][0].items())
+        width = timedelta(minutes=BASELINE_BIN_MIN)
+        pts = [p for p in pts if (lo is None or p[0] + width >= lo) and (hi is None or p[0] <= hi)]
+        if not pts:
+            continue
+        xs, ys = [], []
+        for i, (x, y) in enumerate(pts):
+            xs.append(x)
+            ys.append(y)
+            if i + 1 == len(pts) or pts[i + 1][0] - x > width:
+                xs += [x + width, x + width]    # close this step, then a gap
+                ys += [y, float("nan")]
+        ax.step(xs, ys, where="post", **BASELINE_STYLES[key])
+        style = BASELINE_STYLES[key]
+        handles.append(Line2D([0], [0], color=style["color"], linewidth=style["linewidth"],
+                              label=baseline_label(key, curves[key])))
+    return handles
 
 
 def plot_night(rows, night: str, camera: str, out_path: Path,
@@ -508,22 +617,17 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
         except (ValueError, TypeError):
             pass
 
-    # Darkest sky yet at each clock time, on this night's exposure basis
-    baseline = darkest_baseline(cfg, pedestal) if zero_label == "black level" else None
+    # Darkest ever and 4-week lowest at each clock time, on this night's exposure basis
+    baseline_handles = []
     ex_now = np.array(exptimes)
     ex_now = ex_now[np.isfinite(ex_now) & (ex_now > 0)]
-    if baseline and ex_now.size:
+    night_exp = float(np.median(ex_now)) if ex_now.size else brightness_night_exptime(cfg, night)
+    if night_exp:
         night_day = datetime.fromisoformat(night).replace(tzinfo=LONDON)
-        pts = []
-        for k, per_s in baseline[0].items():
-            day = night_day + timedelta(days=1 if k < 12 * 60 else 0)
-            tb = day.replace(hour=k // 60, minute=k % 60)
-            if min(times) - timedelta(minutes=BASELINE_BIN_MIN) <= tb <= max(times):
-                pts.append((tb, max(per_s * float(np.median(ex_now)), 0.5)))
-        pts.sort()
-        if pts:
-            ax_sky.step([p[0] for p in pts], [p[1] for p in pts], where="post",
-                        color="#3A3A3C", linewidth=1.3, zorder=6)
+        baseline_handles = draw_baselines(
+            ax_sky, brightness_baselines(cfg, pedestal, night),
+            lambda k: (night_day + timedelta(days=1 if k < 12 * 60 else 0)).replace(hour=k // 60, minute=k % 60),
+            night_exp, min(times), max(times))
 
     # Spells left out: torn off at the top rather than stretching the axis to them
     for (lo, hi, reason), peak in zip(spells, spell_peak):
@@ -545,9 +649,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
 
     # Legend on sky plot
     legend_elements = []
-    if baseline and ex_now.size:
-        legend_elements.append(Line2D([0], [0], color='#3A3A3C', linewidth=1.3,
-                                      label=f'darkest yet at this clock time ({baseline[1]} nights since {baseline[2]})'))
+    legend_elements += baseline_handles
     if np.any(open_mask):
         legend_elements.append(Line2D([0], [0], marker='o', color='w',
                                       markerfacecolor='#007AFF', markersize=6,
@@ -672,6 +774,15 @@ def find_night_csvs(cfg):
     # v3w_brightness.csv). Accept both so pre-migration reference nights
     # (e.g. the dark 2026-06-10) still plot.
     subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
+    # A camera whose products sit in night/<night>/<subcam>/ must not pick up
+    # the night-level CSV, which belongs to the camera sharing its tree
+    # (eclipticam-hq16 was charting v3w's nights).
+    if cfg.get("night_output") == "subcam":
+        for d in sorted(nights_root.iterdir()):
+            cand = d / subcam / name
+            if cand.exists():
+                yield d.name, cand
+        return
     for d in sorted(nights_root.iterdir()):
         for cand in (d / name, d / f"{subcam}_{name}"):
             if cand.exists():
