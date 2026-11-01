@@ -8,7 +8,7 @@ solve is only for pairing. A solve whose stars fill part of an arch extrapolates
 (two solves of 2026-10-31 put Polaris 26 px apart), while this fit left 1.1-1.4 px rms and each
 still's pole about 40 arcsec from the true pole.
 
-Polaris is straight down from the pole. Where nights overlap the deepest (star-counts g50) shows;
+Polaris is straight up from the pole, how the sky stands at midnight in late October. Where nights overlap the deepest (star-counts g50) shows;
 they are not stacked. A night that fits badly is left out and named in the log.
 
     night-still-composite --camera xoverpi [--publish]
@@ -162,6 +162,7 @@ def place(night_dir, gaia, equinox):
     if counts.exists():
         depth = json.loads(counts.read_text()).get("g50")
     return SimpleNamespace(name=night_dir.name, img=img, mask=mask, pole=(px, py), fit=fit,
+                           inner=ann.inner_radius(a, scale),
                            g50=depth if depth is not None else 0.0), None
 
 
@@ -213,7 +214,7 @@ def main():
 
     arc = min(n.fit["arcsec_per_px"] for n in nights)
     s_pol = plane(np.array([POLARIS[0]]), np.array([POLARIS[1]]), equinox)[0]
-    k = np.exp(1j * (np.pi / 2 - np.angle(s_pol))) / arc   # canvas = k * sky: Polaris straight down
+    k = np.exp(1j * (-np.pi / 2 - np.angle(s_pol))) / arc   # canvas = k * sky: Polaris straight up
     # Sky as far out as any night reaches, measured on each still.
     r_px = 0.0
     for n in nights:
@@ -251,7 +252,11 @@ def main():
     font = ImageFont.truetype(ann.FONT, 34)
     d.line([(cx - 18, cy), (cx + 18, cy)], fill=GREY, width=2)
     d.line([(cx, cy - 18), (cx, cy + 18)], fill=GREY, width=2)
-    d.text((cx, cy - 44), "celestial pole", fill=GREY, font=font, anchor="mm")
+    d.text((cx, cy + 44), "celestial pole", fill=GREY, font=font, anchor="mm")
+    # North, just inside the sky at the top: the nearest any night comes to the pole there.
+    inner = min(n.inner * n.fit["arcsec_per_px"] / arc for n in nights)
+    if inner > 300:
+        ann.north_arrow(d, cx, cy - inner, GREY, font)
     pol = k * s_pol
     px, py = cx + pol.real, cy + pol.imag
     d.ellipse([px - 18, py - 18, px + 18, py + 18], outline=GREY, width=2)
