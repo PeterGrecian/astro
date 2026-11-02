@@ -6,8 +6,7 @@ position sits straight above the celestial pole. The field then swings clockwise
 about the pole, so the evening is bottom left and dawn bottom right. This adds:
   - the hours round the outside of the arch, London time, each marking where
     the centre of the field was at that moment,
-  - the celestial pole, Polaris if its position is given, a degree scale, and
-    an arrow to north at the top of the arch.
+  - the celestial pole, Polaris if its position is given, and a degree scale.
 
 The geometry must match the still's stacker (astro/scratch/hqfs/night_still.py):
 pole in superpixels of the frame, frame size, middle frame and its time, and the
@@ -76,25 +75,6 @@ def field_mask(a, size, offset, scale):
                     offset[1] + (s * (x - px) + c * (y - py)) / scale)
                    for x, y in ((0, 0), (w - 1, 0), (w - 1, h - 1), (0, h - 1))], fill=255)
     return mask
-
-
-def inner_radius(a, scale):
-    """Output px from the pole to the nearest of the frame: the arch's inner edge.
-    Zero when the pole is inside the frame, so there is no hole to draw in."""
-    w, h = a.frame_size
-    px, py = a.pole
-    dx = max(0 - px, 0, px - (w - 1))
-    dy = max(0 - py, 0, py - (h - 1))
-    return hypot(dx, dy) / scale
-
-
-def north_arrow(d, x, inner_y, ink, font, length=90):
-    """Down from just inside the arch's top towards the pole, which is north from
-    everywhere this close to it. One arrow is only true where it is drawn."""
-    tail, tip = inner_y + 30, inner_y + 30 + length
-    d.line([(x, tail), (x, tip)], fill=ink, width=3)
-    d.polygon([(x, tip + 4), (x - 11, tip - 18), (x + 11, tip - 18)], fill=ink)
-    d.text((x + 20, tail + 18), "N", fill=ink, font=font, anchor="lm")
 
 
 def clock(t):
@@ -182,11 +162,6 @@ def main():
     d.line([(pole_x - 18, pole_y), (pole_x + 18, pole_y)], fill=ink, width=2)
     d.line([(pole_x, pole_y - 18), (pole_x, pole_y + 18)], fill=ink, width=2)
     d.text((pole_x, pole_y + 44), "celestial pole", fill=ink, font=small, anchor="mm")
-
-    # North, where the arch's own top sits. Without a hole there is nowhere to put it.
-    inner = inner_radius(a, scale)
-    if inner > 200:
-        north_arrow(d, pole_x, pole_y - inner, ink, small)
 
     # Polaris, from a plate solve: usually in the empty middle of the arch.
     if a.polaris:

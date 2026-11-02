@@ -6,7 +6,8 @@ Reads every per-night brightness CSV for a camera under the camera's
 frames_root, computes stops above the per-night pedestal, and plots
 one line per night onto a single PNG.
 
-Each night's legend entry carries its dark-trough index: the stops above
+The key names each night by date only, and the baselines D4 and Dx. The
+figures sit under the chart: each night's dark-trough index, the stops above
 pedestal of its darkest 10-minute window, via the same darkest_anchor that
 nightly-cam uses for the clear/cloudy verdict. Lower means a darker sky.
 It replaced a single clear/cloudy threshold line (2026-08-24) — the line
@@ -39,7 +40,7 @@ from matplotlib.ticker import FuncFormatter
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from astro.config import CameraConfig
 from astro.process.brightness import sky_mag_for
-from astro.process.brightness import (brightness_baselines, chart_zero, darkest_anchor,
+from astro.process.brightness import (brightness_baselines, chart_zero, darkest_anchor, notes_below,
                                       daylight_keep_mask, draw_baselines, excluded_spells,
                                       find_night_csvs, in_spells, lsb_align, night_exptime)
 
@@ -212,6 +213,8 @@ def main():
     ref_exp = cfg.get("sky_clear_ref_exptime") or (max(set(known), key=known.count) if known else None)
 
     plotted = 0
+    trough_notes = []    # per night, for the text under the chart
+    baseline_notes = []
     x_seen = []          # anchor-axis extent actually drawn, for set_xlim
     for i, (night_str, csv_p) in enumerate(nights):
         times, vals = load_curve(csv_p, fixed_pedestal)
@@ -236,9 +239,9 @@ def main():
         # was the cut, this is the measurement it was cutting on, graded
         # rather than binary and readable straight off the y-axis.
         trough = dark_trough_stops(times, signal)
-        idx = f"  {trough:5.2f}" if trough is not None else "      -"
+        idx = f"{trough:.2f}" if trough is not None else "-"
         if scale != 1.0:
-            idx += f"  ({e:g} s, x{scale:.1f})"
+            idx += f" ({e:.3g} s subs, \u00d7{scale:.1f})"
         is_latest = night_str == latest_night
         is_ref = night_str in ref_set
         ref_note = ""
@@ -248,15 +251,19 @@ def main():
                 times = np.array([t + shift for t in times], dtype=object)
                 ref_note = f", on {latest_tz.tzname()}"
         xs = to_anchor_axis(times, night_str)
+        # The key is the date alone; the figures go under the chart (Peter, 2026-11-02).
         if is_latest:
             style = dict(linewidth=2.0, linestyle="--", color="black",
-                         zorder=6, label=f"{night_str} (latest){idx}")
+                         zorder=6, label=night_str)
+            trough_notes.append(f"{night_str} {idx} (latest, black dashed)")
         elif is_ref:
             style = dict(linewidth=1.4, linestyle="--", color=cmap(i % 10),
-                         zorder=5, label=f"{night_str} (ref{ref_note}){idx}")
+                         zorder=5, label=night_str)
+            trough_notes.append(f"{night_str} {idx} (reference{ref_note}, dashed)")
         else:
             style = dict(linewidth=1.0, linestyle="-", color=cmap(i % 10),
-                         zorder=2, label=f"{night_str}{idx}")
+                         zorder=2, label=night_str)
+            trough_notes.append(f"{night_str} {idx}")
         # Plot as a thin line (1-min cadence is dense enough that points
         # would overlap into a smear). gapcolor=None keeps any frame-
         # less stretches visibly broken rather than interpolated.
@@ -283,13 +290,14 @@ def main():
         for h in draw_baselines(ax, brightness_baselines(cfg, fixed_pedestal, latest_night),
                                 bin_x, float(ref_exp), lo_x, hi_x):
             ax.plot([], [], color=h.get_color(), linewidth=h.get_linewidth(), label=h.get_label())
+            baseline_notes.append(h.note)
 
     ax.set_yscale("log", base=2)
     ax.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
-    # Just "BST" — the axis is plainly a clock, and the house rule is that
-    # human-facing times are Europe/London, so "local" added nothing.
-    ax.set_xlabel("BST")
+    # Just the zone: the axis is plainly a London clock. Taken from the latest
+    # night, whose clock the chart is on (it said "BST" all winter until 2026-11-02).
+    ax.set_xlabel(latest_tz.tzname() if latest_tz is not None else "London time")
     ax.set_ylabel("sky brightness, bits (stops)")
     # Right axis in sky surface brightness where camera.json calibrates it
     # (sky_mag: astro-science's Gaia G zero point). Stops are log2 of the
@@ -311,7 +319,9 @@ def main():
     # already names and a curve count the reader can see; it told a visitor
     # nothing about what the picture means (Peter, 2026-09-19). The per-night
     # detail still goes to stdout above, where the operator wants it.
-    ax.set_title("How the brightness of the sky changed overnight")
+    # Darkness is what the reader is after; the axis still measures it as a
+    # brightness in bits (Peter, 2026-11-02).
+    ax.set_title("How dark the sky was overnight")
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
     ax.xaxis.set_major_formatter(
@@ -336,15 +346,19 @@ def main():
     hi_floor = hi.replace(minute=0, second=0, microsecond=0)
     hi = hi_floor + timedelta(hours=1) if hi_floor < hi else hi
     ax.set_xlim(lo, hi)
-    # Outside the axes: with 7 entries plus a title the box is tall enough
-    # to sit on top of the dawn rise if left inside the plot.
-    ax.legend(loc="upper left", bbox_to_anchor=(1.12 if sm else 1.01, 1.0), fontsize=9,
-              title="dark trough\n(bits, lower = darker)",
-              title_fontsize=8, borderaxespad=0.0)
+    # Outside the axes, so it never sits on the dawn rise. Names only: dates, D4, Dx.
+    ax.legend(loc="upper left", bbox_to_anchor=(1.12 if sm else 1.01, 1.0), fontsize=8,
+              borderaxespad=0.0, handlelength=1.6)
     fig.autofmt_xdate()
     fig.tight_layout()
+    # Darkest 10 minutes of each night, as many to a line as read comfortably.
+    per_line = 4
+    rows = [" \u00b7 ".join(trough_notes[j:j + per_line])
+            for j in range(0, len(trough_notes), per_line)]
+    notes_below(fig, ["Darkest 10 minutes of each night, sky brightness in bits (lower is darker):"]
+                + ["   " + r for r in rows] + baseline_notes)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=110, facecolor="white")
+    fig.savefig(out_path, dpi=110, facecolor="white", bbox_inches="tight")
     plt.close(fig)
     print(f"daylight filter: {daylight_rule}")
     print(f"wrote {out_path}")

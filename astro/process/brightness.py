@@ -373,17 +373,41 @@ BASELINE_STYLES = {
 }
 
 
+# The key carries only the short names; what they mean, and how many nights
+# each rests on, goes in the notes under the chart (Peter, 2026-11-02).
+BASELINE_KEYS = {"recent": "D4", "ever": "Dx"}
+
+
 def baseline_label(key, curve):
+    return BASELINE_KEYS[key]
+
+
+def baseline_note(key, curve):
     if key == "ever":
-        return f"darkest ever at this time ({curve[1]} nights since {curve[2]})"
-    return f"lowest of the last 4 weeks at this time ({curve[1]} nights)"
+        return f"Dx: darkest ever at this time of night ({curve[1]} nights since {curve[2]})"
+    return f"D4: darkest of the last 4 weeks at this time of night ({curve[1]} nights)"
+
+
+def notes_below(fig, lines, fontsize=8):
+    """Set `lines` as plain text under everything already on `fig` (tick labels,
+    axis label), left-aligned. The chart is saved with bbox_inches="tight", or
+    its tight bbox is grown to take them, so they are not clipped."""
+    lines = [l for l in lines if l]
+    if not lines:
+        return
+    fig.canvas.draw()
+    bb = fig.get_tightbbox(fig.canvas.get_renderer())    # inches
+    w, h = fig.get_size_inches()
+    fig.text(bb.x0 / w, (bb.y0 - 0.08) / h, "\n".join(lines), fontsize=fontsize,
+             color="#3A3A3C", ha="left", va="top", linespacing=1.5)
 
 
 def draw_baselines(ax, curves, to_x, exptime, lo=None, hi=None):
     """Step-draw brightness_baselines() on `ax`, on an exposure basis of
     `exptime` seconds. `to_x(minutes)` places a bin on the chart's time axis;
     a bin outside lo..hi is not drawn and a bin no night covered breaks the
-    line. Returns legend handles for what was drawn."""
+    line. Returns legend handles for what was drawn, each with a `.note`
+    (baseline_note) for the text under the chart."""
     handles = []
     for key in ("recent", "ever"):
         if key not in curves:
@@ -403,8 +427,10 @@ def draw_baselines(ax, curves, to_x, exptime, lo=None, hi=None):
                 ys += [y, float("nan")]
         ax.step(xs, ys, where="post", **BASELINE_STYLES[key])
         style = BASELINE_STYLES[key]
-        handles.append(Line2D([0], [0], color=style["color"], linewidth=style["linewidth"],
-                              label=baseline_label(key, curves[key])))
+        h = Line2D([0], [0], color=style["color"], linewidth=style["linewidth"],
+                   label=baseline_label(key, curves[key]))
+        h.note = baseline_note(key, curves[key])
+        handles.append(h)
     return handles
 
 
@@ -570,8 +596,8 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     ax_sky.yaxis.set_major_formatter(FuncFormatter(
         lambda y, _pos: f"{math.log2(y):.0f}" if y > 0 else ""))
     ax_sky.set_ylabel("sky brightness, bits (stops)")
-    title_suffix = " & environment" if has_env else ""
-    ax_sky.set_title(f"{camera} — night {night} — per-frame brightness{title_suffix}")
+    title_suffix = ", and the box it was seen from" if has_env else ""
+    ax_sky.set_title(f"{camera} — night {night} — how dark the sky was{title_suffix}")
     ax_sky.grid(True, alpha=0.25, linestyle=":")
 
     # Secondary right Y-axis for mag/arcsec²
@@ -647,17 +673,27 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
                     f"reached {peak_bits:.1f} bits", fontsize=8, color="#3A3A3C", ha="left", va="top",
                     transform=ax_sky.get_xaxis_transform(), zorder=9)
 
-    # Legend on sky plot
+    # Legend on sky plot: names only. The figures go in the notes under the chart.
     legend_elements = []
     legend_elements += baseline_handles
+    notes = []
+    frames = [f"{int(open_mask.sum())} frames with the cover open"] if np.any(open_mask) else []
+    if np.any(closed_mask):
+        frames.append(f"{int(closed_mask.sum())} through the closed cover"
+                      + (f", divided by {float(cover_t):g} for its transmission" if cover_t else ""))
+    if np.any(moving_mask):
+        frames.append(f"{int(moving_mask.sum())} while it moved")
+    if frames:
+        notes.append("; ".join(frames) + ".")
+    notes += [h.note for h in baseline_handles]
     if np.any(open_mask):
         legend_elements.append(Line2D([0], [0], marker='o', color='w',
                                       markerfacecolor='#007AFF', markersize=6,
-                                      label=f'open ({open_mask.sum()})'))
+                                      label='open'))
     if np.any(closed_mask):
         legend_elements.append(Line2D([0], [0], marker='o', color='w',
                                       markerfacecolor='#FF9500', markersize=6,
-                                      label=(f'closed ({closed_mask.sum()}, \u00f7{float(cover_t):g})' if cover_t else f'closed ({closed_mask.sum()})')))
+                                      label='closed'))
     if stacked_window_utc:
         legend_elements.append(Line2D([0], [0], color='#FF9500', linestyle='--',
                                       linewidth=1.2, label='stacked window'))
@@ -735,6 +771,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
     fig.autofmt_xdate()
     if not has_env and sm is None:
         fig.tight_layout()
+    notes_below(fig, notes)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=100, facecolor="white", bbox_inches="tight")
     plt.close(fig)

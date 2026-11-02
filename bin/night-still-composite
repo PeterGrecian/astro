@@ -162,7 +162,6 @@ def place(night_dir, gaia, equinox):
     if counts.exists():
         depth = json.loads(counts.read_text()).get("g50")
     return SimpleNamespace(name=night_dir.name, img=img, mask=mask, pole=(px, py), fit=fit,
-                           inner=ann.inner_radius(a, scale),
                            g50=depth if depth is not None else 0.0), None
 
 
@@ -253,10 +252,6 @@ def main():
     d.line([(cx - 18, cy), (cx + 18, cy)], fill=GREY, width=2)
     d.line([(cx, cy - 18), (cx, cy + 18)], fill=GREY, width=2)
     d.text((cx, cy + 44), "celestial pole", fill=GREY, font=font, anchor="mm")
-    # North, just inside the sky at the top: the nearest any night comes to the pole there.
-    inner = min(n.inner * n.fit["arcsec_per_px"] / arc for n in nights)
-    if inner > 300:
-        ann.north_arrow(d, cx, cy - inner, GREY, font)
     pol = k * s_pol
     px, py = cx + pol.real, cy + pol.imag
     d.ellipse([px - 18, py - 18, px + 18, py + 18], outline=GREY, width=2)
