@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""Pointing helper for a fixed (non-tracking) scope: how far to tilt and to rotate it to
+put the celestial pole where we want it in the frame, heard as a repeating note.
+
+The scope does not track, so its field centre is a fixed point in altitude and azimuth.
+A plate solve of one frame gives that point; the target is the pole (altitude = latitude,
+azimuth 0) raised by --above degrees, so the pole sits that far below the field centre.
+
+    tilt error     = target altitude - centre altitude        (deg; + means tilt up)
+    rotation error = target azimuth  - centre azimuth         (deg of turn; + means turn
+                                                              right, east, seen from behind)
+
+This assumes the tilt axis is horizontal and the rotation axis vertical. A tilt-only
+move, solved before and after, measures the real tilt direction on the sky
+(`calibrate`); the map it writes then splits the error along that direction instead.
+
+Sound (Peter, 2026-11-02): the ROTATION error sets the PITCH of a repeating note and the
+TILT error sets its TEMPO, both linear, by size only (a move the wrong way is heard
+rising): 0 deg = 100 Hz and 40 bpm, 5 deg = 500 Hz and 180 bpm.
+
+    pole-point solve FRAME.fits.fz [--above 0.3]      one frame, JSON out
+    pole-point live [--port 8097] [--above 0.3]       solve each new frame, serve the tone page
+    pole-point calibrate --before UTC --after UTC     tilt direction from two logged solves
+
+Runs on muppet, where the frames are. The page: http://192.168.0.10:8097/ on the LAN
+(the phone at the scope), or through a tunnel from zog.
+"""
+import argparse
+import csv
+import glob
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import warnings
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent)); sys.path.insert(0, str(Path.home() / "astro"))
+warnings.filterwarnings("ignore")
+
+import numpy as np                                    # noqa: E402
+from astropy.io import fits                           # noqa: E402
+from astropy.table import Table                       # noqa: E402
+from astropy.wcs import WCS                           # noqa: E402
+from astropy.time import Time                         # noqa: E402
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord  # noqa: E402
+import astropy.units as u                             # noqa: E402
+from scipy import ndimage as ndi                      # noqa: E402
+
+from astro.config import CameraConfig                 # noqa: E402
+from astro.process.bayer import as_pattern            # noqa: E402
+
+CAMERA = "xoverpi"
+SUPERPIXEL_ARCSEC = 4.47          # solved 2026-10-30 and 2026-11-01 (night-still)
+LOG_DIR = Path.home() / "tmp" / "pole-point"
+MAP_FILE = Path(__file__).resolve().parent.parent / CAMERA / "pole-map.json"
+
+
+def location():
+    j = json.loads((Path(__file__).resolve().parent.parent / CAMERA / "location.json").read_text())
+    return EarthLocation(lat=j["lat_deg"] * u.deg, lon=j["lon_deg"] * u.deg, height=j["height_m"] * u.m)
+
+
+def green(path, pattern):
+    """mean of the two green planes, one value per Bayer superpixel"""
+    with fits.open(path) as h:
+        hdu = [x for x in h if x.data is not None][0]
+        a = hdu.data.astype(np.float32)
+        hdr = hdu.header
+    g = [a[r::2, c::2] for (r, c), n in zip(((0, 0), (0, 1), (1, 0), (1, 1)), pattern) if n == "G"]
+    return (g[0] + g[1]) / 2, hdr
+
+
+def stars(g):
+    """centroids of star-like blobs, brightest first. A 3x3 median first removes hot
+    pixels, which are single superpixels; a star covers several."""
+    m = ndi.median_filter(g, 3)
+    bg = ndi.median_filter(m[::8, ::8], 9)
+    bg = ndi.zoom(bg, (m.shape[0] / bg.shape[0], m.shape[1] / bg.shape[1]), order=1)[:m.shape[0], :m.shape[1]]
+    r = m - bg
+    s = 1.4826 * np.median(np.abs(r - np.median(r)))
+    sm = ndi.gaussian_filter(r, 1.0)
+    ss = 1.4826 * np.median(np.abs(sm - np.median(sm)))
+    lab, n = ndi.label(sm > 5 * ss)
+    if not n:
+        return np.zeros((0, 3)), s
+    idx = range(1, n + 1)
+    area = np.array(ndi.sum(np.ones_like(lab), lab, idx))
+    flux = np.array(ndi.sum(np.clip(r, 0, None), lab, idx))
+    cm = np.array(ndi.center_of_mass(np.clip(r, 0, None), lab, idx))
+    ok = (area >= 3) & (area < 3000)
+    out = np.column_stack([cm[ok, 1], cm[ok, 0], flux[ok]])
+    return out[np.argsort(-out[:, 2])][:80], s
+
+
+def solve_xy(xyf, shape, hint, work):
+    H, W = shape
+    Table({"X": xyf[:, 0] + 1, "Y": xyf[:, 1] + 1, "FLUX": xyf[:, 2]}).write(f"{work}/s.xy.fits", overwrite=True)
+    cmd = ["solve-field", "--config", str(Path.home() / "astrometry-index" / "astrometry.cfg"), "--overwrite", "--no-plots", "--no-remove-lines", "--uniformize", "0",
+           "--scale-units", "arcsecperpix",
+           "--scale-low", str(SUPERPIXEL_ARCSEC * 0.9), "--scale-high", str(SUPERPIXEL_ARCSEC * 1.1),
+           "--width", str(W), "--height", str(H), "--x-column", "X", "--y-column", "Y",
+           "--sort-column", "FLUX", "--cpulimit", "40", "--crpix-center", "--dir", work,
+           "--new-fits", "none", "--rdls", "none", "--corr", "none", "--match", "none", "--index-xyls", "none"]
+    if hint:
+        cmd += ["--ra", f"{hint[0]:.3f}", "--dec", f"{hint[1]:.3f}", "--radius", "15"]
+    cmd.append(f"{work}/s.xy.fits")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    p = f"{work}/s.xy.wcs"
+    if r.returncode == 0 and os.path.exists(p):
+        return WCS(fits.getheader(p))
+    return None
+
+
+def tone(tilt, rot):
+    """the note, per Peter's numbers: size of the rotation error -> Hz, of the tilt error -> bpm"""
+    return 100 + 80 * abs(rot), 40 + 28 * abs(tilt)
+
+
+def load_map():
+    if MAP_FILE.exists():
+        return json.loads(MAP_FILE.read_text())
+    return None
+
+
+def errors(alt_c, az_c, lat, above, cmap):
+    """tilt and rotation error in knob degrees. Without a map, tilt = altitude and
+    rotation = azimuth. With a map, the sky error is split along the measured tilt
+    direction and the direction at right angles to it."""
+    alt_t, az_t = lat + above, 0.0
+    d_alt = alt_t - alt_c
+    d_az = (az_t - az_c + 180) % 360 - 180
+    cosalt = np.cos(np.radians(alt_c))
+    if not cmap:
+        return d_alt, d_az, d_alt, d_az
+    t = np.array(cmap["tilt_dir"])                  # unit vector on the sky (alt, az*cos alt) per +1 tilt
+    r = np.array([-t[1], t[0]]) if t[0] >= 0 else np.array([t[1], -t[0]])
+    if r[1] < 0:
+        r = -r                                      # rotation direction: the one with +azimuth
+    e = np.array([d_alt, d_az * cosalt])
+    a, b = np.linalg.solve(np.column_stack([t, r]), e)
+    return a / cmap.get("tilt_scale", 1.0), b / cosalt, d_alt, d_az
+
+
+def solve_frame(path, above=0.3, hint=None, cmap=None):
+    cfg = CameraConfig.load(CAMERA)
+    g, hdr = green(path, as_pattern(cfg.bayer))
+    xyf, noise = stars(g)
+    out = {"file": str(path), "date_obs": hdr.get("DATE-OBS"), "stars": int(len(xyf)), "noise": round(float(noise), 2),
+           "ok": False}
+    if len(xyf) < 6:
+        out["why"] = f"only {len(xyf)} stars"
+        return out
+    with tempfile.TemporaryDirectory(dir=LOG_DIR) as work:
+        w = solve_xy(xyf, g.shape, hint, work)
+    if w is None:
+        out["why"] = "no solve"
+        return out
+    H, W = g.shape
+    loc = location()
+    # DATE-OBS equals DATE-END on these frames, so which end of the exposure it marks is
+    # unsettled. It does not matter here: 12 s moves the field ~16 arcsec near the pole.
+    t = Time(datetime.fromisoformat(hdr["DATE-OBS"].replace("Z", "+00:00")))
+    fr = AltAz(obstime=t, location=loc)
+    cen = w.pixel_to_world((W - 1) / 2, (H - 1) / 2)
+    aa = cen.transform_to(fr)
+    alt_c, az_c = float(aa.alt.deg), float(aa.az.wrap_at(180 * u.deg).deg)
+    # which way is up in the frame: the zenith side of the centre
+    up = SkyCoord(az=aa.az, alt=aa.alt + 0.2 * u.deg, frame=fr).icrs
+    ux, uy = w.world_to_pixel(up)
+    roll = float(np.degrees(np.arctan2(-(ux - (W - 1) / 2), -(uy - (H - 1) / 2))))
+    pole = SkyCoord(ra=0 * u.deg, dec=90 * u.deg)
+    px, py = w.world_to_pixel(pole)
+    lat = float(loc.lat.deg)
+    tilt, rot, d_alt, d_az = errors(alt_c, az_c, lat, above, cmap)
+    hz, bpm = tone(tilt, rot)
+    out.update(ok=True, ra=round(float(cen.ra.deg), 4), dec=round(float(cen.dec.deg), 4),
+               alt=round(alt_c, 4), az=round(az_c, 4),
+               pole_offset_deg=round(float(cen.separation(pole).deg), 4),
+               pole_px=[round(float(px), 1), round(float(py), 1)],
+               up_roll_deg=round(roll, 1),
+               above=above, d_alt=round(d_alt, 4), d_az=round(d_az, 4),
+               tilt=round(float(tilt), 4), rotation=round(float(rot), 4),
+               mapped=bool(cmap), hz=round(hz, 1), bpm=round(bpm, 1),
+               scale_arcsec=round(float(np.sqrt(abs(np.linalg.det(w.pixel_scale_matrix)))) * 3600, 3))
+    return out
+
+
+def newest_frame(root):
+    nights = sorted(glob.glob(str(root / "night" / "20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]")))[-2:]
+    files = []
+    for n in nights:
+        hours = sorted(glob.glob(n + "/[0-9][0-9]"), key=os.path.getmtime)[-1:]
+        for h in hours:
+            files += glob.glob(h + "/*.fits.fz")
+    return max(files, key=os.path.getmtime) if files else None
+
+
+LOG_FIELDS = ["utc", "file", "ok", "stars", "alt", "az", "d_alt", "d_az", "tilt", "rotation",
+              "pole_offset_deg", "up_roll_deg", "hz", "bpm", "why"]
+
+
+def log_row(r):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    f = LOG_DIR / "solves.csv"
+    new = not f.exists()
+    with open(f, "a", newline="") as fh:
+        wr = csv.DictWriter(fh, LOG_FIELDS, extrasaction="ignore")
+        if new:
+            wr.writeheader()
+        wr.writerow({"utc": r.get("date_obs"), **r})
+
+
+PAGE = (Path(__file__).resolve().parent / "pole-point.html")
+
+
+def serve(state, port):
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/state.json"):
+                body = json.dumps(state).encode()
+                ctype = "application/json"
+            elif self.path in ("/", "/index.html"):
+                body = PAGE.read_bytes()
+                ctype = "text/html; charset=utf-8"
+            else:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("0.0.0.0", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def live(a):
+    root = Path(CameraConfig.load(CAMERA).frames_root)
+    state = {"status": "waiting for a frame", "last": None, "updated": None}
+    serve(state, a.port)
+    print(f"serving on :{a.port}, frames from {root}", flush=True)
+    seen, hint = None, (0.0, 87.0)
+    if a.seed:                               # solve one given frame first (testing by day)
+        r = solve_frame(a.seed, a.above, hint, load_map())
+        r["served_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        state.update(last=r if r.get("ok") else None, latest=r, status="seeded", updated=r["served_utc"])
+        seen = newest_frame(root)
+    while True:
+        f = newest_frame(root)
+        if f and f != seen:
+            seen = f
+            time.sleep(1.0)                  # let the writer finish
+            t0 = time.time()
+            try:
+                r = solve_frame(f, a.above, hint, load_map())
+            except Exception as e:           # a bad frame must not stop the loop
+                r = {"file": f, "ok": False, "why": f"error: {e}"}
+            r["solve_s"] = round(time.time() - t0, 1)
+            r["served_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            log_row(r)
+            if r.get("ok"):
+                hint = (r["ra"], r["dec"])
+                state["last"] = r
+            state["latest"] = r
+            state["status"] = "solved" if r.get("ok") else r.get("why", "failed")
+            state["updated"] = r["served_utc"]
+            print(json.dumps({k: r.get(k) for k in ("date_obs", "ok", "stars", "tilt", "rotation",
+                                                    "pole_offset_deg", "solve_s", "why")}), flush=True)
+        time.sleep(1.0)
+
+
+def calibrate(a):
+    """tilt direction on the sky from a tilt-only move between two logged solves"""
+    rows = [r for r in csv.DictReader(open(LOG_DIR / "solves.csv")) if r["ok"] == "True"]
+
+    def near(utc):
+        t = datetime.fromisoformat(utc.replace("Z", "+00:00"))
+        return min(rows, key=lambda r: abs((datetime.fromisoformat(r["utc"].replace("Z", "+00:00")) - t).total_seconds()))
+    b, c = near(a.before), near(a.after)
+    alt0, az0, alt1, az1 = (float(b["alt"]), float(b["az"]), float(c["alt"]), float(c["az"]))
+    v = np.array([alt1 - alt0, ((az1 - az0 + 180) % 360 - 180) * np.cos(np.radians((alt0 + alt1) / 2))])
+    mag = float(np.hypot(*v))
+    if mag < 0.1:
+        print(f"move too small to calibrate: {mag:.3f} deg")
+        return 2
+    sign = 1 if (a.tilt is None or a.tilt >= 0) else -1
+    tdir = sign * v / mag
+    m = {"tilt_dir": [round(float(x), 5) for x in tdir],
+         "tilt_scale": round(mag / abs(a.tilt), 4) if a.tilt else 1.0,
+         "from": [b["utc"], c["utc"]], "sky_move_deg": round(mag, 4),
+         "skew_deg": round(float(np.degrees(np.arctan2(tdir[1], tdir[0]))), 2),
+         "made": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    print(json.dumps(m, indent=1))
+    if a.write:
+        MAP_FILE.write_text(json.dumps(m, indent=1) + "\n")
+        print(f"wrote {MAP_FILE}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("solve")
+    s.add_argument("frames", nargs="+")
+    s.add_argument("--above", type=float, default=0.3)
+    s.add_argument("--hint", nargs=2, type=float, metavar=("RA", "DEC"))
+    lv = sub.add_parser("live")
+    lv.add_argument("--port", type=int, default=8097)
+    lv.add_argument("--above", type=float, default=0.3)
+    lv.add_argument("--seed", help="solve this frame first and serve it (a daytime test)")
+    cb = sub.add_parser("calibrate")
+    cb.add_argument("--before", required=True)
+    cb.add_argument("--after", required=True)
+    cb.add_argument("--tilt", type=float, help="the tilt made, in degrees, as the phone read it (sign: + up)")
+    cb.add_argument("--write", action="store_true", help=f"write {MAP_FILE.name}")
+    a = ap.parse_args()
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    if a.cmd == "solve":
+        hint = tuple(a.hint) if a.hint else (0.0, 87.0)
+        for f in a.frames:
+            print(json.dumps(solve_frame(f, a.above, hint, load_map())), flush=True)
+        return 0
+    if a.cmd == "live":
+        os.nice(5)
+        return live(a)
+    return calibrate(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

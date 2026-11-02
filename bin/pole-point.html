@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pole-point</title>
+<style>
+  body { background:#000; color:#E0E0E0; margin:0; padding:16px;
+         font-family:-apple-system,'SF Pro Display','Inter','Roboto',sans-serif; }
+  .card { background:#161616; border-radius:12px; padding:16px; margin-bottom:12px; }
+  .row { display:flex; justify-content:space-between; align-items:center; }
+  .label { color:#8E8E93; font-size:14px; }
+  .big { font-size:44px; font-variant-numeric:tabular-nums; }
+  .dir { font-size:18px; }
+  .sound { color:#8E8E93; font-size:14px; font-variant-numeric:tabular-nums; }
+  button { background:#007AFF; color:#fff; border:0; border-radius:12px; font-size:20px;
+           padding:14px 0; width:100%; }
+  button.off { background:#2C2C2E; }
+  .stale { color:#FF3B30; }
+  .warn { color:#FF9500; }
+  .small { color:#8E8E93; font-size:13px; line-height:1.5; }
+  select { background:#2C2C2E; color:#E0E0E0; border:0; border-radius:8px; padding:6px; font-size:15px; }
+</style>
+</head>
+<body>
+<div class="card"><button id="go">Start sound</button></div>
+
+<div class="card">
+  <div class="row"><span class="label">TILT &middot; tempo</span><span class="sound" id="bpm">&ndash;</span></div>
+  <div class="row"><span class="big" id="tilt">&ndash;</span><span class="dir" id="tiltdir"></span></div>
+</div>
+<div class="card">
+  <div class="row"><span class="label">ROTATION &middot; pitch</span><span class="sound" id="hz">&ndash;</span></div>
+  <div class="row"><span class="big" id="rot">&ndash;</span><span class="dir" id="rotdir"></span></div>
+</div>
+<div class="card">
+  <div class="row"><span class="label">Sound</span>
+    <select id="mode">
+      <option value="both">both: pitch = rotation, tempo = tilt</option>
+      <option value="tilt">tilt only (fixed pitch)</option>
+      <option value="rot">rotation only (fixed tempo)</option>
+    </select></div>
+</div>
+<div class="card small" id="status">waiting for the first solve</div>
+<div class="card small">
+  One solve per frame, about every 12 s. Each sound follows the size of its error, so a move
+  the wrong way sounds higher or faster. 0&deg; is 100&nbsp;Hz at 40&nbsp;bpm; 5&deg; is 500&nbsp;Hz at 180&nbsp;bpm.
+  If the solve is more than 40&nbsp;s old you hear two low clicks every 4&nbsp;s instead.
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let ctx = null, on = false, st = null, nextBeat = 0, nextClick = 0;
+const STALE_S = 40;
+
+function fmt(v) { return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "°"; }
+
+function note(t, hz, dur, vol) {
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = "triangle"; o.frequency.value = hz;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(ctx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+
+function fresh() {
+  if (!st || !st.last) return false;
+  const t = Date.parse(st.last.served_utc);
+  return (Date.now() - t) / 1000 < STALE_S && st.latest && st.latest.ok;
+}
+
+function tick() {
+  if (!on) return;
+  const now = ctx.currentTime;
+  if (fresh()) {
+    const r = st.last, mode = $("mode").value;
+    const hz = mode === "tilt" ? 250 : 100 + 80 * Math.abs(r.rotation);
+    const bpm = mode === "rot" ? 90 : 40 + 28 * Math.abs(r.tilt);
+    const per = 60 / Math.min(bpm, 400);
+    if (nextBeat < now) nextBeat = now + 0.02;
+    while (nextBeat < now + 0.25) {
+      note(nextBeat, Math.min(hz, 2000), Math.min(0.18, per * 0.6), 0.35);
+      nextBeat += per;
+    }
+  } else {
+    if (nextClick < now) {
+      note(now + 0.02, 70, 0.05, 0.5); note(now + 0.17, 70, 0.05, 0.5);
+      nextClick = now + 4;
+    }
+  }
+}
+
+async function poll() {
+  try {
+    st = await (await fetch("state.json", {cache: "no-store"})).json();
+  } catch (e) { st = null; }
+  const s = $("status");
+  if (!st || !st.last) {
+    s.textContent = st ? ("no solve yet: " + st.status) : "server not answering";
+    s.className = "card small stale"; return;
+  }
+  const r = st.last;
+  $("tilt").textContent = fmt(r.tilt);
+  $("tiltdir").textContent = Math.abs(r.tilt) < 0.05 ? "on" : (r.tilt > 0 ? "tilt UP" : "tilt DOWN");
+  $("rot").textContent = fmt(r.rotation);
+  $("rotdir").textContent = Math.abs(r.rotation) < 0.05 ? "on" : (r.rotation > 0 ? "turn RIGHT (east)" : "turn LEFT (west)");
+  $("hz").textContent = (100 + 80 * Math.abs(r.rotation)).toFixed(0) + " Hz";
+  $("bpm").textContent = (40 + 28 * Math.abs(r.tilt)).toFixed(0) + " bpm";
+  const age = Math.round((Date.now() - Date.parse(r.served_utc)) / 1000);
+  const latest = st.latest || {};
+  let txt = `solved ${r.date_obs.slice(11, 19)} UTC (${age} s ago), ${r.stars} stars, ` +
+            `pole ${r.pole_offset_deg.toFixed(2)}° from centre, centre alt ${r.alt.toFixed(2)}° az ${r.az.toFixed(2)}°, ` +
+            `target: pole ${r.above}° below centre` + (r.mapped ? ", calibrated map" : ", map: level axes assumed");
+  if (!latest.ok) txt += ` — latest frame: ${latest.why || "failed"}`;
+  s.textContent = txt;
+  s.className = "card small" + (fresh() ? "" : " stale");
+}
+
+$("go").onclick = () => {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  ctx.resume();
+  on = !on;
+  $("go").textContent = on ? "Stop sound" : "Start sound";
+  $("go").className = on ? "off" : "";
+  nextBeat = 0; nextClick = 0;
+};
+setInterval(tick, 50);
+setInterval(poll, 2000);
+poll();
+</script>
+</body>
+</html>
