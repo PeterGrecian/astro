@@ -1,5 +1,7 @@
 """FWHM map across the HQ16 field: pool the cross-trail widths from fwhm.py's
-method over the clear 03:00-05:20 UTC frames, median on a 6x4 grid."""
+method over chosen hours of a night, median on a 6x4 grid.
+Env: NIGHT (default 2026-10-13), HOURS (UTC hour dirs, default "03 04 05"), STEP (every Nth frame, default 4).
+Rows are saved per night to ~/tmp/hq16-map-rows-<NIGHT>.npy (x, y, fwhm, amplitude)."""
 import glob, os, sys, numpy as np, warnings, json
 warnings.filterwarnings("ignore")
 from astropy.io import fits
@@ -8,8 +10,11 @@ from photutils.background import Background2D, MedianBackground
 from photutils.segmentation import detect_sources, SourceCatalog
 from scipy.ndimage import rotate, gaussian_filter
 from scipy.optimize import curve_fit
-R = os.environ["BIGSTORE"] + "/eclipticam-frames/night/2026-10-13/hq16"
-files = sorted(glob.glob(R + "/0[345]/*.fits.fz"))[::4]
+NIGHT = os.environ.get("NIGHT", "2026-10-13")
+HOURS = os.environ.get("HOURS", "03 04 05").split()
+STEP = int(os.environ.get("STEP", "4"))
+R = os.environ["BIGSTORE"] + "/eclipticam-frames/night/" + NIGHT + "/hq16"
+files = sorted(f for h in HOURS for f in glob.glob(R + "/" + h + "/*.fits.fz"))[::STEP]
 g = lambda x,a,m,s,c: a*np.exp(-.5*((x-m)/s)**2)+c
 rows = []
 for f in files:
@@ -30,7 +35,7 @@ for f in files:
         if not (0.3 < abs(q[2]) < 6 and abs(q[1]-20) < 3 and q[0] > 20*sd/np.sqrt(2*int(L)+1)): continue
         rows.append((x, y, 2.3548*abs(q[2]), q[0]))
 rows = np.array(rows); H, W = 1520, 2028
-np.save(os.path.expanduser("~/tmp/hq16-map-rows.npy"), rows)
+np.save(os.path.expanduser("~/tmp/hq16-map-rows-" + NIGHT + ".npy"), rows)
 nx, ny = 6, 4
 m = np.full((ny, nx), np.nan); n = np.zeros((ny, nx), int)
 for j in range(ny):
