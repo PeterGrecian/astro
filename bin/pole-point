@@ -95,7 +95,33 @@ def stars(g):
     cm = np.array(ndi.center_of_mass(np.clip(r, 0, None), lab, idx))
     ok = (area >= 3) & (area < 3000)
     out = np.column_stack([cm[ok, 1], cm[ok, 0], flux[ok]])
+    out = merge_close(out, MERGE_SP)
     return out[np.argsort(-out[:, 2])][:80], s
+
+
+MERGE_SP = 25     # 2026-11-03: with Polaris in the field, bright rings broke into fragments
+                  # 10-20 sp apart and nothing solved; merged at 25 they solve. Stars here
+                  # are ~160 sp apart on average, so real pairs are rarely joined.
+
+
+def merge_close(x, r):
+    """join detections closer than r superpixels (flux-weighted centre, summed flux)"""
+    if len(x) < 2:
+        return x
+    from scipy.spatial import cKDTree
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    pairs = cKDTree(x[:, :2]).query_pairs(r, output_type="ndarray")
+    if not len(pairs):
+        return x
+    n = len(x)
+    k, lab = connected_components(coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n)), directed=False)
+    out = []
+    for i in range(k):
+        m = lab == i
+        w = x[m, 2]
+        out.append([*(x[m, :2] * w[:, None]).sum(0) / w.sum(), w.sum()])
+    return np.array(out)
 
 
 def solve_xy(xyf, shape, hint, work):
