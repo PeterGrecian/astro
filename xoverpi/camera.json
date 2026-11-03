@@ -106,7 +106,7 @@
   "location_file": "location.json",
   "privacy_file": null,
   "subcams": null,
-  "position_index": 4,
+  "position_index": 5,
   "position_registry": {
     "1": {
       "dates": "2026-09-14..2026-10-13",
@@ -121,8 +121,12 @@
       "notes": "Scope moved before this night; pole 2.40 deg from field centre, straight down in frame axes. These frames carry POSINDEX 2 in their headers."
     },
     "4": {
-      "dates": "2026-11-01..",
+      "dates": "2026-11-01..2026-11-03 18:14 UTC",
       "notes": "FirstScope adjusted and camera rigidly mounted (Peter, 2026-11-01), eyepiece extension 7.09 mm. Pointing not yet solved; the first clear night gives it."
+    },
+    "5": {
+      "dates": "2026-11-03 18:15 UTC..",
+      "notes": "Repointed at the pole with pole-point (Peter, 2026-11-03 18:00-18:20 UTC): centre alt 51.333, az +0.25, pole 0.17 deg from centre, Polaris in the field. Focus adjusted about 18:25 UTC toward 6.6 mm, extension not yet measured. Frames of this night until the daemon restarts carry POSINDEX 4 in their headers."
     }
   }
 }
