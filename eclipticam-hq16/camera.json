@@ -1,82 +1,86 @@
 {
-  "name": "eclipticam-hq16",
-  "label": "HQ16",
-  "label_notes": "Peter's name for it (2026-10-13): HQ camera + 16 mm lens. It ran its first ~25 minutes on 10-13 as eclipticam-hq, writing to night/2026-10-13/hq/; those frames were moved into hq16/ at the rename.",
-  "host": "eclipticam",
-  "sensor": "IMX477",
-  "bayer": "SRGGB12",
-  "resolution": [
-    4056,
-    3040
-  ],
-  "camera": "Raspberry Pi HQ Camera (IMX477) + 16 mm C-mount lens",
-  "cam_idx": 1,
-  "cam_idx_notes": "CSI port cam1 on the Pi 5, beside v3w (imx708_wide) on cam0. Pinned in /boot/firmware/config.txt with camera_auto_detect=0, dtoverlay=imx708,cam0 and dtoverlay=imx477,cam1,rotation=0 (hand-set 2026-10-13; ansible to own it).",
-  "lens": {
-    "focal_length_mm": 16,
-    "mount": "C",
-    "focus": "manual; epoch 1 set by hand 2026-10-13, epoch 2 lens refitted 2026-10-25 (not refocused), epoch 3 focus search #1 on 80 m trees 2026-11-02",
-    "aperture": 1.4
+ "name": "eclipticam-hq16",
+ "label": "HQ16",
+ "label_notes": "Peter's name for it (2026-10-13): HQ camera + 16 mm lens. It ran its first ~25 minutes on 10-13 as eclipticam-hq, writing to night/2026-10-13/hq/; those frames were moved into hq16/ at the rename.",
+ "host": "eclipticam",
+ "sensor": "IMX477",
+ "bayer": "SRGGB12",
+ "resolution": [
+  4056,
+  3040
+ ],
+ "camera": "Raspberry Pi HQ Camera (IMX477) + 16 mm C-mount lens",
+ "cam_idx": 1,
+ "cam_idx_notes": "CSI port cam1 on the Pi 5, beside v3w (imx708_wide) on cam0. Pinned in /boot/firmware/config.txt with camera_auto_detect=0, dtoverlay=imx708,cam0 and dtoverlay=imx477,cam1,rotation=0 (hand-set 2026-10-13; ansible to own it).",
+ "lens": {
+  "focal_length_mm": 16,
+  "mount": "C",
+  "focus": "manual; epoch 1 set by hand 2026-10-13, epoch 2 lens refitted 2026-10-25 (not refocused), epoch 3 focus search #1 on 80 m trees 2026-11-02",
+  "aperture": 1.4
+ },
+ "lens_notes": "Manual 16 mm C-mount lens, fixed focus and iris: neither is under software control, so lens_position is null and the FITS carry no LENSPOS. Epoch 1 (10-13..10-25): no C-CS ring (none in the HQ box, though the datasheet says it ships with one), lens on a few threads of a wound-out back-focus ring. The YINETTECH 5-pack from Amazon (10-14) does not fit. Epoch 2 (10-25): the one genuine Raspberry Pi ring fitted. Focus 2026-10-13 was 'will have to do' at dusk, not a star-verified best; aperture setting not recorded.",
+ "brightness_baseline_since": "2026-11-02",
+ "brightness_baseline_notes": "Epoch 3, focus search #1. Epoch 2 (10-25..11-02) was badly out of focus and ~3x brighter sky for an unexplained reason, so it does not join the baseline.",
+ "plate_scale_deg_px": 0.005528,
+ "plate_scale_notes": "SOLVED 2026-10-13 by astro-deliverables (astrometry.net on muppet, binned frame 1791927010433, ~22:30 BST): 39.8 arcsec per 2x2 binned pixel = 19.9 per photosite at full res (0.005528 deg); field 22.41 x 16.85 deg; centre RA 332.47 Dec -9.98 at that moment; up is -162.2 deg E of N. WCS at muppet ~/tmp/hqsolve/hqbin.wcs. Nominal was 19.98 (1.55 um / 16 mm). Epoch 1 only: refitting the lens with the C-CS adapter may shift it slightly.",
+ "position_index": 4,
+ "position_index_notes": "Calibration epoch, same convention as astrocam and eclipticam-v3w: INCREMENT whenever the camera, lens or mounting changes. Stamped as POSINDEX.",
+ "position_registry": {
+  "1": {
+   "dates": "2026-10-13..2026-10-25",
+   "notes": "First light. Lens without its C-CS adapter, held by a couple of threads on a back-focus ring wound out ~6 turns."
   },
-  "lens_notes": "Manual 16 mm C-mount lens, fixed focus and iris: neither is under software control, so lens_position is null and the FITS carry no LENSPOS. Epoch 1 (10-13..10-25): no C-CS ring (none in the HQ box, though the datasheet says it ships with one), lens on a few threads of a wound-out back-focus ring. The YINETTECH 5-pack from Amazon (10-14) does not fit. Epoch 2 (10-25): the one genuine Raspberry Pi ring fitted. Focus 2026-10-13 was 'will have to do' at dusk, not a star-verified best; aperture setting not recorded.",
-  "brightness_baseline_since": "2026-11-02",
-  "brightness_baseline_notes": "Epoch 3, focus search #1. Epoch 2 (10-25..11-02) was badly out of focus and ~3x brighter sky for an unexplained reason, so it does not join the baseline.",
-  "plate_scale_deg_px": 0.005528,
-  "plate_scale_notes": "SOLVED 2026-10-13 by astro-deliverables (astrometry.net on muppet, binned frame 1791927010433, ~22:30 BST): 39.8 arcsec per 2x2 binned pixel = 19.9 per photosite at full res (0.005528 deg); field 22.41 x 16.85 deg; centre RA 332.47 Dec -9.98 at that moment; up is -162.2 deg E of N. WCS at muppet ~/tmp/hqsolve/hqbin.wcs. Nominal was 19.98 (1.55 um / 16 mm). Epoch 1 only: refitting the lens with the C-CS adapter may shift it slightly.",
-  "position_index": 3,
-  "position_index_notes": "Calibration epoch, same convention as astrocam and eclipticam-v3w: INCREMENT whenever the camera, lens or mounting changes. Stamped as POSINDEX.",
-  "position_registry": {
-    "1": {
-      "dates": "2026-10-13..2026-10-25",
-      "notes": "First light. Lens without its C-CS adapter, held by a couple of threads on a back-focus ring wound out ~6 turns."
-    },
-    "2": {
-      "dates": "2026-10-25..2026-11-02",
-      "notes": "Genuine Raspberry Pi C-CS adapter fitted ~15:30 GMT 10-25 (the only good ring in the house; the YINETTECH Amazon rings do not fit). Refocus and a new plate solve needed. Far out of focus throughout: no measurable stars (v3w saw 68 at 10-31 19 UTC, HQ16 none); see strand astro-hq16."
-    },
-    "3": {
-      "dates": "2026-11-02..",
-      "notes": "Focus search #1 (Peter, ~15:00 GMT 11-02): camera re-aimed at daylight targets, lens focus ring at infinity and locked, aperture fully open (f/1.4, Peter's recollection), focus set on the back-focus ring by libcamera FocusFoM on trees ~80 m away (3.2 um inside infinity, under 1 binned px); aerial ~30 m and brick courses ~10 m also in view. Pointing changed: re-solve the plate and recheck the privacy margin."
-    }
+  "2": {
+   "dates": "2026-10-25..2026-11-02",
+   "notes": "Genuine Raspberry Pi C-CS adapter fitted ~15:30 GMT 10-25 (the only good ring in the house; the YINETTECH Amazon rings do not fit). Refocus and a new plate solve needed. Far out of focus throughout: no measurable stars (v3w saw 68 at 10-31 19 UTC, HQ16 none); see strand astro-hq16."
   },
-  "pedestal": 200,
-  "pedestal_notes": "CHART FLOOR ONLY: the log2(mean/pedestal) axis reference, chosen for footroom below black_level, not a measurement. 200 on this 12-bit sensor is the same place as 50 on the 10-bit IMX708s (x4).",
-  "sky_mag": [
-    {
-      "mag": 17.8,
-      "at_stops": 5.49,
-      "mag_per_stop": 0.753,
-      "band": "Gaia G",
-      "from_night": "2026-10-14",
-      "provisional": true
-    }
-  ],
-  "sky_mag_notes": "astro-science 2026-10-31, PROVISIONAL +/-0.3: same-sky transfer from v3w on the one clean night (10-20, ratio 4.98), epoch 1, 60 s. Epoch 2 (from 10-25) is unconfirmed: recheck near new moon.",
-  "black_level": 256,
-  "black_level_notes": "IMX477 electronic zero in 12-bit LSB-aligned ADU (libcamera tuning 4096 at 16-bit). NOMINAL, not measured: cap the lens for a master dark.",
-  "capture": {
-    "night_exposure_us": 59900000,
-    "night_gain": 1.0,
-    "buffer_count": 2
+  "3": {
+   "dates": "2026-11-02..2026-11-03 ~18:38 UTC",
+   "notes": "Focus search #1 (Peter, ~15:00 GMT 11-02): camera re-aimed at daylight targets, lens focus ring at infinity and locked, aperture fully open (f/1.4, Peter's recollection), focus set on the back-focus ring by libcamera FocusFoM on trees ~80 m away (3.2 um inside infinity, under 1 binned px); aerial ~30 m and brick courses ~10 m also in view. Pointing changed: re-solve the plate and recheck the privacy margin. MEASURED (astro-hq16 disc.py, 11-02 02:00-02:45 UTC, 946 discs): blur D 14.8 binned px = 46 um, defocus 64 um PAST infinity (Peter overshot the tree focus), tilt ~28 um corner to corner (TL 62 TR 73 BL 45 BR 56). CAUTION: on 11-03 before dusk Peter turned the back-focus ring (angle not recorded) the wrong way, so frames from 11-03 dusk to ~18:38 UTC still carry POSINDEX 3 but sit at ~160 um (D ~37 px, 18:19-18:23 UTC)."
   },
-  "capture_notes": "Night streaming params for eclipticam/hq16_night_daemon.py, which reads them (env HQ_EXPOSURE_US / HQ_GAIN override per host). 60 s matches v3w's cadence. buffer_count 2 rather than the house 4 because this 1 GB host also streams v3w at full res; the systemd unit caps the daemon's memory so an OOM takes this camera, not v3w. BUFFER: /mnt/ssd/eclipticam-buffer/hq16 on the local SSD, the first eclipticam stream off the 50M RAM tmpfs (2026-10-13, same night as first light). streaming.py refuses to run unless the buffer is on the /mnt/ssd mount, and the units carry RequiresMountsFor=/mnt/ssd.",
-  "rotate_180": false,
-  "rotate_180_notes": "The camera IS mounted upside down, but the 180 degree turn is done by the driver (dtoverlay imx477 rotation=0 flips at the sensor), so every tool's output is already upright and libcamera reports RGGB. Do NOT also set a software rotation_180: that would turn the frames back over.",
-  "frames_root": "~/eclipticam-frames",
-  "frames_root_by_host": {
-    "pip": "/mnt/muppet/bigstore/eclipticam-frames",
-    "muppet": "/mnt/bigstore/astro-data/eclipticam-frames"
-  },
-  "night_layout": "percam",
-  "night_layout_notes": "night/<night-date>/hq16/HH/<epoch_ms>.fits.fz beside v3w's night/<night-date>/v3w/, written by the shared v3w_uploader.py with V3W_SUBCAM=hq16.",
-  "s3": {
-    "bucket": "astro-berrylands-eu-west-1",
-    "prefix": "eclipticam-hq16/nights"
-  },
-  "processing_host": "muppet",
-  "processing_notes": "Processed on muppet from bigstore (compute follows the data; eclipticam has ~137 MB free beside v3w). Public from 2026-10-15 (Peter asked for night cards on /astro/eclipticam/hq16); its field is sky only, above v3w's privacy crop (v3w rows 639-1010 vs keep-top 1064), so no privacy crop of its own. Re-check after the C-CS refit moves the pointing. No sky_clear_max_stops yet: a clear night sets it (falls back to 10.0).",
-  "night_output": "subcam",
-  "night_output_notes": "Products go in night/<night>/hq16/ beside the hour dirs, not night/<night>/ where v3w's live (astro/frames.py night_output_dir).",
-  "location_file": "location.json",
-  "occlusion_file": null
+  "4": {
+   "dates": "2026-11-03 ~18:38 UTC..",
+   "notes": "Focus search #2 (Peter, ~18:38 UTC 11-03, under cloud): back-focus ring turned back toward focus after the wrong-way turn; angle not recorded yet. Measure with astro-hq16 disc.py on the first clear frames."
+  }
+ },
+ "pedestal": 200,
+ "pedestal_notes": "CHART FLOOR ONLY: the log2(mean/pedestal) axis reference, chosen for footroom below black_level, not a measurement. 200 on this 12-bit sensor is the same place as 50 on the 10-bit IMX708s (x4).",
+ "sky_mag": [
+  {
+   "mag": 17.8,
+   "at_stops": 5.49,
+   "mag_per_stop": 0.753,
+   "band": "Gaia G",
+   "from_night": "2026-10-14",
+   "provisional": true
+  }
+ ],
+ "sky_mag_notes": "astro-science 2026-10-31, PROVISIONAL +/-0.3: same-sky transfer from v3w on the one clean night (10-20, ratio 4.98), epoch 1, 60 s. Epoch 2 (from 10-25) is unconfirmed: recheck near new moon.",
+ "black_level": 256,
+ "black_level_notes": "IMX477 electronic zero in 12-bit LSB-aligned ADU (libcamera tuning 4096 at 16-bit). NOMINAL, not measured: cap the lens for a master dark.",
+ "capture": {
+  "night_exposure_us": 59900000,
+  "night_gain": 1.0,
+  "buffer_count": 2
+ },
+ "capture_notes": "Night streaming params for eclipticam/hq16_night_daemon.py, which reads them (env HQ_EXPOSURE_US / HQ_GAIN override per host). 60 s matches v3w's cadence. buffer_count 2 rather than the house 4 because this 1 GB host also streams v3w at full res; the systemd unit caps the daemon's memory so an OOM takes this camera, not v3w. BUFFER: /mnt/ssd/eclipticam-buffer/hq16 on the local SSD, the first eclipticam stream off the 50M RAM tmpfs (2026-10-13, same night as first light). streaming.py refuses to run unless the buffer is on the /mnt/ssd mount, and the units carry RequiresMountsFor=/mnt/ssd.",
+ "rotate_180": false,
+ "rotate_180_notes": "The camera IS mounted upside down, but the 180 degree turn is done by the driver (dtoverlay imx477 rotation=0 flips at the sensor), so every tool's output is already upright and libcamera reports RGGB. Do NOT also set a software rotation_180: that would turn the frames back over.",
+ "frames_root": "~/eclipticam-frames",
+ "frames_root_by_host": {
+  "pip": "/mnt/muppet/bigstore/eclipticam-frames",
+  "muppet": "/mnt/bigstore/astro-data/eclipticam-frames"
+ },
+ "night_layout": "percam",
+ "night_layout_notes": "night/<night-date>/hq16/HH/<epoch_ms>.fits.fz beside v3w's night/<night-date>/v3w/, written by the shared v3w_uploader.py with V3W_SUBCAM=hq16.",
+ "s3": {
+  "bucket": "astro-berrylands-eu-west-1",
+  "prefix": "eclipticam-hq16/nights"
+ },
+ "processing_host": "muppet",
+ "processing_notes": "Processed on muppet from bigstore (compute follows the data; eclipticam has ~137 MB free beside v3w). Public from 2026-10-15 (Peter asked for night cards on /astro/eclipticam/hq16); its field is sky only, above v3w's privacy crop (v3w rows 639-1010 vs keep-top 1064), so no privacy crop of its own. Re-check after the C-CS refit moves the pointing. No sky_clear_max_stops yet: a clear night sets it (falls back to 10.0).",
+ "night_output": "subcam",
+ "night_output_notes": "Products go in night/<night>/hq16/ beside the hour dirs, not night/<night>/ where v3w's live (astro/frames.py night_output_dir).",
+ "location_file": "location.json",
+ "occlusion_file": null
 }
