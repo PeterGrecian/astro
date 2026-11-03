@@ -275,6 +275,36 @@ def enu(alt, az):
     return np.array([np.cos(a) * np.sin(z), np.cos(a) * np.cos(z), np.sin(a)])
 
 
+STILL_DEG = 0.3       # the gyro drifts ~0.1 deg a frame when untouched; a hand move is degrees
+
+
+def predict(an, q, psi):
+    rel = qmul(q, qconj(np.array(an["q"])))
+    zq = np.array([0, 0, np.sin(psi / 2), np.cos(psi / 2)])
+    return qrot(qmul(qmul(zq, rel), qconj(zq)), enu(an["alt"], an["az"])), qangle(rel)
+
+
+def fit_yaw(an, q, alt, az):
+    """the gyro frame's yaw, from a move between two still solves: the one that carries the
+    first solved direction onto the second. Needs a move of 0.5 deg or more."""
+    vb = enu(alt, az)
+    _, moved = predict(an, q, 0.0)
+    if moved < 0.5:
+        return None
+    def err(psi):
+        v, _ = predict(an, q, psi)
+        return float(np.degrees(np.arccos(np.clip(v @ vb, -1, 1))))
+    grid = np.radians(np.arange(0, 360, 0.5))
+    psi = min(grid, key=err)
+    fine = psi + np.radians(np.arange(-0.5, 0.5, 0.02))
+    psi = float(min(fine, key=err))
+    r = err(psi)
+    if r > 0.3:
+        return {"rejected_residual_deg": round(r, 3), "moved_deg": round(moved, 2)}
+    return {"psi": psi, "psi_deg": round(float(np.degrees(psi)) % 360, 2), "residual_deg": round(r, 3),
+            "moved_deg": round(moved, 2), "made": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+
 def phone_loop(state, a):
     """Between solves, follow the scope with the phone's gyro. The gyro ("game") quaternion
     has true vertical but arbitrary yaw; the compass quaternion gives the yaw offset (poor,
@@ -303,8 +333,13 @@ def phone_loop(state, a):
                 if win and win[-1][0] >= te + 12 or (win and now - te > 30):
                     anchor_file = last["file"]
                     spread = max(qangle(qmul(h[1], qconj(win[0][1]))) for h in win)
-                    if spread < 0.05 and len(win) > 10:
+                    if spread < STILL_DEG and len(win) > 10:
                         mid = min(win, key=lambda h: abs(h[0] - te))
+                        prev = state.get("anchor")
+                        if prev:
+                            fit = fit_yaw(prev, mid[1], last["alt"], last["az"])
+                            if fit:
+                                state["yaw_fit"] = fit
                         state["anchor"] = dict(file=last["file"], t=mid[0], q=mid[1].tolist(), psi=float(np.median([h[2] for h in win])),
                                                alt=last["alt"], az=last["az"], date_obs=last["date_obs"])
                     else:
@@ -312,7 +347,9 @@ def phone_loop(state, a):
             an = state.get("anchor")
             if an:
                 rel = qmul(g, qconj(np.array(an["q"])))       # gyro-frame rotation since the anchor
-                zq = np.array([0, 0, np.sin(an["psi"] / 2), np.cos(an["psi"] / 2)])
+                fit = state.get("yaw_fit")
+                psi = fit["psi"] if fit and "psi" in fit else an["psi"]
+                zq = np.array([0, 0, np.sin(psi / 2), np.cos(psi / 2)])
                 rel_true = qmul(qmul(zq, rel), qconj(zq))
                 v = qrot(rel_true, enu(an["alt"], an["az"]))
                 alt = float(np.degrees(np.arcsin(np.clip(v[2], -1, 1))))
