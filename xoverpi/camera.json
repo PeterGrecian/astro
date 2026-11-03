@@ -126,7 +126,7 @@
     },
     "5": {
       "dates": "2026-11-03 18:15 UTC..",
-      "notes": "Repointed at the pole with pole-point (Peter, 2026-11-03 18:00-18:20 UTC): centre alt 51.333, az +0.25, pole 0.17 deg from centre, Polaris in the field. Focus adjusted about 18:25 UTC toward 6.6 mm, extension not yet measured. Frames of this night until the daemon restarts carry POSINDEX 4 in their headers."
+      "notes": "Repointed at the pole with pole-point (Peter, 2026-11-03 18:00-18:20 UTC): centre alt 51.333, az +0.25, pole 0.17 deg from centre, Polaris in the field. Focus adjusted before 18:21 UTC (during the repointing) toward 6.6 mm, extension not yet measured. Frames of this night until the daemon restarts carry POSINDEX 4 in their headers."
     }
   }
 }
