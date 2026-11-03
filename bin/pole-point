@@ -248,10 +248,94 @@ def serve(state, port):
     return srv
 
 
+PHONE_POSE = "http://192.168.0.29:8080/pose"     # scopecam on the 6a strapped to the tube
+
+
+def qmul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return np.array([aw*bx + ax*bw + ay*bz - az*by, aw*by - ax*bz + ay*bw + az*bx,
+                     aw*bz + ax*by - ay*bx + az*bw, aw*bw - ax*bx - ay*by - az*bz])
+
+
+def qconj(q):
+    return np.array([-q[0], -q[1], -q[2], q[3]])
+
+
+def qrot(q, v):
+    return qmul(qmul(q, [*v, 0.0]), qconj(q))[:3]
+
+
+def qangle(q):
+    return float(np.degrees(2 * np.arccos(min(1.0, abs(q[3])))))
+
+
+def enu(alt, az):
+    a, z = np.radians(alt), np.radians(az)
+    return np.array([np.cos(a) * np.sin(z), np.cos(a) * np.cos(z), np.sin(a)])
+
+
+def phone_loop(state, a):
+    """Between solves, follow the scope with the phone's gyro. The gyro ("game") quaternion
+    has true vertical but arbitrary yaw; the compass quaternion gives the yaw offset (poor,
+    'low' accuracy), which matters only for how a tilt splits between altitude and azimuth.
+    Each solve taken while the phone was still re-anchors it, so errors last one frame at most."""
+    import urllib.request
+    hist = []                                       # (unix time, game quat, yaw offset rad)
+    anchor_file = None
+    while True:
+        try:
+            with urllib.request.urlopen(PHONE_POSE, timeout=2) as r:
+                p = json.load(r)
+            g = np.array(p["game_quat_xyzw"], float)
+            m = np.array(p["quat_xyzw"], float)
+            d = qmul(m, qconj(g))                   # ~ a rotation about z
+            psi = 2 * np.arctan2(d[2], d[3]) + np.radians(p.get("declination_deg", 0.0))
+            now = time.time()
+            hist.append((now, g, psi))
+            hist[:] = [h for h in hist if now - h[0] < 120]
+            last = state.get("last")
+            if last and last.get("file") != anchor_file and last.get("date_obs"):
+                # DATE-OBS may be the start or the end of the exposure: require the phone
+                # still across both readings, then anchor at the middle of that window
+                te = datetime.fromisoformat(last["date_obs"].replace("Z", "+00:00")).timestamp()
+                win = [h for h in hist if te - 13 <= h[0] <= te + 13]
+                if win and win[-1][0] >= te + 12 or (win and now - te > 30):
+                    anchor_file = last["file"]
+                    spread = max(qangle(qmul(h[1], qconj(win[0][1]))) for h in win)
+                    if spread < 0.05 and len(win) > 10:
+                        mid = min(win, key=lambda h: abs(h[0] - te))
+                        state["anchor"] = dict(file=last["file"], t=mid[0], q=mid[1].tolist(), psi=float(np.median([h[2] for h in win])),
+                                               alt=last["alt"], az=last["az"], date_obs=last["date_obs"])
+                    else:
+                        state["anchor_skipped"] = f"phone moved {spread:.2f} deg during {Path(last['file']).name}"
+            an = state.get("anchor")
+            if an:
+                rel = qmul(g, qconj(np.array(an["q"])))       # gyro-frame rotation since the anchor
+                zq = np.array([0, 0, np.sin(an["psi"] / 2), np.cos(an["psi"] / 2)])
+                rel_true = qmul(qmul(zq, rel), qconj(zq))
+                v = qrot(rel_true, enu(an["alt"], an["az"]))
+                alt = float(np.degrees(np.arcsin(np.clip(v[2], -1, 1))))
+                az = float((np.degrees(np.arctan2(v[0], v[1])) + 180) % 360 - 180)
+                lat = float(location().lat.deg)
+                tilt, rot, d_alt, d_az = errors(alt, az, lat, a.above, load_map())
+                hz, bpm = tone(tilt, rot)
+                state["live"] = dict(alt=round(alt, 4), az=round(az, 4), tilt=round(float(tilt), 4),
+                                     rotation=round(float(rot), 4), hz=round(hz, 1), bpm=round(bpm, 1),
+                                     moved_deg=round(qangle(rel), 3), since_solve_s=round(now - an["t"], 1),
+                                     served_utc=datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
+            state["phone_error"] = None
+        except Exception as e:
+            state["phone_error"] = str(e)[:200]
+            time.sleep(1.0)
+        time.sleep(0.2)
+
+
 def live(a):
     root = Path(CameraConfig.load(CAMERA).frames_root)
     state = {"status": "waiting for a frame", "last": None, "updated": None}
     serve(state, a.port)
+    threading.Thread(target=phone_loop, args=(state, a), daemon=True).start()
     print(f"serving on :{a.port}, frames from {root}", flush=True)
     seen, hint = None, (0.0, 87.0)
     if a.seed:                               # solve one given frame first (testing by day)

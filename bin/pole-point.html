@@ -65,7 +65,13 @@ function note(t, hz, dur, vol) {
   o.start(t); o.stop(t + dur + 0.02);
 }
 
+function cur() {                       // the phone's live reading if fresh, else the last solve
+  if (st && st.live && (Date.now() - Date.parse(st.live.served_utc)) / 1000 < 3) return st.live;
+  return st && st.last;
+}
+
 function fresh() {
+  if (st && st.live && (Date.now() - Date.parse(st.live.served_utc)) / 1000 < 3) return true;
   if (!st || !st.last) return false;
   const t = Date.parse(st.last.served_utc);
   return (Date.now() - t) / 1000 < STALE_S && st.latest && st.latest.ok;
@@ -75,7 +81,7 @@ function tick() {
   if (!on) return;
   const now = ctx.currentTime;
   if (fresh()) {
-    const r = st.last, mode = $("mode").value;
+    const r = cur(), mode = $("mode").value;
     const hz = mode === "tilt" ? 250 : 100 + 80 * Math.abs(r.rotation);
     const bpm = mode === "rot" ? 90 : 40 + 28 * Math.abs(r.tilt);
     const per = 60 / Math.min(bpm, 400);
@@ -101,19 +107,23 @@ async function poll() {
     s.textContent = st ? ("no solve yet: " + st.status) : "server not answering";
     s.className = "card small stale"; return;
   }
-  const r = st.last;
+  const r = cur();
   $("tilt").textContent = fmt(r.tilt);
   $("tiltdir").textContent = Math.abs(r.tilt) < 0.05 ? "on" : (r.tilt > 0 ? "tilt UP" : "tilt DOWN");
   $("rot").textContent = fmt(r.rotation);
   $("rotdir").textContent = Math.abs(r.rotation) < 0.05 ? "on" : (r.rotation > 0 ? "turn RIGHT (east)" : "turn LEFT (west)");
   $("hz").textContent = (100 + 80 * Math.abs(r.rotation)).toFixed(0) + " Hz";
   $("bpm").textContent = (40 + 28 * Math.abs(r.tilt)).toFixed(0) + " bpm";
-  const age = Math.round((Date.now() - Date.parse(r.served_utc)) / 1000);
+  const L = st.last;
+  const age = Math.round((Date.now() - Date.parse(L.served_utc)) / 1000);
   const latest = st.latest || {};
-  let txt = `solved ${r.date_obs.slice(11, 19)} UTC (${age} s ago), ${r.stars} stars, ` +
-            `pole ${r.pole_offset_deg.toFixed(2)}° from centre, centre alt ${r.alt.toFixed(2)}° az ${r.az.toFixed(2)}°, ` +
-            `target: pole ${r.above}° below centre` + (r.mapped ? ", calibrated map" : ", map: level axes assumed");
+  let txt = `solved ${L.date_obs.slice(11, 19)} UTC (${age} s ago), ${L.stars} stars, ` +
+            `pole ${L.pole_offset_deg.toFixed(2)}° from centre, centre alt ${L.alt.toFixed(2)}° az ${L.az.toFixed(2)}°, ` +
+            `target: pole ${L.above}° below centre` + (L.mapped ? ", calibrated map" : ", map: level axes assumed");
   if (!latest.ok) txt += ` — latest frame: ${latest.why || "failed"}`;
+  if (r === st.live) txt = `PHONE live: moved ${r.moved_deg.toFixed(2)}° since the anchor solve ${Math.round(r.since_solve_s)} s ago, now alt ${r.alt.toFixed(2)}° az ${r.az.toFixed(2)}°. ` + txt;
+  else if (st.phone_error) txt = `phone not answering (${st.phone_error}). ` + txt;
+  else if (!st.anchor) txt = `phone waiting for a solve taken while still. ` + txt;
   s.textContent = txt;
   s.className = "card small" + (fresh() ? "" : " stale");
 }
@@ -127,7 +137,7 @@ $("go").onclick = () => {
   nextBeat = 0; nextClick = 0;
 };
 setInterval(tick, 50);
-setInterval(poll, 2000);
+setInterval(poll, 250);
 poll();
 </script>
 </body>
