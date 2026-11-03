@@ -174,9 +174,11 @@ def solve_frame(path, above=0.3, hint=None, cmap=None):
     up = SkyCoord(az=aa.az, alt=aa.alt + 0.2 * u.deg, frame=fr).icrs
     ux, uy = w.world_to_pixel(up)
     roll = float(np.degrees(np.arctan2(-(ux - (W - 1) / 2), -(uy - (H - 1) / 2))))
-    pole = SkyCoord(ra=0 * u.deg, dec=90 * u.deg)
-    px, py = w.world_to_pixel(pole)
     lat = float(loc.lat.deg)
+    # the pole of date, not ICRS dec 90: the J2000 pole sits ~0.15 deg off it and circles
+    # it daily, which swung pole_offset_deg 4.97 -> 4.67 over the night of 2026-11-02
+    pole = SkyCoord(az=0 * u.deg, alt=lat * u.deg, frame=fr)
+    px, py = w.world_to_pixel(pole)
     tilt, rot, d_alt, d_az = errors(alt_c, az_c, lat, above, cmap)
     hz, bpm = tone(tilt, rot)
     out.update(ok=True, ra=round(float(cen.ra.deg), 4), dec=round(float(cen.dec.deg), 4),
