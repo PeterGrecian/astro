@@ -14,32 +14,32 @@ source:
 Every morning the cameras' nights are turned into stacks, sweeps and videos.
 None of it runs on a clock: capture and processing are tied to the Sun, so
 deliveries arrive later as the nights lengthen: about an hour later at
-midwinter than this week, and four hours earlier on the clock at midsummer
-(five by the Sun, since summer clocks run an hour ahead).
+midwinter than in early November, and four hours earlier on the clock at
+midsummer (five by the Sun, since summer clocks run an hour ahead).
 
 ## How a night becomes a delivery
 
 - **Capture** runs while the Sun is more than about 10° below the horizon.
 - **xoverpi** (FirstScope, hqfs) writes every frame straight to the big store
-  on muppet, which starts processing the moment capture stops. Last night that
-  was 58 minutes from last frame to published.
+  on muppet, which starts processing the moment capture stops. On the night of
+  4 November 2026 that was 58 minutes from last frame to published.
 - **eclipticam** keeps its frames on its own SSD and processes them itself, on
-  the Pi 5, starting at civil dawn (Sun 6° down). v3w took 2 h 21 min last
+  the Pi 5, starting at civil dawn (Sun 6° down). v3w took 2 h 21 min that
   night, most of it rendering three sweeps. Afterwards the night's frames are
   copied to the big store over Wi-Fi, which takes about 2 hours.
 
-## This week (GMT)
+## One measured night: 4 to 5 November 2026 (GMT)
 
 | | Last frame | Delivered |
 |---|---|---|
 | xoverpi | 06:13 | 07:11 |
 | eclipticam v3w | 06:00 | 08:48 |
-| eclipticam hq16 | 06:00 | not yet automatic |
+| eclipticam hq16 | 06:00 | not yet automatic then |
 | frames on the big store | | about 11:35 |
 
 ## Through the year (London time, 21st of each month)
 
-Proposed order: hq16 processed on eclipticam straight after v3w, then the copy.
+Assumes the order proposed in November 2026: hq16 processed on eclipticam straight after v3w, then the copy.
 
 | | Night | xoverpi | v3w | hq16 | Big store |
 |---|---|---|---|---|---|
@@ -60,10 +60,10 @@ The longest night, 21 to 22 December, is the worst case: everything is
 delivered by about half past eleven and copied by about a quarter to two,
 still three hours before the next night's capture begins at 17:07.
 
-## Caveats
+## Caveats (as of 5 November 2026)
 
-- The stars-held-still (derot) sweep is not running on eclipticam yet. When it
-  does it adds about half an hour to v3w and pushes everything after it back.
-- hq16's times are extrapolated from v3w's; a timed run on the Pi is under way.
+- The stars-held-still (derot) sweep was not yet running on eclipticam. Once it
+  runs it adds about half an hour to v3w and pushes everything after it back.
+- hq16's times are extrapolated from v3w's, pending a timed run on the Pi.
 - Summer short nights are probably a few minutes later than shown, because
   some steps take the same time whatever the night's length.
