@@ -263,11 +263,14 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         echo "--- derot-sky sweeps (camera model $(basename "$cammodel"))"
         # ~600 MB per sweep worker (10 registered frames + cache), so its own
         # job cap: 4 fits muppet beside the NFS server; override DEROT_JOBS.
+        export DEROT_CAMERA="$CAMERA"   # derot-sky reads this camera's frames
         derot_sky_sweeps () {
             local cube="${night_dir}/skyglow-cube.npz" glow="${night_dir}/skyglow-model.npz"
             local cam="${night_dir}/skyglow-cammodel.json" t
+            # the cube goes in the night dir, beside the glow model: for v3w that is
+            # night/<night>/, one level above the frames in night/<night>/v3w/.
             [[ -s "$cube" ]] || BIGSTORE="${BIGSTORE:-/mnt/bigstore/astro-data}" \
-                "$PY" "$HERE/skyglow-model" cube "$CAMERA" "$NIGHT" --to-night -j "$JOBS" || return 1
+                "$PY" "$HERE/skyglow-model" cube "$CAMERA" "$NIGHT" -o "$cube" -j "$JOBS" || return 1
             # the fit uses the night's clear dark frames only; with under an hour
             # of them it refuses, and a reference model from a clear night stands in
             if [[ ! -s "$glow" ]]; then

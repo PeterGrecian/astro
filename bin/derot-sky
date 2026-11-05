@@ -58,6 +58,14 @@ from astro.skyglow import SIDEREAL_RAD_PER_S, CameraModel, GlowModel, _enu  # no
 
 LAT, LON = 51.3948, -0.2923
 BASE = os.environ.get("BIGSTORE", "/mnt/bigstore/astro-data")
+# Whose frames: astrocam unless DEROT_CAMERA says otherwise (publish-night-cam sets it).
+# The same layout as skyglow-model's frame_root, so the cube and the frames agree.
+CAMERA = os.environ.get("DEROT_CAMERA", "astrocam")
+
+
+def night_root(night):
+    return {"astrocam": f"{BASE}/astrocam-frames/{night}",
+            "eclipticam-v3w": f"{BASE}/eclipticam-frames/night/{night}/v3w"}[CAMERA]
 
 
 EXPTIME_S = 59.9   # astrocam default; night_frames() replaces it from the night's own header
@@ -68,7 +76,7 @@ EXPTIME_S = 59.9   # astrocam default; night_frames() replaces it from the night
 def night_frames(night, cover="open"):
     global EXPTIME_S
     out = []
-    for p in sorted(glob.glob(f"{BASE}/astrocam-frames/{night}/[0-2][0-9]/*.fits.fz")):
+    for p in sorted(glob.glob(f"{night_root(night)}/[0-2][0-9]/*.fits.fz")):
         ms = int(os.path.basename(p).split(".")[0])
         out.append((datetime.fromtimestamp(ms / 1000, timezone.utc), p))
     if out:
@@ -260,7 +268,7 @@ def cmd_align(a):
         out = np.array(p.map(_align_one, [(f[1], a.camera, a.glow) for f in frames], chunksize=4))
     out = out[np.argsort(out[:, 0])]
     ok = np.isfinite(out[:, 1])
-    dst = a.out or f"{BASE}/astrocam-frames/{a.night}/derot-sky-align.npy"
+    dst = a.out or f"{night_root(a.night)}/derot-sky-align.npy"
     np.save(dst, out)
     print(f"{ok.sum()} of {len(out)} frames aligned (median {np.median(out[ok, 5]):.0f} stars); star offset "
           f"from the model {np.median(out[ok, 6]):.2f} px -> {np.median(out[ok, 7]):.2f} px after the per-frame fit")
@@ -286,7 +294,11 @@ def _apply_align(x, y, cm, al):
 
 
 # clear-sky glow-fit residual (ADU) at G level (ADU above black), per sub length
-CLEAN_NOISE_REF = {59.9: (0.276, 29.6), 14.9: (0.197, 7.35)}
+# Glow-fit residual of a clear frame, (rms ADU, at G level ADU), per camera and exposure.
+# eclipticam-v3w: median of 2026-10-29's moonless clear stretch, 00:00-02:00 UTC
+# (0.19 x sqrt(level)); one night only, so provisional (#1030).
+CLEAN_NOISE_REF = {"astrocam": {59.9: (0.276, 29.6), 14.9: (0.197, 7.35)},
+                   "eclipticam-v3w": {59.9: (1.17, 38.0)}}
 
 
 def clean_frames(night, frames, glow_path, max_ratio):
@@ -295,7 +307,7 @@ def clean_frames(night, frames, glow_path, max_ratio):
     # clean-sky selection from the night's block cube (skyglow-model cube), the
     # same green-calibrated test as `skyglow-model check`: residual of the glow
     # fit vs the sky-limited block noise (0.276 ADU at G level 29.6, ~sqrt(level))
-    z = np.load(f"{BASE}/astrocam-frames/{night}/skyglow-cube.npz")
+    z = np.load(os.path.join(os.path.dirname(os.path.abspath(glow_path)), "skyglow-cube.npz"))   # beside the glow model
     g = np.load(glow_path)
     gmodes, gsky = (g["modes"][1] if g["modes"].ndim == 4 else g["modes"]), g["sky"].ravel()
     M = gmodes.reshape(len(gmodes), -1)[:, gsky].T
@@ -304,8 +316,8 @@ def clean_frames(night, frames, glow_path, max_ratio):
     # the noise floor per exposure: 15 s subs sit at 0.197 ADU at G level 7.35
     # (clear 2026-10-09, median frame, clear-frame glow model). The 0.66 first
     # entered here was the residual of a cloud-shaped model, not noise.
-    e = min(CLEAN_NOISE_REF, key=lambda k: abs(k - EXPTIME_S))
-    s0, l0 = CLEAN_NOISE_REF[e]
+    ref = CLEAN_NOISE_REF[CAMERA]
+    s0, l0 = ref[min(ref, key=lambda k: abs(k - EXPTIME_S))]
     ratio = np.sqrt(np.mean((Xc - amp @ M.T) ** 2, 1)) / (s0 * np.sqrt(np.clip(Xc.mean(1), 1, None) / l0))
     clean = {int(t) for t, r in zip(z["t"], ratio) if r < max_ratio}
     n0 = len(frames)
