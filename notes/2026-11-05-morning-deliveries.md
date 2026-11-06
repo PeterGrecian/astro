@@ -11,13 +11,14 @@ source:
   scaling: each processing step taken as proportional to the length of the night (10-29 for eclipticam, 11-04 for xoverpi); hq16 timed on the Pi on 2026-11-05 (night of 11-04, colour sweep only, 114 min wall)
 ---
 
-Every morning the cameras' nights are turned into stacks, sweeps and videos.
-None of it runs on a clock: capture and processing are tied to the Sun, so
-deliveries arrive later as the nights lengthen: about an hour later at
-midwinter than in early November, and four hours earlier on the clock at
-midsummer (five by the Sun, since summer clocks run an hour ahead).
+Each night's videos arrive on a schedule set by the Sun, not the clock: about
+an hour later at midwinter than in early November, and four hours earlier at
+midsummer.
 
 ## How a night becomes a delivery
+
+Every morning the cameras' nights are turned into stacks, sweeps and videos.
+None of it runs on a clock; summer clock times are an hour ahead of the Sun.
 
 - **Capture** runs while the Sun is more than about 10° below the horizon.
 - **xoverpi** (FirstScope, hqfs) writes every frame straight to the big store
