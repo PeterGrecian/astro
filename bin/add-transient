@@ -69,6 +69,16 @@ one Markdown file per card, with YAML frontmatter for the fields:
     - both ends interior to the frame
     - present in exactly one sub
 
+Optional frontmatter for an article-style entry (#1030, Fireworks!):
+
+    summary: the short intro shown on the gallery list (default: the
+             caption's first paragraph); the entry page carries the rest
+    video:   an mp4, uploaded as transients/videos/<id>.mp4 and played at
+             the top of the entry page; `image:` is then its poster
+    figures: more pictures for the entry page, in order, each
+             {image: PATH, caption: TEXT}; uploaded as
+             transients/figures/<id>-<n>.jpg
+
 Recognised headings are Caption, Reasoning (or Rationale) and Evidence, at
 any level, case-insensitively; every other heading is just body text and
 stays in whichever section it falls in. A standalone Markdown image line is
@@ -230,6 +240,18 @@ def parse_card(md_path):
     def _s(key):
         return str(meta[key]) if meta.get(key) else None
 
+    video = None
+    if meta.get("video"):
+        video = resolve_image(md_path, meta["video"])
+        if video is None:
+            raise ValueError(f"{md_path}: video {meta['video']!r} not found")
+    figures = []
+    for i, f in enumerate(meta.get("figures") or [], 1):
+        fp = resolve_image(md_path, (f or {}).get("image"))
+        if fp is None:
+            raise ValueError(f"{md_path}: figure {i} image {(f or {}).get('image')!r} not found")
+        figures.append({"image": fp, "caption": str(f.get("caption") or "")})
+
     return {
         "image": image,
         "title": str(meta["title"]),
@@ -242,6 +264,9 @@ def parse_card(md_path):
         "rationale": body["rationale"],
         "evidence": list(evidence),
         "confidence": str(meta.get("confidence") or "unknown").lower(),
+        "summary": " ".join(str(meta.get("summary") or "").split()),
+        "video": video,
+        "figures": figures,
         # The filename IS the id, and so the URL: content/transients/
         # 2026-08-10-meteor-x.md serves at /astro/transients/2026-08-10-meteor-x.
         # That way the card you are editing is findable from the page you are
@@ -253,7 +278,8 @@ def parse_card(md_path):
 
 
 def build_entry(card):
-    """(entry, full_bytes, thumb_bytes) for one card, ready to upload."""
+    """(entry, full_bytes, thumb_bytes, extras) for one card, ready to upload.
+    extras: [(key, bytes, content_type)] for a video and figures, if any."""
     from PIL import Image
     date = card["date"] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
@@ -283,7 +309,22 @@ def build_entry(card):
         "source": card.get("source") or str(card["image"]),
         "added_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    return entry, encode_full(img), make_thumb(img)
+    extras = []
+    if card.get("summary"):
+        entry["summary"] = card["summary"]
+    if card.get("video"):
+        entry["video_key"] = f"{PREFIX}/videos/{item_id}.mp4"
+        extras.append((entry["video_key"], Path(card["video"]).read_bytes(), "video/mp4"))
+    figs = []
+    for n, f in enumerate(card.get("figures") or [], 1):
+        fi = Image.open(f["image"])
+        key = f"{PREFIX}/figures/{item_id}-{n}.jpg"
+        figs.append({"key": key, "caption": f["caption"],
+                     "width": fi.width, "height": fi.height})
+        extras.append((key, encode_full(fi), "image/jpeg"))
+    if figs:
+        entry["figures"] = figs
+    return entry, encode_full(img), make_thumb(img), extras
 
 
 def s3_client():
@@ -373,7 +414,8 @@ def cmd_remove(s3, item_id, publish):
     write_index(s3, index)
     # Drop the objects too: an unreferenced full-size JPEG in the bucket is
     # invisible and pays storage forever.
-    for key in (victim.get("image_key"), victim.get("thumb_key")):
+    for key in (victim.get("image_key"), victim.get("thumb_key"), victim.get("video_key"),
+                *[f.get("key") for f in victim.get("figures") or []]):
         if key:
             s3.delete_object(Bucket=BUCKET, Key=key)
             print(f"deleted s3://{BUCKET}/{key}")
@@ -482,16 +524,17 @@ def main():
     entries = []
     for card in cards:
         try:
-            entry, full_bytes, thumb_bytes = build_entry(card)
+            entry, full_bytes, thumb_bytes, extras = build_entry(card)
         except ValueError as exc:
             print(f"{card.get('source') or card['image']}: {exc}",
                   file=sys.stderr)
             return 1
-        entries.append((entry, full_bytes, thumb_bytes))
+        entries.append((entry, full_bytes, thumb_bytes, extras))
         print(json.dumps(entry, indent=2))
         print(f"source {entry['width']}x{entry['height']}  "
               f"full {len(full_bytes)/1024:.0f}KB  "
-              f"thumb {len(thumb_bytes)/1024:.0f}KB")
+              f"thumb {len(thumb_bytes)/1024:.0f}KB"
+              + "".join(f"  {k.rsplit('/', 1)[1]} {len(b)/1024:.0f}KB" for k, b, _ in extras))
 
     if not args.publish:
         print(f"dry run ({len(entries)} card(s)) — pass --publish to upload")
@@ -500,7 +543,7 @@ def main():
     # One read-modify-write for the whole batch: publishing a directory of
     # cards should leave the manifest rewritten once, not once per card.
     index = load_index(s3)
-    for entry, full_bytes, thumb_bytes in entries:
+    for entry, full_bytes, thumb_bytes, extras in entries:
         item_id = entry["id"]
         replaced = any(e.get("id") == item_id for e in index["items"])
         index["items"] = [e for e in index["items"] if e.get("id") != item_id]
@@ -509,6 +552,8 @@ def main():
                       ContentType="image/jpeg")
         s3.put_object(Bucket=BUCKET, Key=entry["thumb_key"], Body=thumb_bytes,
                       ContentType="image/jpeg")
+        for key, body, ctype in extras:
+            s3.put_object(Bucket=BUCKET, Key=key, Body=body, ContentType=ctype)
         print(f"{'replaced' if replaced else 'added'} {item_id}")
     write_index(s3, index)
     print(f"{len(index['items'])} item(s) at "

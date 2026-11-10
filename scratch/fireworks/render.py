@@ -2,6 +2,8 @@
 
   render.py v3w   2026-11-05 19:40 20:30 OUTDIR   # publishable: privacy crop, clock, scale bar
   render.py hq16  2026-11-07 17:48 20:12 OUTDIR   # look-only frames for splay
+  render.py v3w   2026-11-05 19:40 20:30 OUTDIR 512 160   # also drop the left 512 and right 160 binned px
+      (the window glass reflects the lit room and frame there in the 11-05 peak frames; #1030)
 
 Colour: 2x2 block demosaic (half res), black subtracted, white-balanced on
 the median sky of the first frame, ONE fixed asinh stretch for the whole
@@ -14,8 +16,10 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 L = ZoneInfo("Europe/London")
-ROOT = "/mnt/muppet/bigstore/eclipticam-frames/night"
+ROOT = os.environ.get("BIGSTORE", "/mnt/muppet/bigstore") + "/eclipticam-frames/night"
 cam, night, t0, t1, out = sys.argv[1:6]
+LEFT = int(sys.argv[6]) if len(sys.argv) > 6 else 0   # binned px cut from the left (privacy)
+RIGHT = int(sys.argv[7]) if len(sys.argv) > 7 else 0  # and from the right
 os.makedirs(out, exist_ok=True)
 sub = {"v3w": "v3w", "hq16": "hq16"}[cam]
 BLACK = {"v3w": 64.0, "hq16": 256.0}[cam]
@@ -60,7 +64,7 @@ for i, p in enumerate(fs):
     y = np.arcsinh(K * v) / np.arcsinh(K)
     img = (np.clip(y, 0, 1) * 255).astype(np.uint8)[:, :, ::-1].copy()  # BGR
     if cam == "v3w":
-        img = img[:1064]                      # privacy.json publish_keep_top_px (binned)
+        img = np.ascontiguousarray(img[:1064, LEFT:img.shape[1] - RIGHT])   # privacy.json publish_keep_top_px (binned); LEFT: the room reflection
         h, w = img.shape[:2]
         # scale bar: gnomonic f = 1957.8 full-res px -> 978.9 binned; 10 deg at centre
         bar = int(round(978.9 * np.tan(np.radians(10))))
