@@ -106,6 +106,11 @@ echo "=== publish-night-cam ${CAMERA} ${NIGHT} ==="
 # just transcode existing sweep-*.mp4 -> sweep-*-web.mp4 + publish. ~1min/night.
 # SKIP_NIGHTLY=1: keep the night's existing stacks/summary and redo only the
 # sweeps (a derot or glow re-run; nightly-cam is ~1.5 h on a 15 s night).
+# DEROT_ONLY=1: the night was processed elsewhere (eclipticam-v3w on the Pi);
+# run only the derot-sky + glow sweeps here (muppet, after the ship), then
+# poster/web-encode those and publish. Implies SKIP_NIGHTLY. See bin/derot-after-ship.
+DEROT_ONLY="${DEROT_ONLY:-0}"
+[[ "$DEROT_ONLY" -eq 1 ]] && SKIP_NIGHTLY=1
 if [[ "$WEB_ONLY" -eq 0 && "${SKIP_NIGHTLY:-0}" -ne 1 ]]; then
     echo "--- nightly-cam"
     if ! "$PY" "$HERE/nightly-cam" --camera "$CAMERA" --night "$NIGHT" --no-derot; then
@@ -179,7 +184,9 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
 
     # Colour sweep (the pretty/hero one). The mono sweep was dropped from
     # deliverables 2026-06-28 — colour + diff + detrans cover the science.
-    for mode in colour; do
+    # DEROT_ONLY skips colour and both detrans sweeps (made on the capture host).
+    _cam_sweeps=(colour); [[ "$DEROT_ONLY" -eq 1 ]] && _cam_sweeps=()
+    for mode in "${_cam_sweeps[@]}"; do
         sweep_dir="${night_dir}/sweep-${mode}"
         mkdir -p "$sweep_dir"
         mode_args=("${common_args[@]}" --out-dir "$sweep_dir")
@@ -218,7 +225,9 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             && detrans_bg+=(--fg-mask "$REPO/${CAMERA}/foreground-mask.png")
     fi
     echo "--- detrans-sweep (registered-streak animation)"
-    if "$PY" "$HERE/detrans-sweep" \
+    if [[ "$DEROT_ONLY" -eq 1 ]]; then
+        echo "detrans: skipped (DEROT_ONLY)"
+    elif "$PY" "$HERE/detrans-sweep" \
             --camera "$CAMERA" --night "$NIGHT" --mode max \
             --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" \
             --bin "$DETRANS_BIN" --fps "$FPS" \
@@ -238,7 +247,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     # it everywhere by default. Override with SKIP_DETRANS_DEEP=1 if a host
     # ever needs to drop it.
     SKIP_DETRANS_DEEP="${SKIP_DETRANS_DEEP:-0}"
-    if [[ "$SKIP_DETRANS_DEEP" -eq 1 ]]; then
+    if [[ "$SKIP_DETRANS_DEEP" -eq 1 || "$DEROT_ONLY" -eq 1 ]]; then
         echo "--- detrans-deep SKIPPED (SKIP_DETRANS_DEEP=1)"
     elif "$PY" "$HERE/detrans-sweep" \
             --camera "$CAMERA" --night "$NIGHT" --mode deep \
@@ -259,6 +268,15 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     # refine first (each built only if missing, all beside the frames). A
     # cloudy night fails cleanly and the pipeline continues without them.
     cammodel=$(ls "$REPO/${CAMERA}"/cammodel-*.json 2>/dev/null | sort | tail -1 || true)
+    # derot_host in camera.json pins derot to one host (eclipticam-v3w: muppet,
+    # where bigstore is; the Pi has neither the RAM nor the layout). Elsewhere
+    # it is skipped, and bin/derot-after-ship runs it there after the ship.
+    derot_host=$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1])).get('derot_host',''))" \
+        "$REPO/${CAMERA}/camera.json" 2>/dev/null || true)
+    if [[ -n "$cammodel" && -n "$derot_host" && "$derot_host" != "$(hostname -s)" ]]; then
+        echo "--- derot-sky: runs on $derot_host (camera.json derot_host), not here"
+        cammodel=""
+    fi
     if [[ -n "$cammodel" && "${SKIP_DEROT_SKY:-0}" -ne 1 ]]; then
         echo "--- derot-sky sweeps (camera model $(basename "$cammodel"))"
         # ~600 MB per sweep worker (10 registered frames + cache), so its own
@@ -365,12 +383,14 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             && echo "wrote $2 (frame $best of $n of $(basename "$1"))"
         rm -rf "$tmp"
     }
-    for s in colour glow detrans detrans-deep derot derot-deep; do
+    _post=(colour glow detrans detrans-deep derot derot-deep)
+    [[ "$DEROT_ONLY" -eq 1 ]] && _post=(glow derot derot-deep)
+    for s in "${_post[@]}"; do
         extract_mid "${night_dir}/sweep-${s}.mp4" \
                     "${night_dir}/poster-${s}.jpg"
     done
     # Calendar card thumbnail = the colour poster.
-    [[ -s "${night_dir}/poster-colour.jpg" ]] \
+    [[ "$DEROT_ONLY" -eq 0 && -s "${night_dir}/poster-colour.jpg" ]] \
         && cp "${night_dir}/poster-colour.jpg" "${night_dir}/thumb.jpg"
 
     # Web-delivery versions: 1280-wide, denoised, faststart — ~1.5MB vs the
@@ -396,7 +416,7 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             echo "web encode FAILED for $(basename "$1"); continuing"
         fi
     }
-    for s in colour glow detrans detrans-deep derot derot-deep; do
+    for s in "${_post[@]}"; do
         make_web "${night_dir}/sweep-${s}.mp4" \
                  "${night_dir}/sweep-${s}-web.mp4"
     done

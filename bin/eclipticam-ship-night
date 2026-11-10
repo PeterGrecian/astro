@@ -264,6 +264,10 @@ for night in "${NIGHTS[@]}"; do
     fi
     copied=$((copied+1))
     log "  [$night] landed + verified on bs"
+    # mark it for muppet's derot-after-ship timer (the derot-sky + glow sweeps
+    # run there, on the landed frames). rsync without --delete leaves it alone.
+    ssh $SSH_OPTS "$SSH_TARGET" "touch '$DST_ROOT/$night/.shipped'" \
+      || log "  [$night] could not mark .shipped (derot waits for the next ship)"
   fi
 
   # 3. ship-and-free, but only outside the safety window

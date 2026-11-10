@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# derot-after-ship — run eclipticam-v3w's derot-sky + glow sweeps on muppet,
+# once eclipticam-ship-night has landed the night on bigstore.
+#
+# eclipticam processes v3w on the Pi at dawn, but derot needs the RAM and the
+# bigstore layout, so camera.json pins it here (derot_host: muppet). The ship
+# touches night/<n>/.shipped after a night verifies; this runs (from a timer,
+# hourly through the day) DEROT_ONLY=1 publish-night-cam for each recently
+# shipped night without a .derot-done mark, then publishes.
+#
+# Usage:
+#   derot-after-ship                 # timer mode: shipped nights of the last --days
+#   derot-after-ship --night N ...   # backfill: these nights, markers ignored
+#   derot-after-ship -n              # dry run: say what would run
+set -uo pipefail
+
+CAMERA=eclipticam-v3w
+ROOT="${DEROT_NIGHT_ROOT:-$HOME/eclipticam-frames/night}"
+DAYS=4; DRY=0; NIGHTS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --night) NIGHTS+=("$2"); shift 2;;
+        --days)  DAYS="$2"; shift 2;;
+        -n|--dry-run) DRY=1; shift;;
+        -h|--help) sed -n '2,/^set -uo/p' "$0" | head -n -1; exit 0;;
+        *) echo "unknown arg: $1" >&2; exit 2;;
+    esac
+done
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# one at a time: a backfill and the timer must not race on the same night dir
+exec 9>"$HOME/.derot-after-ship.lock"
+flock -n 9 || { echo "derot-after-ship: already running"; exit 0; }
+
+if [[ ${#NIGHTS[@]} -eq 0 ]]; then
+    for d in $(seq "$DAYS" -1 1); do
+        n=$(date -u -d "-$d day" +%F)
+        [[ -e "$ROOT/$n/.shipped" && ! -e "$ROOT/$n/.derot-done" ]] && NIGHTS+=("$n")
+    done
+fi
+[[ ${#NIGHTS[@]} -eq 0 ]] && { echo "derot-after-ship: nothing shipped and pending"; exit 0; }
+
+rc_any=0
+for n in "${NIGHTS[@]}"; do
+    [[ -d "$ROOT/$n/v3w" ]] || { echo "[$n] no frames at $ROOT/$n/v3w; skipped"; continue; }
+    echo "[$n] DEROT_ONLY publish-night-cam --camera $CAMERA"
+    [[ "$DRY" -eq 1 ]] && continue
+    rc=0
+    DEROT_ONLY=1 "$HERE/publish-night-cam" --camera "$CAMERA" --night "$n" || rc=$?
+    # marked even on failure: a cloudy night fails the gate cleanly every time,
+    # and a real fault shows in the journal (and the unit's OnFailure)
+    echo "rc=$rc $(date -u +%FT%TZ)" > "$ROOT/$n/.derot-done"
+    echo "[$n] done rc=$rc"
+    [[ "$rc" -ne 0 ]] && rc_any=1
+done
+exit "$rc_any"
