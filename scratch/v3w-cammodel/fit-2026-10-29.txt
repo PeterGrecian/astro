@@ -1,0 +1,17 @@
+2026-10-29: 7 frames 00:00-02:00 UTC
+  grid: 8 bright-star hits (excess 8); pointing moved az -4.50 alt -0.05 roll -4.80 deg from 10-07
+  00:00 pointing-only: n 55  median 0.70 px
+  00:20 pointing-only: n 48  median 0.81 px
+  00:40 pointing-only: n 53  median 0.70 px
+  01:00 pointing-only: n 71  median 1.33 px
+  01:19 pointing-only: n 82  median 0.94 px
+  01:39 pointing-only: n 112  median 1.10 px
+  01:59 pointing-only: n 104  median 0.70 px
+  joint r=4: lens f 975.0 k 0.3717 c (1151.1,647.3); per frame n/median [(62, 0.85), (56, 1.11), (66, 0.97), (83, 1.28), (94, 0.93), (124, 1.37), (120, 0.97)]
+  joint r=3: lens f 974.2 k 0.3761 c (1152.4,647.5); per frame n/median [(55, 0.8), (48, 0.98), (55, 0.9), (73, 1.18), (80, 0.89), (111, 1.23), (104, 0.89)]
+  joint r=2: lens f 974.3 k 0.3761 c (1152.7,646.5); per frame n/median [(52, 0.78), (40, 0.74), (49, 0.82), (61, 0.99), (72, 0.75), (98, 1.09), (90, 0.82)]
+  off-axis  0-20 deg: n  25  median 0.78 px
+  off-axis 20-35 deg: n  25  median 0.86 px
+  off-axis 35-50 deg: n  10  median 2.50 px
+  pointing drift over window (deg, vs ref): az -0.038..+0.002 alt -0.028..+0.031 roll -0.007..+0.029
+  -> /home/peter/tmp/v3w-cammodel/cammodel-2026-10-29.json  (pointing az 194.958 alt 30.943 roll -2.978; 5715 catalogue stars)
