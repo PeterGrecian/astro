@@ -15,7 +15,7 @@
   "lens": {
     "focal_length_mm": 16,
     "mount": "C",
-    "focus": "manual; epoch 1 set by hand 2026-10-13, epoch 2 lens refitted 2026-10-25 (not refocused), epoch 3 focus search #1 on 80 m trees 2026-11-02",
+    "focus": "manual; epoch 1 set by hand 2026-10-13, epoch 2 lens refitted 2026-10-25 (not refocused), epoch 3 focus search #1 on 80 m trees 2026-11-02, epoch 5 star-focused 2026-11-12",
     "aperture": 1.4
   },
   "lens_notes": "Manual 16 mm C-mount lens, fixed focus and iris: neither is under software control, so lens_position is null and the FITS carry no LENSPOS. Epoch 1 (10-13..10-25): no C-CS ring (none in the HQ box, though the datasheet says it ships with one), lens on a few threads of a wound-out back-focus ring. The YINETTECH 5-pack from Amazon (10-14) does not fit. Epoch 2 (10-25): the one genuine Raspberry Pi ring fitted. Focus 2026-10-13 was 'will have to do' at dusk, not a star-verified best; aperture setting not recorded.",
@@ -23,7 +23,7 @@
   "brightness_baseline_notes": "Epoch 3, focus search #1. Epoch 2 (10-25..11-02) was badly out of focus and ~3x brighter sky for an unexplained reason, so it does not join the baseline.",
   "plate_scale_deg_px": 0.005528,
   "plate_scale_notes": "SOLVED 2026-10-13 by astro-deliverables (astrometry.net on muppet, binned frame 1791927010433, ~22:30 BST): 39.8 arcsec per 2x2 binned pixel = 19.9 per photosite at full res (0.005528 deg); field 22.41 x 16.85 deg; centre RA 332.47 Dec -9.98 at that moment; up is -162.2 deg E of N. WCS at muppet ~/tmp/hqsolve/hqbin.wcs. Nominal was 19.98 (1.55 um / 16 mm). Epoch 1 only: refitting the lens with the C-CS adapter may shift it slightly.",
-  "position_index": 4,
+  "position_index": 5,
   "position_index_notes": "Calibration epoch, same convention as astrocam and eclipticam-v3w: INCREMENT whenever the camera, lens or mounting changes. Stamped as POSINDEX.",
   "position_registry": {
     "1": {
@@ -39,8 +39,12 @@
       "notes": "Focus search #1 (Peter, ~15:00 GMT 11-02): camera re-aimed at daylight targets, lens focus ring at infinity and locked, aperture fully open (f/1.4, Peter's recollection), focus set on the back-focus ring by libcamera FocusFoM on trees ~80 m away (3.2 um inside infinity, under 1 binned px); aerial ~30 m and brick courses ~10 m also in view. Pointing changed: re-solve the plate and recheck the privacy margin. MEASURED (astro-hq16 disc.py, 11-02 02:00-02:45 UTC, 946 discs): blur D 14.8 binned px = 46 um, defocus 64 um PAST infinity (Peter overshot the tree focus), tilt ~28 um corner to corner (TL 62 TR 73 BL 45 BR 56). CAUTION: on 11-03 before dusk Peter turned the back-focus ring (angle not recorded) the wrong way, so frames from 11-03 dusk to ~18:38 UTC still carry POSINDEX 3 but sit at ~160 um (D ~37 px, 18:19-18:23 UTC)."
     },
     "4": {
-      "dates": "2026-11-03 ~18:38 UTC..",
-      "notes": "Focus search #2 (Peter, ~18:38 UTC 11-03, under cloud): back-focus ring turned back toward focus after the wrong-way turn; angle not recorded yet. Measure with astro-hq16 disc.py on the first clear frames."
+      "dates": "2026-11-03 ~18:38 UTC..2026-11-12 ~17:40 UTC",
+      "notes": "Focus search #2 (Peter, ~18:38 UTC 11-03, under cloud): back-focus ring turned back toward focus after the wrong-way turn; angle not recorded yet. Measure with astro-hq16 disc.py on the first clear frames. MEASURED (disc.py, 11-03 18:42-20:41 UTC, ~1500 discs): D 11.5-13.0 binned px, defocus 50-54 um past infinity, steady over 2 h; tilt pattern as epoch 3 (TL 54 TR 63 BL 41 BR 49)."
+    },
+    "5": {
+      "dates": "2026-11-12 ~17:40 UTC..",
+      "notes": "Focus search #3 (Peter, 11-12 dusk, live view 8 s gain 16 on stars): back-focus ring turned the same way as the 11-03 18:38 turn, about half as far; Peter: 'we have focus'. Angle not recorded. Pointing unchanged from epoch 4 (alt ~19.7 az ~203.7). TO MEASURE: FWHM/tilt map on the first clear frames (astro-hq16)."
     }
   },
   "pedestal": 200,
