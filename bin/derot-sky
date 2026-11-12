@@ -145,39 +145,14 @@ def star_enu(radec, dt):
     return _enu(np.radians(aa.az.deg), np.radians(aa.alt.deg))
 
 
-def cmd_refine(a):
-    from scipy.optimize import least_squares
-    cm = CameraModel(a.camera)
-    gm = GlowModel(a.glow)
-    t = utc_on_night(a.night, a.frame_utc)
-    dt, path = min(night_frames(a.night), key=lambda tp: abs((tp[0] - t).total_seconds()))
-    img = gm.subtract(load_binned(path))
-    V = star_enu(cm.p["stars_radec_j2000"], mid(dt))
-    px, py = cm.project(V)
+def _match(img, noise, px, py, r):
+    """Nearest bright peak within r px of each predicted star -> centroids."""
     H, W = img.shape
-    noise = 1.4826 * np.median(np.abs(img - np.median(img)))
-    # 1. coarse global shift: score = summed (max-filtered, clipped) image at the
-    #    predicted positions, over a +/-search_shift grid. A wrong nearest-peak
-    #    match is common in a dense field; a whole-pattern shift is not.
-    from scipy.ndimage import maximum_filter
-    sm = maximum_filter(np.clip(img / noise, 0, 50), size=3)
-    inb = (px > 90) & (px < W - 90) & (py > 90) & (py < H - 90)
-    xi0, yi0 = np.round(px[inb]).astype(int), np.round(py[inb]).astype(int)
-    R = a.search_shift
-    best = (-1, 0, 0)
-    for dy in range(-R, R + 1, 2):
-        for dx in range(-R, R + 1, 2):
-            sc = sm[yi0 + dy, xi0 + dx].sum()
-            if sc > best[0]:
-                best = (sc, dx, dy)
-    base = sm[yi0, xi0].sum()
-    print(f"  coarse shift ({best[1]:+d},{best[2]:+d}) px: pattern score {best[0]:.0f} vs {base:.0f} unshifted")
-    px, py = px + best[1], py + best[2]
+    gy, gx = np.mgrid[-2:3, -2:3]
     meas, keep = [], []
-    r = a.search
     for i, (x, y) in enumerate(zip(px, py)):
         xi, yi = int(round(x)), int(round(y))
-        if not (r <= xi < W - r and r <= yi < H - r):
+        if not (r + 2 <= xi < W - r - 2 and r + 2 <= yi < H - r - 2):
             continue
         cut = img[yi - r:yi + r + 1, xi - r:xi + r + 1]
         j = np.unravel_index(np.argmax(cut), cut.shape)
@@ -187,32 +162,104 @@ def cmd_refine(a):
         s = img[cy - 2:cy + 3, cx - 2:cx + 3].clip(0)
         if s.shape != (5, 5) or s.sum() <= 0:
             continue
-        gy, gx = np.mgrid[-2:3, -2:3]
         meas.append((cx + (s * gx).sum() / s.sum(), cy + (s * gy).sum() / s.sum()))
         keep.append(i)
-    meas, keep = np.array(meas), np.array(keep)
-    print(f"{path}\n  {len(keep)} of {len(V)} catalogue stars found within {r} px")
-    off = np.hypot(px[keep] - meas[:, 0], py[keep] - meas[:, 1])
-    print(f"  before refine: median offset {np.median(off):.2f} px")
-    p0 = dict(cm.p)
+    return np.array(meas, float).reshape(-1, 2), np.array(keep, int)
 
-    def resid(q):
-        p0.update(az0=q[0], alt0=q[1], roll=q[2])
-        json.dump(p0, open(a.out + ".tmp", "w"))
-        m = CameraModel(a.out + ".tmp")
-        x, y = m.project(V[keep])
-        return np.concatenate([x - meas[:, 0], y - meas[:, 1]])
 
-    s = least_squares(resid, [cm.p["az0"], cm.p["alt0"], cm.p["roll"]], loss="soft_l1", f_scale=1.0)
-    os.remove(a.out + ".tmp")
-    d = np.hypot(*np.split(s.fun, 2))
-    p0.update(az0=float(s.x[0]), alt0=float(s.x[1]), roll=float(s.x[2]),
-              refined_on=f"{a.night} {dt.isoformat()}", refine_median_px=float(np.median(d)),
+def cmd_refine(a):
+    """Pointing (az0, alt0, roll) for one night from one frame. The v3w mount
+    moves a few degrees between nights (refined nights 10-15..11-11 spread
+    +-3 deg az, +-1 deg alt, +-1.4 deg roll), so the coarse step searches
+    shift AND roll, wide, before the nearest-star match and least squares."""
+    from scipy.ndimage import maximum_filter
+    from scipy.optimize import least_squares
+    cm = CameraModel(a.camera)
+    gm = GlowModel(a.glow)
+    t = utc_on_night(a.night, a.frame_utc)
+    dt, path = min(night_frames(a.night), key=lambda tp: abs((tp[0] - t).total_seconds()))
+    img = gm.subtract(load_binned(path))
+    V = star_enu(cm.p["stars_radec_j2000"], mid(dt))
+    H, W = img.shape
+    noise = 1.4826 * np.median(np.abs(img - np.median(img)))
+    # 1. coarse: for each trial roll, FFT-correlate a delta-image of the
+    #    predicted stars with a map of the point sources detected in the frame;
+    #    every shift within +-search_shift is scored at once (= predicted stars
+    #    landing on a detected star). Point sources only: scored against the
+    #    raw frame, a +-200 px search found lit foreground and glow residual
+    #    before stars (11-11 went 150 px wrong). A whole-pattern match: a wrong
+    #    nearest-peak match is common in a dense field, a wrong pattern is not.
+    from scipy.ndimage import grey_opening
+    th = img - grey_opening(img, size=(5, 5))           # white top-hat: points, not extended light
+    sky = gm.sky_mask(img.shape, 2)
+    if sky.mean() < 0.10:                               # degenerate glow mask (10-23: 0 of 5184 blocks
+        print(f"  glow sky mask covers {sky.mean():.1%} of the frame; matching unmasked")
+        sky = np.ones_like(sky)                         # after erosion): stars there are fine
+    th[~sky] = 0                                        # trees, roof
+    tn = 1.4826 * np.median(np.abs(th[sky] - np.median(th[sky])))
+    pk = (th == maximum_filter(th, size=5)) & (th > np.median(th[sky]) + 6 * tn)
+    sm = maximum_filter(pk.astype(float), size=3)       # +-1 px tolerance
+    print(f"  {int(pk.sum())} point sources detected for the coarse match")
+    F = np.fft.rfft2(sm)
+    R = a.search_shift
+    best = (-np.inf, 0, 0, 0.0, 0.0)
+    for dr in np.arange(-a.search_roll, a.search_roll + 1e-9, 0.5):
+        q = dict(cm.p, roll=cm.p["roll"] + np.radians(dr))
+        x, y = CameraModel(q).project(V)
+        ok = (x >= 0) & (x < W - 0.5) & (y >= 0) & (y < H - 0.5)
+        P = np.zeros((H, W))
+        np.add.at(P, (np.round(y[ok]).astype(int), np.round(x[ok]).astype(int)), 1.0)
+        C = np.fft.irfft2(F * np.conj(np.fft.rfft2(P)), s=(H, W))   # C[dy, dx] = sum sm[p + d]
+        C = np.roll(C, (R, R), axis=(0, 1))[:2 * R + 1, :2 * R + 1]
+        j = np.unravel_index(np.argmax(C), C.shape)
+        sc, med = C[j], np.median(C)
+        if sc > best[0]:
+            best = (sc, j[1] - R, j[0] - R, dr, med)
+    sc, sx, sy, dr, med = best
+    print(f"  coarse: shift ({sx:+d},{sy:+d}) px, roll {dr:+.1f} deg: pattern score {sc:.0f} "
+          f"vs {med:.0f} median over the search")
+    # match on the top-hat too, against its own noise: the glow-subtracted
+    # frame's noise is ruled by glow residual when the night's glow model is
+    # poor (10-27: coarse score 103, yet 10 stars passed 8 sigma of `img`)
+    img, noise = th, tn
+    # 2. match and fit, three rounds: each fit's model re-predicts the stars,
+    #    so stars the coarse step left a few px off (field edge, roll) come in.
+    p0 = dict(cm.p, roll=cm.p["roll"] + np.radians(dr))
+    px, py = CameraModel(p0).project(V)
+    px, py = px + sx, py + sy
+    first = True
+    for rnd in range(3):
+        meas, keep = _match(img, noise, px, py, a.search)
+        if rnd == 0:
+            print(f"{path}\n  {len(keep)} of {len(V)} catalogue stars found within {a.search} px")
+        if len(keep) < 6:
+            sys.exit(f"  refine: {len(keep)} stars matched, need 6 (cloud, or pointing outside the "
+                     f"+-{R} px / +-{a.search_roll:g} deg search)")
+        if first:
+            off = np.hypot(px[keep] - meas[:, 0], py[keep] - meas[:, 1])
+            print(f"  before refine: median offset {np.median(off):.2f} px")
+            first = False
+            # fold the coarse pixel shift into the pointing: fit from the
+            # rolled model, the shift is absorbed by az0/alt0 in the first round
+        q0 = [p0["az0"], p0["alt0"], p0["roll"]]
+
+        def resid(q):
+            x, y = CameraModel(dict(p0, az0=q[0], alt0=q[1], roll=q[2])).project(V[keep])
+            return np.concatenate([x - meas[:, 0], y - meas[:, 1]])
+
+        s = least_squares(resid, q0, loss="soft_l1", f_scale=1.0)
+        p0.update(az0=float(s.x[0]), alt0=float(s.x[1]), roll=float(s.x[2]))
+        px, py = CameraModel(p0).project(V)
+        d = np.hypot(*np.split(s.fun, 2))
+        print(f"  round {rnd + 1}: {len(keep)} stars, median offset {np.median(d):.2f} px")
+    p0.update(refined_on=f"{a.night} {dt.isoformat()}", refine_median_px=float(np.median(d)),
               refine_n=int(len(keep)))
     json.dump(p0, open(a.out, "w"), indent=1)
+    b0 = _enu(np.array(cm.p["az0"]), np.array(cm.p["alt0"]))
+    b1 = _enu(np.array(p0["az0"]), np.array(p0["alt0"]))
     print(f"  after refine:  median offset {np.median(d):.2f} px  (pointing moved "
-          f"{np.degrees(np.arccos(np.clip(_enu(np.array(cm.p['az0']), np.array(cm.p['alt0'])) @ _enu(np.array(s.x[0]), np.array(s.x[1])), -1, 1))):.3f} deg, "
-          f"roll {np.degrees(s.x[2] - cm.p['roll']):+.3f} deg)\n  -> {a.out}")
+          f"{np.degrees(np.arccos(np.clip(b0 @ b1, -1, 1))):.3f} deg, "
+          f"roll {np.degrees(p0['roll'] - cm.p['roll']):+.3f} deg)\n  -> {a.out}")
 
 
 def _align_one(args):
@@ -372,8 +419,16 @@ def cmd_residual(a):
 
 def cmd_clean(a):
     """Exit 0 when the night has at least --min-minutes of clean dark exposure (pipeline gate)."""
-    n = len(clean_frames(a.night, night_frames(a.night), a.glow, a.max_ratio))
+    fr = clean_frames(a.night, night_frames(a.night), a.glow, a.max_ratio)
+    n = len(fr)
     mins = n * EXPTIME_S / 60.0                    # minutes, not frames: subs went 60 s -> 15 s
+    if a.times and fr:
+        # candidate refine frames, spread evenly through the clean ones: on a
+        # part-cloudy night fixed clock times (23:00, 00:00, ...) miss the clear
+        # spell (10-19, 11-07: 30+ clean minutes, no refine frame among them)
+        idx = np.unique(np.linspace(0, n - 1, min(a.times, n)).round().astype(int))
+        with open(a.times_out, "w") as f:
+            f.writelines(fr[i][0].strftime("%H:%M:%S") + "\n" for i in idx)
     ok = mins >= a.min_minutes
     print(f"{a.night}: {n} clean frames of {EXPTIME_S:g} s = {mins:.0f} min "
           f"({'enough' if ok else 'too few'}; need {a.min_minutes:g})")
@@ -764,12 +819,17 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("refine"); r.add_argument("camera"); r.add_argument("night"); r.add_argument("frame_utc")
     r.add_argument("--glow", required=True); r.add_argument("--search", type=int, default=3)
-    r.add_argument("--search-shift", type=int, default=80)
+    r.add_argument("--search-shift", type=int, default=200,
+                   help="coarse search, +-px (v3w: ~34 px/deg; the mount wanders a few deg)")
+    r.add_argument("--search-roll", type=float, default=3.0, help="coarse search, +-deg of roll, 0.5 deg steps")
     r.add_argument("-o", "--out", required=True)
     c = sub.add_parser("clean", help="gate: exit 1 when the night has under --min-minutes of clean dark frames (cloud)")
     c.add_argument("night"); c.add_argument("--glow", required=True)
     c.add_argument("--max-ratio", type=float, default=1.5)
     c.add_argument("--min-minutes", type=float, default=30, help="clean exposure needed, minutes")
+    c.add_argument("--times", type=int, default=0, metavar="N",
+                   help="also write N clean frame times (UTC HH:MM:SS, spread evenly) to --times-out")
+    c.add_argument("--times-out", default="/dev/stdout")
     rs = sub.add_parser("residual", help="camera-fixed residual map (rings, column offsets) per unit sky")
     rs.add_argument("night"); rs.add_argument("--glow", required=True)
     rs.add_argument("--max-ratio", type=float, default=1.5)

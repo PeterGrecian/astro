@@ -109,6 +109,14 @@ def cmd_fit(a):
     # corners sit under 5 ADU and were dropped (5 ADU was 0.18 of 60 s sky)
     sky = (corr > a.min_corr) & (np.median(g, 0) > 0.18 * np.median(g))
     print(f"{use.sum()} of {n} frames in window, {sky.sum()} of {sky.size} blocks sky")
+    # a mask this small is not the sky but a failed test: on moonlit nights
+    # (v3w 10-23..10-27, 11-02) the moonlight gradient moves across the field,
+    # so blocks stop tracking the median curve (corr ~0.5); 21 of 5184 blocks
+    # on 10-23 left the derot sweep and refine nothing to see. Refuse, so the
+    # pipeline takes the reference model (amplitudes are refitted per frame).
+    if sky.mean() < a.min_sky_frac:
+        sys.exit(f"sky mask degenerate ({sky.sum()} of {sky.size} blocks < {a.min_sky_frac:.0%}); "
+                 f"use a reference model")
     # Sky blocks are found on the whole window above (they need the dusk and
     # cloud swings to show they track the sky); the modes on clear sky only.
     # Clear dark sky only. An unweighted SVD is ruled by its brightest frames,
@@ -221,6 +229,9 @@ def main():
     f.add_argument("--min-minutes", type=float, default=60,
                    help="refuse (exit 1) with less clear dark sky than this; the pipeline then "
                         "falls back to <camera>/skyglow-ref.npz (default 60)")
+    f.add_argument("--min-sky-frac", type=float, default=0.15,
+                   help="refuse (exit 1) when fewer blocks than this pass as sky (default 0.15; "
+                        "v3w healthy nights 0.3-0.9, moonlit failures 0.004-0.07)")
     f.add_argument("-o", "--out")
     k = sub.add_parser("check", help="fit each frame of other nights' cubes with a model; count clean frames")
     k.add_argument("model"); k.add_argument("cubes", nargs="+")

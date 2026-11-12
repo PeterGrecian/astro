@@ -302,8 +302,13 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             "$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "$glow" || return 1
             if [[ ! -s "$cam" ]]; then
                 # pointing refine on a frame near local midnight; first one that
-                # fits (a cloudy frame finds too few stars) wins
-                for t in 23:00:00 00:00:00 22:30:00 01:00:00 02:00:00; do
+                # fits (a cloudy frame finds too few stars) wins. Then frames from
+                # the clean list itself: on a part-cloudy night the clock times
+                # can all miss the clear spell.
+                local ct
+                ct=$("$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "$glow" --times 6 --times-out /dev/fd/3 \
+                     3>&1 >/dev/null 2>/dev/null | tr '\n' ' ' || true)
+                for t in 23:00:00 00:00:00 22:30:00 01:00:00 02:00:00 $ct; do
                     "$PY" "$HERE/derot-sky" refine "$cammodel" "$NIGHT" "$t" --glow "$glow" -o "$cam.try" \
                         && "$PY" -c "import json,sys; p=json.load(open('$cam.try')); sys.exit(not (p['refine_n'] >= 50 and p['refine_median_px'] < 1.5))" \
                         && mv "$cam.try" "$cam" && break

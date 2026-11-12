@@ -86,7 +86,7 @@ def _rotate(v, axis, ang):
 
 class CameraModel:
     def __init__(self, path):
-        p = json.load(open(path))
+        p = dict(path) if isinstance(path, dict) else json.load(open(path))
         self.p = p
         self.mirror = p["mirror"]
         self.f, self.k, self.cx, self.cy = p["f"], p["k"], p["cx"], p["cy"]
