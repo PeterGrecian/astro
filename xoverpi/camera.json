@@ -106,7 +106,7 @@
   "location_file": "location.json",
   "privacy_file": null,
   "subcams": null,
-  "position_index": 5,
+  "position_index": 6,
   "position_registry": {
     "1": {
       "dates": "2026-09-14..2026-10-13",
@@ -125,8 +125,12 @@
       "notes": "FirstScope adjusted and camera rigidly mounted (Peter, 2026-11-01), eyepiece extension 7.09 mm. Pointing not yet solved; the first clear night gives it."
     },
     "5": {
-      "dates": "2026-11-03 18:15 UTC..",
-      "notes": "Repointed at the pole with pole-point (Peter, 2026-11-03 18:00-18:20 UTC): centre alt 51.333, az +0.25, pole 0.17 deg from centre, Polaris in the field. Focus set before 18:21 UTC (during the repointing) to eyepiece extension 6.52 mm (calipers, Peter). Frames of this night until the daemon restarts carry POSINDEX 4 in their headers."
+      "dates": "2026-11-03 18:15 UTC..by 2026-11-05",
+      "notes": "Repointed at the pole with pole-point (Peter, 2026-11-03 18:00-18:20 UTC): centre alt 51.333, az +0.25, pole 0.17 deg from centre, Polaris in the field. Focus set before 18:21 UTC (during the repointing) to eyepiece extension 6.52 mm (calipers, Peter). Frames of this night until the daemon restarts carry POSINDEX 4 in their headers. Ended some time after 11-03 19:45 UTC: on 11-05 the centre was alt 51.91 az +6.67 (pole 4.17 deg), on 11-06 alt 51.87 az -2.54 (pole 1.64 deg) after bench work. Those two nights still carry POSINDEX 5 and are not separately registered (see astro-capture STATE)."
+    },
+    "6": {
+      "dates": "2026-11-12 18:57 UTC..",
+      "notes": "Repointed with pole-point and the 6a (Peter, 2026-11-12): centre alt 51.72, az +0.25, pole 0.36 deg below centre, Polaris 0.45 deg from centre (0.43 east, 0.13 down). Focus: eyepiece extension set to 7.05 mm, then focused by eye on the live view (starcam-live-web) about 18:45 UTC; final extension not measured. Frames before the 19:0x daemon restart carry POSINDEX 5."
     }
   }
 }
