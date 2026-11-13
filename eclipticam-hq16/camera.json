@@ -86,5 +86,15 @@
   "night_output": "subcam",
   "night_output_notes": "Products go in night/<night>/hq16/ beside the hour dirs, not night/<night>/ where v3w's live (astro/frames.py night_output_dir).",
   "location_file": "location.json",
-  "occlusion_file": null
+  "occlusion_file": null,
+  "field_solve": {
+    "epoch": 4,
+    "utc": "2026-11-03T20:27:00Z",
+    "ra_deg": 326.03,
+    "dec_deg": -16.01,
+    "width_deg": 22.41,
+    "height_deg": 16.91,
+    "up_deg_e_of_n": -153.9,
+    "notes": "Centre/size/orientation of the HQ16 field from astro-hq16's plate solve (epoch 4, unchanged pointing into epoch 5 per astro-hq16 #1083). Fixed in alt-az, so bin/derot-annotate carries it to any night. Replace with the epoch-5 solve (#455)."
+  }
 }

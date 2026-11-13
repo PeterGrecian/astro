@@ -801,13 +801,22 @@ def cmd_sweep(a):
     with Pool(a.jobs) as p:
         p.map(_sweep_chunk, [(c, a.camera, a.glow, shape, a, stretch, dirs) for c in chunks])
 
-    # 3. encode; preset/threads honour publish-night-cam's host-aware env
+    # 3. encode; preset/threads honour publish-night-cam's host-aware env.
+    # Privacy crop HERE: the sweep is published, and once unmasked (2026-11-13)
+    # the bottom rows show neighbouring windows (<camera>/privacy.json).
+    vf = []
+    pj = Path(__file__).resolve().parent.parent / CAMERA / "privacy.json"
+    if pj.exists():
+        spec = json.load(open(pj))
+        keep = int(round(spec["publish_keep_top_px"] * shape[0] / spec["frame_size_px"][1])) // 2 * 2
+        vf = ["-vf", f"crop=iw:{keep}:0:0"]
+        print(f"privacy crop: top {keep} of {shape[0]} rows ({pj.name})")
     for o, d in zip(outs, dirs):
         if not o:
             continue
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error",
                         "-threads", os.environ.get("FFMPEG_THREADS", "0"), "-framerate", str(a.fps),
-                        "-i", str(d / "f%04d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-i", str(d / "f%04d.png"), *vf, "-c:v", "libx264", "-pix_fmt", "yuv420p",
                         "-crf", "20", "-preset", os.environ.get("FFMPEG_PRESET", "medium"), str(o)], check=True)
         if not a.keep_frames:
             shutil.rmtree(d)

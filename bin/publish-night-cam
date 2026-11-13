@@ -336,7 +336,14 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
                 --sweep-start "$SWEEP_START" --sweep-end "$SWEEP_END" \
                 --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" -j "${DEROT_JOBS:-4}" \
                 ${al:+--align "$al"} ${rs:+--residual "$rs"} --erode "${DEROT_ERODE:--1}" \
-                --out-max "${night_dir}/sweep-derot.mp4" --out-deep "${night_dir}/sweep-derot-deep.mp4"
+                --out-max "${night_dir}/sweep-derot.mp4" --out-deep "${night_dir}/sweep-derot-deep.mp4" || return 1
+            # labelled stills (Peter 2026-11-13): the deep sky with the Milky
+            # Way's plane and bright stars named; HQ16's field on the wide view
+            "$PY" "$HERE/derot-annotate" sky "$NIGHT" --sweep-start "$SWEEP_START" \
+                --step-min "$STEP_MIN" --window-min "$WINDOW_MIN" || echo "derot-annotate sky failed"
+            if [[ "$CAMERA" == eclipticam-v3w ]]; then
+                "$PY" "$HERE/derot-annotate" hq16 "$NIGHT" || echo "derot-annotate hq16 failed"
+            fi
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"
         # glow sweep, in the retired difference sweep's slot: max of each
@@ -528,6 +535,7 @@ names = [
     "poster-derot.jpg",
     "poster-glow.jpg",
     "poster-derot-deep.jpg",
+    "sky-labelled.jpg", "hq16-in-v3w.jpg",
     # web-delivery versions (what the website actually serves: loop+fullscreen)
     "sweep-colour-web.mp4",
     "sweep-detrans-web.mp4",
@@ -565,6 +573,7 @@ if getattr(cfg, "privacy", None):
               "sweep-derot.mp4", "sweep-derot-deep.mp4",
               "sweep-derot-web.mp4", "sweep-derot-deep-web.mp4",
               "poster-derot.jpg", "poster-derot-deep.jpg",
+              "sky-labelled.jpg", "hq16-in-v3w.jpg",   # derot-annotate crops
               "sweep-glow.mp4", "sweep-glow-web.mp4", "poster-glow.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
