@@ -425,15 +425,25 @@ def main():
         else detr.get("angle_deg", V_ANGLE_DEG)
     k1 = args.k1 if args.k1 is not None else dist.get("k1", K1)
     k2 = args.k2 if args.k2 is not None else dist.get("k2", K2)
+    # Per-camera crop override: camera.json detrans.crop is [L, R, T, B]
+    # (both modes) or {"max": [...], "deep": [...]}. The default CROP_FRAC
+    # is v3w's barrel-undistort inset; a camera with no barrel (k1 = k2 = 0)
+    # needs little or none.
+    crop = detr.get("crop", CROP_FRAC)
+    if isinstance(crop, dict):
+        crop = crop.get(args.mode, CROP_FRAC[args.mode])
+    crop = tuple(float(c) for c in crop)
 
     if args.frames_glob:
         fs = glob.glob(args.frames_glob)
     else:
-        # legacy percam tree: <root>/night/<night>/v3w/HH/*.fits.fz.
+        # percam tree: <root>/night/<night>/<subcam>/HH/*.fits.fz, the subcam
+        # being the camera name after its host (v3w, hq16), as astro.frames does.
         # Restrict to purely-numeric hour dirs: older nights carry squash
         # derivatives under a "00b"-style dir (holding max/min/sum.fits.fz),
         # which are NOT capture frames and must be excluded from the window.
-        base = cfg.frames_root / "night" / args.night / "v3w"
+        subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
+        base = cfg.frames_root / "night" / args.night / subcam
         fs = [p for p in glob.glob(str(base / "*" / "*.fits.fz"))
               if Path(p).parent.name.isdigit()]
     # Drop TORN frames before anything tries to open them. A 0-byte
@@ -572,7 +582,7 @@ def main():
         # region inside black wedges; a full black-free crop would discard
         # most of the frame, so trim a hand-tuned inset. Fractional =>
         # resolution-independent.
-        fl, fr, ft, fb = CROP_FRAC[args.mode]
+        fl, fr, ft, fb = crop
         ch, cw = out8.shape[:2]
         x0, x1 = int(cw * fl), cw - int(cw * fr)
         y0, y1 = int(ch * ft), ch - int(ch * fb)

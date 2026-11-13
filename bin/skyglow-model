@@ -46,6 +46,9 @@ from astro.cover import frame_open  # noqa: E402
 
 BS = 24          # block size in superpixels
 BLACK = 64.0     # BLACKLVL on imx708 / these cameras
+# per-camera black where it differs: IMX477 is 12-bit, black 256 (camera.json
+# black_level, nominal). Set from --camera in main(); saved in the model npz.
+BLACKS = {"eclipticam-hq16": 256.0}
 LONDON = ZoneInfo("Europe/London")
 
 
@@ -53,7 +56,8 @@ def frame_root(cam: str, night: str) -> str:
     base = os.environ.get("BIGSTORE", "/mnt/muppet/bigstore")
     return {"astrocam": f"{base}/astrocam-frames/{night}",
             "eclipticam-v3w": f"{base}/eclipticam-frames/night/{night}/v3w",
-            "ecl": f"{base}/eclipticam-frames/night/{night}/v3w"}[cam]
+            "ecl": f"{base}/eclipticam-frames/night/{night}/v3w",
+            "eclipticam-hq16": f"{base}/eclipticam-frames/night/{night}/hq16"}[cam]
 
 
 def _block_stats(f: str):
@@ -80,7 +84,7 @@ def cmd_cube(a):
         res = sorted(p.map(_block_stats, files, chunksize=8), key=lambda r: r[0])
     out = (os.path.join(frame_root(a.camera, a.night), "skyglow-cube.npz") if a.to_night
            else a.out or f"cube_{a.camera}_{a.night}.npz")
-    np.savez_compressed(out, t=np.array([r[0] for r in res]),
+    np.savez_compressed(out, black=BLACKS.get(a.camera, BLACK), t=np.array([r[0] for r in res]),
                         cube=np.stack([r[1] for r in res]).astype(np.float32),
                         temp=np.array([r[2] for r in res], float),
                         open=np.array([r[3] for r in res], bool))
@@ -94,12 +98,13 @@ def local_hours(t_ms):
 
 def cmd_fit(a):
     z = np.load(a.cube)
+    black = float(z["black"]) if "black" in z else BLACK
     t, cube = z["t"], z["cube"]
     hh = local_hours(t)
     use = (hh >= a.start) | (hh < a.end) if a.start > a.end else (hh >= a.start) & (hh < a.end)
     if "open" in z.files:                         # cubes before 10-18 have no cover flag
         use &= z["open"]
-    X = cube[:, :, 0] - BLACK                     # medians, above black
+    X = cube[:, :, 0] - black                     # medians, above black
     n, _, ny, nx = X.shape
     # sky blocks: follow the global sky curve (foreground does not) and sit above black
     g = X[use, 1].reshape(use.sum(), -1)
@@ -155,7 +160,7 @@ def cmd_fit(a):
         print(f"  {name}: level {A[:, sky].mean():5.1f} ADU  mode-1 share {ev[0]:.5f}  "
               f"resid rms with 1/2/3 modes {rr[0]:.3f} {rr[1]:.3f} {rr[2]:.3f} ADU")
     out = a.out or os.path.basename(a.cube).replace("cube_", "model_")
-    np.savez_compressed(out, modes=modes, amp=amp, t=t, sky=sky.reshape(ny, nx), bs=BS, black=BLACK)
+    np.savez_compressed(out, modes=modes, amp=amp, t=t, sky=sky.reshape(ny, nx), bs=BS, black=black)
     a1 = amp[:, :, 0]
     floor = np.median(a1[use, 1][np.argsort(a1[use, 1])[:max(5, use.sum() // 10)]])
     print(f"\n{out}\n  local   glow G   x floor   R/G    B/G")

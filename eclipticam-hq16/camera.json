@@ -62,6 +62,22 @@
   "sky_mag_notes": "astro-science 2026-10-31, PROVISIONAL +/-0.3: same-sky transfer from v3w on the one clean night (10-20, ratio 4.98), epoch 1, 60 s. Epoch 2 (from 10-25) is unconfirmed: recheck near new moon.",
   "black_level": 256,
   "black_level_notes": "IMX477 electronic zero in 12-bit LSB-aligned ADU (libcamera tuning 4096 at 16-bit). NOMINAL, not measured: cap the lens for a master dark.",
+  "detrans": {
+    "v_frac_per_s": 0.0001849,
+    "angle_deg": 20.8,
+    "crop": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "detrans_notes": "Measured 2026-11-13 (astro-hq16 #1083) on night 11-12 (epoch 5): star centroids matched between frames 10 min apart, 4 pairs 02-03 UTC, 7-22 matches each: (210.2, 79.9) binned px per 600 s, so 0.375 binned px/s = 1.849e-4 of the width per second, angle 20.8 deg (image x right, y down). The epoch-4 plate solve predicts 0.359 at 25.0 deg at the centre (22-29 deg across the field); the measurement wins. Pointing-dependent: re-measure after any move (a new position_index). crop is 0: no barrel to trim.",
+  "distortion": {
+    "k1": 0.0,
+    "k2": 0.0
+  },
+  "distortion_notes": "16 mm rectilinear lens over a 22 x 17 deg field: no measurable barrel (a plain TAN plate solve fits). Zero here so detrans-sweep does not apply its v3w default (k1 -0.636).",
   "capture": {
     "night_exposure_us": 59900000,
     "night_gain": 1.0,
