@@ -65,7 +65,8 @@ CAMERA = os.environ.get("DEROT_CAMERA", "astrocam")
 
 def night_root(night):
     return {"astrocam": f"{BASE}/astrocam-frames/{night}",
-            "eclipticam-v3w": f"{BASE}/eclipticam-frames/night/{night}/v3w"}[CAMERA]
+            "eclipticam-v3w": f"{BASE}/eclipticam-frames/night/{night}/v3w",
+            "eclipticam-hq16": f"{BASE}/eclipticam-frames/night/{night}/hq16"}[CAMERA]
 
 
 EXPTIME_S = 59.9   # astrocam default; night_frames() replaces it from the night's own header
@@ -344,8 +345,11 @@ def _apply_align(x, y, cm, al):
 # Glow-fit residual of a clear frame, (rms ADU, at G level ADU), per camera and exposure.
 # eclipticam-v3w: median of 2026-10-29's moonless clear stretch, 00:00-02:00 UTC
 # (0.19 x sqrt(level)); one night only, so provisional (#1030).
+# eclipticam-hq16: median of 2026-11-12 23:00-01:00 UTC, its first in-focus night
+# (moon 3 days old, set), black 256; one night only, so provisional (#1066).
 CLEAN_NOISE_REF = {"astrocam": {59.9: (0.276, 29.6), 14.9: (0.197, 7.35)},
-                   "eclipticam-v3w": {59.9: (1.17, 38.0)}}
+                   "eclipticam-v3w": {59.9: (1.17, 38.0)},
+                   "eclipticam-hq16": {59.9: (0.801, 228.6)}}
 
 
 def clean_frames(night, frames, glow_path, max_ratio):
@@ -358,7 +362,8 @@ def clean_frames(night, frames, glow_path, max_ratio):
     g = np.load(glow_path)
     gmodes, gsky = (g["modes"][1] if g["modes"].ndim == 4 else g["modes"]), g["sky"].ravel()
     M = gmodes.reshape(len(gmodes), -1)[:, gsky].T
-    Xc = z["cube"][:, 1, 0].reshape(len(z["t"]), -1)[:, gsky] - 64.0
+    black = float(g["black"]) if "black" in g.files else 64.0     # hq16 (IMX477): 256
+    Xc = z["cube"][:, 1, 0].reshape(len(z["t"]), -1)[:, gsky] - black
     amp = np.linalg.lstsq(M, Xc.T, rcond=None)[0].T
     # the noise floor per exposure: 15 s subs sit at 0.197 ADU at G level 7.35
     # (clear 2026-10-09, median frame, clear-frame glow model). The 0.66 first

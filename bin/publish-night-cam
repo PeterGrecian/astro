@@ -273,20 +273,24 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     # it is skipped, and bin/derot-after-ship runs it there after the ship.
     derot_host=$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1])).get('derot_host',''))" \
         "$REPO/${CAMERA}/camera.json" 2>/dev/null || true)
-    if [[ -n "$cammodel" && -n "$derot_host" && "$derot_host" != "$(hostname -s)" ]]; then
-        echo "--- derot-sky: runs on $derot_host (camera.json derot_host), not here"
-        cammodel=""
+    # glow_sweep in camera.json: the glow model + glow sweep for a camera with
+    # no camera model (eclipticam-hq16, 2026-11-13). A camera with a cammodel
+    # gets them anyway, beside derot. derot_host gates both.
+    glow_sweep=$("$PY" -c "import json,sys; print(int(bool(json.load(open(sys.argv[1])).get('glow_sweep',0))))" \
+        "$REPO/${CAMERA}/camera.json" 2>/dev/null || echo 0)
+    if [[ -n "$derot_host" && "$derot_host" != "$(hostname -s)" ]]; then
+        echo "--- derot-sky + glow: run on $derot_host (camera.json derot_host), not here"
+        cammodel=""; glow_sweep=0
     fi
-    if [[ -n "$cammodel" && "${SKIP_DEROT_SKY:-0}" -ne 1 ]]; then
-        echo "--- derot-sky sweeps (camera model $(basename "$cammodel"))"
+    if [[ ( -n "$cammodel" || "$glow_sweep" -eq 1 ) && "${SKIP_DEROT_SKY:-0}" -ne 1 ]]; then
         # ~600 MB per sweep worker (10 registered frames + cache), so its own
         # job cap: 4 fits muppet beside the NFS server; override DEROT_JOBS.
         export DEROT_CAMERA="$CAMERA"   # derot-sky reads this camera's frames
-        derot_sky_sweeps () {
+        glow_model () {
             local cube="${night_dir}/skyglow-cube.npz" glow="${night_dir}/skyglow-model.npz"
-            local cam="${night_dir}/skyglow-cammodel.json" t
             # the cube goes in the night dir, beside the glow model: for v3w that is
-            # night/<night>/, one level above the frames in night/<night>/v3w/.
+            # night/<night>/, one level above the frames in night/<night>/v3w;
+            # hq16's night dir is night/<night>/hq16 itself.
             [[ -s "$cube" ]] || BIGSTORE="${BIGSTORE:-/mnt/bigstore/astro-data}" \
                 "$PY" "$HERE/skyglow-model" cube "$CAMERA" "$NIGHT" -o "$cube" -j "$JOBS" || return 1
             # the fit uses the night's clear dark frames only; with under an hour
@@ -297,6 +301,15 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
                          && echo "glow model: using reference $CAMERA/skyglow-ref.npz" \
                          && cp "$REPO/$CAMERA/skyglow-ref.npz" "$glow"; } || return 1
             fi
+        }
+        echo "--- glow model"
+        glow_model || echo "glow model FAILED; no derot or glow sweeps"
+    fi
+    if [[ -n "$cammodel" && "${SKIP_DEROT_SKY:-0}" -ne 1 && -s "${night_dir}/skyglow-model.npz" ]]; then
+        echo "--- derot-sky sweeps (camera model $(basename "$cammodel"))"
+        derot_sky_sweeps () {
+            local glow="${night_dir}/skyglow-model.npz"
+            local cam="${night_dir}/skyglow-cammodel.json" t
             # cloud gate: under half an hour of clean frames, no derot (the
             # refine finds no stars anyway; 10-08 had 1 of 370)
             "$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "$glow" || return 1
@@ -346,6 +359,8 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             fi
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"
+    fi
+    if [[ ( -n "$cammodel" || "$glow_sweep" -eq 1 ) && "${SKIP_DEROT_SKY:-0}" -ne 1 ]]; then
         # glow sweep, in the retired difference sweep's slot: max of each
         # window of glow-subtracted frames, foreground blacked. Keeps the
         # polar cap that (max - mean) erased; needs the glow model above.
