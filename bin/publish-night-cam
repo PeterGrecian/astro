@@ -329,10 +329,13 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             local rs="${night_dir}/derot-sky-residual.npy"
             [[ -s "$rs" ]] || "$PY" "$HERE/derot-sky" residual "$NIGHT" --glow "$glow" -o "$rs" \
                 || { echo "derot-sky residual failed; sweeping without it"; rs=""; }
+            # no foreground mask (Peter, 2026-11-13: "unmasked is much better"):
+            # the smeared trees/roof read as foreground, the blocky 24 px mask
+            # read as damage. DEROT_ERODE=3 brings the mask back.
             "$PY" "$HERE/derot-sky" sweep "$cam" "$NIGHT" --glow "$glow" \
                 --sweep-start "$SWEEP_START" --sweep-end "$SWEEP_END" \
                 --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" -j "${DEROT_JOBS:-4}" \
-                ${al:+--align "$al"} ${rs:+--residual "$rs"} \
+                ${al:+--align "$al"} ${rs:+--residual "$rs"} --erode "${DEROT_ERODE:--1}" \
                 --out-max "${night_dir}/sweep-derot.mp4" --out-deep "${night_dir}/sweep-derot-deep.mp4"
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"

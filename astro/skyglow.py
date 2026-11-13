@@ -66,6 +66,8 @@ class GlowModel:
         """Full-resolution boolean sky mask, eroded `erode` blocks from the
         foreground so the shifting edges (trees, roof) go too."""
         from scipy.ndimage import binary_erosion
+        if erode < 0:                      # negative: no foreground mask at all
+            return np.ones(shape, bool)
         m = binary_erosion(self.sky, iterations=erode, border_value=0) if erode else self.sky
         full = np.kron(m, np.ones((self.bs, self.bs), bool))
         out = np.zeros(shape, bool)
