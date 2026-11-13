@@ -330,12 +330,16 @@ def stretch(img, depth, good, median_depth):
 
 
 def solve(x, y, flux, height, scale, workdir):
+    # --depth: from the 11-03 repoint the field is round the pole, and the
+    # default first 10 sources found no quad (every night bar 11-06/11-08 to
+    # 11-12 unsolved); 20..160 solves 11-12 at 4.03"/px on tycho2-11.
     Table({"X": x + 1, "Y": y + 1, "FLUX": flux}).write(f"{workdir}/stars.xy.fits", overwrite=True)
     arc = scale * SUPERPIXEL_ARCSEC
     r = subprocess.run(["solve-field", "--overwrite", "--no-plots", "--scale-units", "arcsecperpix",
                         "--scale-low", str(arc * 0.88), "--scale-high", str(arc * 1.12),
                         "--width", str(OUT_W), "--height", str(height), "--x-column", "X", "--y-column", "Y",
-                        "--sort-column", "FLUX", "--cpulimit", "240", "--dir", workdir, f"{workdir}/stars.xy.fits"],
+                        "--sort-column", "FLUX", "--depth", "20,40,80,160", "--cpulimit", "300",
+                        "--dir", workdir, f"{workdir}/stars.xy.fits"],
                        capture_output=True, text=True, timeout=400)
     p = f"{workdir}/stars.xy.wcs"
     return WCS(fits.getheader(p)) if r.returncode == 0 and os.path.exists(p) else None
