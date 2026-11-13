@@ -706,6 +706,23 @@ def main():
                 w = solve(x, y, f, cv.out_h, cv.scale, td)
             except subprocess.SubprocessError as e:
                 log(start, "solve:", e)
+        if w is None:
+            # fallback: let astrometry.net extract its own sources from the
+            # still (2132 on 11-12 against our short blob list) and solve that;
+            # the still is padded by BORDER, so shift the WCS onto `img`
+            try:
+                r = subprocess.run(["solve-field", "--overwrite", "--no-plots", "--scale-units", "arcsecperpix",
+                                    "--scale-low", str(cv.scale * SUPERPIXEL_ARCSEC * 0.5),
+                                    "--scale-high", str(cv.scale * SUPERPIXEL_ARCSEC * 1.5),
+                                    "--depth", "20,40,80,160", "--cpulimit", "300", "--dir", td,
+                                    str(out / "night-still.jpg")], capture_output=True, text=True, timeout=400)
+                p = f"{td}/night-still.wcs"
+                if r.returncode == 0 and os.path.exists(p):
+                    w = WCS(fits.getheader(p))
+                    w.wcs.crpix = [w.wcs.crpix[0] - BORDER, w.wcs.crpix[1] - BORDER]
+                    log(start, "solved from the still image (fallback)")
+            except subprocess.SubprocessError as e:
+                log(start, "solve (image):", e)
     if w is None:
         log(start, "plate solve failed; no star counts tonight")
     else:
