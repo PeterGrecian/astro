@@ -159,7 +159,14 @@ def chart_zero(cfg) -> tuple[float | None, str]:
     return (float(ped) if ped is not None else None), "pedestal"
 
 
-def lsb_align(vals, pedestal=None):
+def raw_bits(cfg):
+    """Raw bit depth from camera.json's bayer string (SRGGB12 -> 12), or None."""
+    import re
+    m = re.search(r"(\d+)$", str((cfg or {}).get("bayer") or ""))
+    return int(m.group(1)) if m else None
+
+
+def lsb_align(vals, pedestal=None, bits=None):
     """Normalise a night's mean-ADU series to LSB alignment.
 
     Returns (values, was_msb). Decided on the series MINIMUM, not the
@@ -180,8 +187,16 @@ def lsb_align(vals, pedestal=None):
     alignment rework of 08-25 and the last good render was still in S3.
     For every Pi camera the pedestal is ~50-105, far below the cut, so
     this guard changes nothing about which nights get normalised there.
+
+    The same goes for a 12-bit sensor (`bits`, from camera.json's bayer):
+    its LSB-aligned values run to 4095, and a bright night's floor passes
+    1000 ADU. HQ16 2026-11-04 (floor ~1180) was divided by 64, fell below
+    black level, and pinned D4/Dx at the -1 stop floor on every later chart
+    (found 2026-11-13). The x64 is a 10-bit fact; never apply it to >=12 bit.
     """
     vals = np.asarray(vals, dtype=float)
+    if bits is not None and bits >= 12:
+        return vals, False
     if pedestal is not None and float(pedestal) >= MSB_ALIGN_MIN_ADU:
         return vals, False
     if vals.size == 0 or float(vals.min()) <= MSB_ALIGN_MIN_ADU:
@@ -279,7 +294,7 @@ def night_exptime(csv_path):
 
 
 @lru_cache(maxsize=None)
-def _night_bins(csv_path: str, mtime: float, pedestal: float, msb_pedestal):
+def _night_bins(csv_path: str, mtime: float, pedestal: float, msb_pedestal, bits=None):
     """One night as {minutes since London midnight, 15-minute bin: median
     signal per second}. Cached because replotting an archive asks for every
     earlier night once per chart."""
@@ -306,7 +321,7 @@ def _night_bins(csv_path: str, mtime: float, pedestal: float, msb_pedestal):
     if not means:
         return {}
     # Some nights are stored MSB-aligned; without this they sit 6 stops high.
-    aligned, _ = lsb_align(means, msb_pedestal)
+    aligned, _ = lsb_align(means, msb_pedestal, bits)
     bins = {}
     for t, v in zip(times, aligned):
         k = (t.hour * 60 + t.minute) // BASELINE_BIN_MIN * BASELINE_BIN_MIN
@@ -339,7 +354,7 @@ def brightness_baselines(cfg, pedestal, night: str):
     for n, path in find_night_csvs(cfg):
         if n < since or n > night:
             continue
-        bins = _night_bins(str(path), path.stat().st_mtime, float(pedestal), msb_pedestal)
+        bins = _night_bins(str(path), path.stat().st_mtime, float(pedestal), msb_pedestal, raw_bits(cfg))
         if not bins:
             continue
         n_ever += 1
@@ -506,7 +521,7 @@ def plot_night(rows, night: str, camera: str, out_path: Path,
         return
 
     vals = np.array(means)
-    vals, _was_msb = lsb_align(vals, pedestal)
+    vals, _was_msb = lsb_align(vals, pedestal, raw_bits(cfg))
     if pedestal is None:
         pedestal = float(np.percentile(vals, 1))
     pedestal = float(pedestal)
