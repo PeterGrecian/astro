@@ -19,6 +19,15 @@ because here it sits next to the second of time: if the Earth is one second
 late in its rotation, which is how large these variations can add up to over
 a few years, the stars will be displaced to the east by **15 arcseconds**.
 
+A FirstScope pixel (strictly a photosite: one red, green or blue site) is about
+1 arcsecond across, 1.07 with the HQ camera, so the stars cross it in 71
+milliseconds of the Earth's turning. That is at the celestial equator, though,
+and the FirstScope looks at the celestial pole, where the sky barely moves.
+Polaris, two-thirds of a degree from the pole, covers only 0.17 arcseconds a
+second, so there one photosite is 6 seconds of the Earth's turning.
+
+## The Earth is late
+
 Just now the Earth is late. It does not turn at a steady rate, and our clocks, which run
 on atoms, take no notice. The gap has a name, **DUT1**: the time told by the
 Earth's turning (UT1) minus the time on the clock (UTC).
