@@ -31,6 +31,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # one at a time: a backfill and the timer must not race on the same night dir
 exec 9>"$HOME/.derot-after-ship.lock"
 flock -n 9 || { echo "derot-after-ship: already running"; exit 0; }
+# one heavy job at a time on muppet (the fan failed; it cut out at ~97 C on
+# 2026-11-14 with 8 cores busy): if another publish is running, try next hour.
+# A backfill (--night) is by hand and goes ahead.
+if [[ ${#NIGHTS[@]} -eq 0 ]] && pgrep -f "bin/publish-night-cam" >/dev/null; then
+    echo "derot-after-ship: another publish-night-cam is running; next hour"; exit 0
+fi
 
 if [[ ${#NIGHTS[@]} -eq 0 ]]; then
     for d in $(seq "$DAYS" -1 1); do
