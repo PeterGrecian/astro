@@ -283,8 +283,21 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         cammodel=""; glow_sweep=0
     fi
     if [[ ( -n "$cammodel" || "$glow_sweep" -eq 1 ) && "${SKIP_DEROT_SKY:-0}" -ne 1 ]]; then
-        # ~600 MB per sweep worker (10 registered frames + cache), so its own
-        # job cap: 4 fits muppet beside the NFS server; override DEROT_JOBS.
+        # Sweep workers are big: ~2.4 GB anon each on astrocam (2026-11-14), so
+        # 4 of them OOM'd astro-process's MemoryMax=6G. Default 4, but no more
+        # than the unit's memory.max allows at DEROT_WORKER_MB each (2500).
+        # Override with DEROT_JOBS.
+        if [[ -z "${DEROT_JOBS:-}" ]]; then
+            DEROT_JOBS=4
+            _cg=$(awk -F: '$1=="0"{print $3}' /proc/self/cgroup 2>/dev/null)
+            _mm=$(cat "/sys/fs/cgroup${_cg}/memory.max" 2>/dev/null || echo max)
+            if [[ "$_mm" =~ ^[0-9]+$ ]]; then
+                _fit=$(( _mm / 1048576 / ${DEROT_WORKER_MB:-2500} ))
+                [[ "$_fit" -lt 1 ]] && _fit=1
+                [[ "$_fit" -lt "$DEROT_JOBS" ]] && DEROT_JOBS=$_fit
+                echo "derot jobs: $DEROT_JOBS (memory.max $(( _mm / 1048576 )) MB)"
+            fi
+        fi
         export DEROT_CAMERA="$CAMERA"   # derot-sky reads this camera's frames
         glow_model () {
             local cube="${night_dir}/skyglow-cube.npz" glow="${night_dir}/skyglow-model.npz"
