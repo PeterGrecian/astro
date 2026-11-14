@@ -146,7 +146,14 @@ def main():
         ref_cfg = cfg.get("reference_nights")
         if ref_cfg:
             args.nights = ",".join(ref_cfg)
-    out_path = args.out or (cfg.frames_root / "brightness-combined.png")
+    # A subcam-output camera shares frames_root with its sibling (eclipticam-hq16
+    # beside v3w), so its chart gets its own name there; v3w keeps the old one.
+    # Only the local copy: the S3 key is per camera already. (#1066)
+    default_name = "brightness-combined.png"
+    if cfg.get("night_output") == "subcam":
+        subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
+        default_name = f"brightness-combined-{subcam}.png"
+    out_path = args.out or (cfg.frames_root / default_name)
 
     all_nights = sorted(find_night_csvs(cfg), key=lambda nc: nc[0])
     if not all_nights:
