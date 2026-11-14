@@ -16,8 +16,8 @@ Where the stars are in the sky is governed by the rotation of the Earth, and
 since that rotation varies compared with our modern clocks, it has to be taken
 into account. Like the arc minute, the arc second is an unfortunate term,
 because here it sits next to the second of time: if the Earth is one second
-late in its rotation, which is quite possible, the stars will be displaced to
-the east by **15 arcseconds**.
+late in its rotation, which is how large these variations can add up to over
+a few years, the stars will be displaced to the east by **15 arcseconds**.
 
 Just now the Earth is late. It does not turn at a steady rate, and our clocks, which run
 on atoms, take no notice. The gap has a name, **DUT1**: the time told by the
