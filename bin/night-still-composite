@@ -101,6 +101,9 @@ def rough_solve(night_dir, x, y, flux, shape, arc):
     return WCS(fits.getheader(cached))
 
 
+MAX_CANVAS_PX = 5000   # the composite's side, at most: memory goes as its square
+
+
 def fit_gaia(z, pred, sky, inside):
     """Similarity z = c*sky + d (or of conj(sky)), tightening the pairing as it goes."""
     c, d, parity, res = None, 0j, 0, np.zeros(0)
@@ -211,15 +214,20 @@ def main():
         return 0
     nights.sort(key=lambda n: -n.g50)
 
-    arc = min(n.fit["arcsec_per_px"] for n in nights)
-    s_pol = plane(np.array([POLARIS[0]]), np.array([POLARIS[1]]), equinox)[0]
-    k = np.exp(1j * (-np.pi / 2 - np.angle(s_pol))) / arc   # canvas = k * sky: Polaris straight up
-    # Sky as far out as any night reaches, measured on each still.
-    r_px = 0.0
+    # Sky as far out as any night reaches, measured on each still, in arcsec.
+    r_arc = 0.0
     for n in nights:
         ys, xs = np.nonzero(n.mask[::8, ::8])
         rel = xs * 8.0 + 1j * ys * 8.0 - (n.pole[0] + 1j * n.pole[1])
-        r_px = max(r_px, float(np.abs(rel).max()) * n.fit["arcsec_per_px"] / arc)
+        r_arc = max(r_arc, float(np.abs(rel).max()) * n.fit["arcsec_per_px"])
+    # The finest night's scale, unless that makes the canvas too big: the
+    # stills' scales differ (since the 11-03 repoint the pole sits in the
+    # field, so the still is ~4"/px against 8-20 before), and the finest
+    # over the widest reach made a 10k canvas, 5.5 GB RSS (astro-pipeline #1066).
+    arc = max(min(n.fit["arcsec_per_px"] for n in nights), 2 * r_arc / (MAX_CANVAS_PX - 80))
+    s_pol = plane(np.array([POLARIS[0]]), np.array([POLARIS[1]]), equinox)[0]
+    k = np.exp(1j * (-np.pi / 2 - np.angle(s_pol))) / arc   # canvas = k * sky: Polaris straight up
+    r_px = r_arc / arc
     size = 2 * int(r_px) + 80
     cx = cy = size / 2
 
