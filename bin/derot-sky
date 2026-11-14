@@ -439,6 +439,11 @@ def cmd_clean(a):
           f"({'enough' if ok else 'too few'}; need {a.min_minutes:g})")
     sys.exit(0 if ok else 1)
 
+# Bayer channel for `stack` (--channel): set in cmd_stack before the worker
+# Pool forks, so the chunk workers inherit it. "sum" is the default mono stack.
+STACK_CHANNEL = "sum"
+
+
 def _stack_chunk(args):
     import cv2
     chunk, cam_path, glow_path, t_ref, shape, erode, align = args
@@ -451,7 +456,7 @@ def _stack_chunk(args):
     used = []
     mask = None
     for dt, path in chunk:
-        raw = load_binned(path)
+        raw = load_binned(path, STACK_CHANNEL)
         img, amp, rms, level = gm.subtract(raw, return_fit=True)
         if level <= 0:
             continue
@@ -493,7 +498,7 @@ def _drizzle_chunk(args):
     used = []
     keep = None
     for dt, path in chunk:
-        img, amp, rms, level = gm.subtract(load_binned(path), return_fit=True)
+        img, amp, rms, level = gm.subtract(load_binned(path, STACK_CHANNEL), return_fit=True)
         if level <= 0:
             continue
         if keep is None:
@@ -528,8 +533,10 @@ def _drizzle_chunk(args):
 
 
 def cmd_stack(a):
+    global STACK_CHANNEL
     from multiprocessing import Pool
     from astropy.io import fits
+    STACK_CHANNEL = a.channel
     frames = night_frames(a.night)
     t_ref = utc_on_night(a.night, a.ref_utc)
     if a.start:
@@ -556,6 +563,7 @@ def cmd_stack(a):
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     hdr = fits.Header()
     hdr["NIGHT"] = a.night; hdr["REFUTC"] = t_ref.isoformat(); hdr["NFRAMES"] = len(used)
+    hdr["CHANNEL"] = (a.channel, "Bayer channel, on the 2x2-sum scale")
     hdr["CAMMODEL"] = os.path.basename(a.camera); hdr["GLOWMODL"] = os.path.basename(a.glow)
     hdr["COMMENT"] = "weighted mean of glow-subtracted frames, re-projected to the sky at REFUTC"
     hdr["ALIGN"] = (os.path.basename(a.align) if a.align else "none", "per-frame similarity from derot-sky align")
@@ -872,6 +880,8 @@ def main():
     s.add_argument("--drizzle", type=int, default=0, metavar="N",
                    help="point-kernel drizzle onto an N x finer grid instead of bilinear resampling")
     s.add_argument("-j", "--jobs", type=int, default=4)
+    s.add_argument("--channel", choices=["sum", "R", "G", "B"], default="sum",
+                   help="stack one Bayer colour (on the 2x2-sum scale) for a colour image; default sum")
     s.add_argument("-o", "--out", required=True)
     w = sub.add_parser("sweep"); w.add_argument("camera"); w.add_argument("night")
     w.add_argument("--glow", required=True)
