@@ -11,6 +11,7 @@ source:
   frames: eclipticam-v3w, night 2026-11-12, 60 s subs 03:40-04:20 UTC (GMT); 32 of 40 passed the clear-sky gate (glow-fit ratio <= 1.5)
   stack: "`derot-sky stack` (astro bin/derot-sky) with the night's refined camera model (skyglow-cammodel.json, from cammodel-2026-10-29) and per-frame alignment (derot-sky-align.npy); sky glow subtracted per frame; output fixed to the sky at 04:00 UTC"
   figures: astro scratch/milky-way-1112/figs.py (crop, stretch, galactic plane and star labels via bin/derot-annotate)
+  colour: "astro scratch/milky-way-1112/colour_figs.py: brightness from the summed stack, colour from separate R, G and B stacks (derot-sky --channel), each with its local background removed; white balance from 157 Hipparcos stars (wb_fit.py), set so a B-V 0.62 (Sun-like) star is neutral"
   band: "median of a 9 px median-filtered stack (stars removed), within 5 deg of the galactic plane against 15-30 deg from it; sky level 46 ADU per 2x2 cell (derot-sky-frames.json)"
 figures:
   - src: astro/notes/figs/2026-11-13-winter-milky-way/deep.jpg
@@ -32,6 +33,17 @@ figures:
       Two minutes (left) against forty (right), the same stretch. The band
       is there in two minutes but buried in noise; stacking twenty times
       the light is what lifts it out.
+  - src: astro/notes/figs/2026-11-13-winter-milky-way/colour.jpg
+    field: "about 66° × 43°"
+    caption: >
+      The same 40 minutes in colour. The colour is balanced on catalogue
+      stars, so a star like the Sun comes out white. Most bright stars
+      here are blue-white: this part of the sky is full of young, hot stars.
+  - src: astro/notes/figs/2026-11-13-winter-milky-way/colour-orion.jpg
+    field: "about 23° × 26°, Orion"
+    caption: >
+      Orion, enlarged twice. Betelgeuse (top left) is orange-red, and Rigel
+      (bottom right) and the belt stars are blue-white.
 ---
 
 The camera that films the ecliptic caught the Milky Way at about 4 a.m.
@@ -60,6 +72,17 @@ Monoceros, where it is about 3%, and fades southwards into Canis Major.
 That is far below what an eye can pick out against a suburban sky. The
 camera sees it because each 60 s frame has its smooth sky glow fitted and
 subtracted, and because 32 frames are averaged.
+
+## Colour
+
+The camera has a colour sensor, so the same frames can be stacked
+separately in red, green and blue. The colour was balanced against 157
+catalogue stars of known colour, so a star like the Sun comes out white.
+Betelgeuse, a red supergiant, shows orange-red. Rigel and the belt of
+Orion show blue-white. Most of the bright stars in the field are blue:
+Orion and Monoceros are a region of young, hot stars, and the median
+catalogue star in the field is much bluer than the Sun. The Milky Way
+itself is too faint for its colour to be measured.
 
 ## Caveats
 

@@ -73,6 +73,9 @@ def bar(im, L, label):
 
 
 L10 = cm.f * np.radians(10)
+# the stack's stars sit +6 px in y from project() (found 2026-11-14 by the
+# colour white-balance fit, wb_fit.py); shift every overlay to match
+DY = 6
 im = img(deep, True); bar(im, L10, "10°")
 im.save(OUT / "deep.jpg", quality=90)
 
@@ -81,14 +84,14 @@ for b, col, w in [(0, (255, 140, 0), 3), (10, (180, 100, 0), 1), (-10, (180, 100
     x, y, ok = an.project(cm, an.galactic(b), t)
     for j in range(len(x) - 1):
         if ok[j] and ok[j + 1] and abs(x[j] - x[j + 1]) < 200:
-            d.line([x[j] - CROP[0], y[j] - CROP[1], x[j + 1] - CROP[0], y[j + 1] - CROP[1]], fill=col, width=w)
+            d.line([x[j] - CROP[0], y[j] + DY - CROP[1], x[j + 1] - CROP[0], y[j + 1] + DY - CROP[1]], fill=col, width=w)
 names = dict(an.STARS); names.update({"Adhara": (104.66, -28.97), "Wezen": (107.10, -26.39),
                                       "Alhena": (99.43, 16.40), "Rosette": (97.98, 4.95),
                                       "M41": (101.50, -20.72), "Naos": (120.90, -40.00)})
 sc = SkyCoord([q[0] for q in names.values()] * u.deg, [q[1] for q in names.values()] * u.deg)
 x, y, ok = an.project(cm, sc, t)
 for nm, xi, yi, k in zip(names, x, y, ok):
-    xi, yi = xi - CROP[0], yi - CROP[1]
+    xi, yi = xi - CROP[0], yi + DY - CROP[1]
     if k and 0 <= xi < im.width and 0 <= yi < im.height - 60:
         d.ellipse([xi - 12, yi - 12, xi + 12, yi + 12], outline=(0, 160, 255), width=2)
         d.text((xi + 15, yi - 12), nm, fill=(140, 210, 255), font=FONT)
