@@ -1,7 +1,7 @@
 ---
 id: 2026-10-30-arcsecond
 title: How big is an arc second anyway?
-subtitle: Changes in how fast the Earth spins, and atomic clocks
+subtitle: "It's a very small angle, but how does it compare to a second of time? Can FirstScope see an arcsecond? Can we detect the changes in the speed of rotation of the Earth which lead to leap seconds?"
 instrument: firstscope
 camera: firstscope
 date: 2026-10-30
@@ -11,6 +11,8 @@ source:
   scale: Earth turns 15.04 arcsec per second of time. FirstScope 76 mm, 300 mm focal length, so 1 arcsec is 1.45 microns at the focus. Photosites 1.55 microns (HQ) and 1.4 microns (v1), theoretical scale, not plate solved. Diffraction 1.22 lambda/D at 550 nm
   other: Berrylands latitude 51.4 N; arm's length 65 cm as in note 2026-10-11-arcminute; 1p coin 20.3 mm; Proxima parallax 0.77 arcsec; FirstScope focus from note 2026-09-20-firstscope-derotation and astro-capture's 2026-10-28 focus report
 ---
+
+## Seconds of arc and seconds of time
 
 Where the stars are in the sky is governed by the rotation of the Earth, and
 since that rotation varies compared with our modern clocks, it has to be taken
