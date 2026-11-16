@@ -1,6 +1,6 @@
 ---
 id: 2026-11-13-winter-milky-way
-title: The winter Milky Way, beside Orion, from a London suburb
+title: The winter Milky Way, beside Orion, from a London suburb looking south
 instrument: eclipticam
 date: 2026-11-13
 night: 2026-11-12
