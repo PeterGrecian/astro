@@ -209,8 +209,22 @@ def set_exposure(cam, exp_us):
     silently clamped to the current frame period - the OV5647 gotcha that makes
     a long shutter look like it was ignored.
     """
-    cam.set_controls({"ExposureTime": exp_us,
-                      "FrameDurationLimits": (exp_us, exp_us)})
+    # Going DOWN from a long exposure (anything that needs the IMX477's
+    # long-exposure shift, 1.5 s and 12 s both do) the first write lands
+    # divided by 2^shift: 0.1 s after 12 s delivered 6218 us (/16), after 1.5 s
+    # 49822 us (/2) - the 11-13 HDR ladder bug, reproduced on the bench
+    # 2026-11-16. Re-sending the same value does nothing (libcamera drops an
+    # unchanged control), but a DIFFERENT value lands correctly, and so does the
+    # target after it. So when the frame period has landed and the exposure is
+    # wrong, nudge 10% (outside the tolerance, so the nudge itself
+    # cannot pass for the target) and come back.
+    def _apply(us):
+        cam.set_controls({"ExposureTime": us, "FrameDurationLimits": (us, us)})
+
+    def _ok(actual, us):
+        return abs(actual - us) <= max(200, us * 0.05)
+
+    _apply(exp_us)
     # The FIRST control change after start() takes several frames to land - a
     # 6-attempt limit let frame 1 of a run be written at the sensor's startup
     # exposure instead of the requested one (measured 2026-09-14: 1 ms where
@@ -218,12 +232,30 @@ def set_exposure(cam, exp_us):
     # the metadata value, not the request, but a stack wants the exposure it
     # asked for. Be patient, and say so when it still does not converge.
     actual = 0
-    for _ in range(20):
+    nudges = 0
+    stuck = 0
+    target = exp_us
+    for _ in range(30):
         req = cam.capture_request()
-        actual = req.get_metadata().get("ExposureTime", 0)
+        md = req.get_metadata()
         req.release()
-        if abs(actual - exp_us) <= max(200, exp_us * 0.05):
-            return actual
+        actual = md.get("ExposureTime", 0)
+        if _ok(actual, target):
+            if target == exp_us:
+                return actual
+            _apply(exp_us)              # the nudge landed; now the real value
+            target = exp_us
+            stuck = 0
+            continue
+        # Frame period at the new value but exposure not: the stale-shift case.
+        stuck = stuck + 1 if _ok(md.get("FrameDuration", 0), target) else 0
+        if stuck >= 2 and target == exp_us and nudges < 2:
+            nudges += 1
+            target = int(exp_us * 1.10)   # outside the 5% tolerance
+            logging.info(f"exposure stuck at {actual} us (asked {exp_us}); "
+                         f"nudging to {target} us and back")
+            _apply(target)
+            stuck = 0
     logging.warning(f"exposure did not converge: asked {exp_us} us, "
                     f"sensor delivering {actual} us; recording the actual")
     return actual
