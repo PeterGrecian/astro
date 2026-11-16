@@ -263,6 +263,7 @@ def build_entry(card_path: Path, root: Path):
         "date": date,
         "night": str(meta.get("night") or ""),
         "tags": [str(t) for t in tags],
+        "series": str(meta.get("series") or ""),
         "summary": summary,
         "sections": sections,
         "figures": figures,
@@ -286,13 +287,28 @@ def load_index(s3):
         return {"schema": 1, "generated_utc": None, "items": []}
 
 
+def ordered(items):
+    """Newest first, id breaking ties so the order does not shuffle when an
+    unrelated entry is edited. Notes sharing a `series:` (e.g. the "How big
+    is ... anyway?" pair) are kept together: the series sits where its newest
+    member falls, members newest first, so the site shows them side by side."""
+    items = sorted(items, key=lambda e: (e.get("date") or "", e.get("id") or ""),
+                   reverse=True)
+    out, done = [], set()
+    for e in items:
+        sr = e.get("series") or ""
+        if not sr:
+            out.append(e)
+        elif sr not in done:
+            done.add(sr)
+            out += [m for m in items if m.get("series") == sr]
+    return out
+
+
 def write_index(s3, index):
     index["generated_utc"] = datetime.now(timezone.utc).isoformat(
         timespec="seconds")
-    # Newest first, id breaking ties so the order does not shuffle when an
-    # unrelated entry is edited.
-    index["items"].sort(key=lambda e: (e.get("date") or "", e.get("id") or ""),
-                        reverse=True)
+    index["items"] = ordered(index["items"])
     body = json.dumps(index, indent=2).encode("utf-8")
     s3.put_object(Bucket=BUCKET, Key=INDEX_KEY, Body=body,
                   ContentType="application/json")

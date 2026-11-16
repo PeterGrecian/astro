@@ -5,6 +5,7 @@ subtitle: "It's a very small angle, but how does it compare to a second of time?
 instrument: firstscope
 camera: firstscope
 date: 2026-10-30
+series: how-big
 tags: [scale, units, arcseconds, dut1, earth-rotation, polar-motion, firstscope]
 source:
   earth: IERS Bulletin A and finals.daily, fetched 2026-10-30. UT1-UTC -0.0225 s on 10-01, -0.0005 s on 09-09, -0.0532 s on 10-30, predicted -0.119 s on 2027-01-01. Polar motion x 0.141, y 0.318 arcsec on 10-30. Bulletin D rounded DUT1 -0.1 s

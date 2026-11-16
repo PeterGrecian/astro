@@ -4,6 +4,7 @@ title: How big is an arc minute anyway?
 instrument: eclipticam
 camera: eclipticam-v3w
 date: 2026-10-11
+series: how-big
 tags: [scale, units, arcminutes, right-ascension, eclipticam]
 source:
   scale: eclipticam-v3w/cammodel-2026-10-07.json (equidistant + cubic, f 975.9 binned px, k 0.366); pixel size and field of view computed from it

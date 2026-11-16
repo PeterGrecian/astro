@@ -6,6 +6,7 @@ date: 2026-11-13
 night: 2026-11-12
 camera: eclipticam-v3w
 taken: 2026-11-13
+series: milky-way
 tags: [eclipticam, v3w, milky-way, derotation, sky-brightness]
 source:
   frames: eclipticam-v3w, night 2026-11-12, 60 s subs 03:40-04:20 UTC (GMT); 32 of 40 passed the clear-sky gate (glow-fit ratio <= 1.5)
