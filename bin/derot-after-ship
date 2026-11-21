@@ -1,26 +1,36 @@
 #!/usr/bin/env bash
-# derot-after-ship — run eclipticam-v3w's derot-sky + glow sweeps on muppet,
-# once eclipticam-ship-night has landed the night on bigstore.
+# derot-after-ship — eclipticam's after-ship processing on muppet, once
+# eclipticam-ship-night has landed the night on bigstore (night/<n>/.shipped).
 #
-# eclipticam processes v3w on the Pi at dawn, but derot needs the RAM and the
-# bigstore layout, so camera.json pins it here (derot_host: muppet). The ship
-# touches night/<n>/.shipped after a night verifies; this runs (from a timer,
-# hourly through the day) DEROT_ONLY=1 publish-night-cam for each recently
-# shipped night without a .derot-done mark, then publishes.
+#   eclipticam-v3w   DEROT_ONLY=1 publish-night-cam (the Pi does the rest at
+#                    dawn; derot needs the RAM, camera.json derot_host: muppet)
+#                    -> marks night/<n>/.derot-done
+#   eclipticam-hq16  full publish-night-cam (colour, detrans, glow; nothing runs
+#                    on the Pi; camera.json processing_host: muppet; Peter 11-21)
+#                    -> marks night/<n>/.hq16-done
+#
+# Runs from a timer, hourly through the day, one job at a time.
 #
 # Usage:
-#   derot-after-ship                 # timer mode: shipped nights of the last --days
-#   derot-after-ship --night N ...   # backfill: these nights, markers ignored
-#   derot-after-ship -n              # dry run: say what would run
+#   derot-after-ship                          # timer mode: shipped nights of the last --days
+#   derot-after-ship --night N ...            # backfill: these nights, markers ignored
+#   derot-after-ship --camera eclipticam-hq16 # only this camera (with or without --night)
+#   derot-after-ship -n                       # dry run: say what would run
 set -uo pipefail
 
-CAMERA=eclipticam-v3w
+# camera  subdir  marker  extra-env
+JOBS_TABLE=(
+    "eclipticam-v3w  v3w  .derot-done  DEROT_ONLY=1"
+    "eclipticam-hq16 hq16 .hq16-done   -"
+)
+ONLY=""
 ROOT="${DEROT_NIGHT_ROOT:-$HOME/eclipticam-frames/night}"
 DAYS=4; DRY=0; NIGHTS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --night) NIGHTS+=("$2"); shift 2;;
         --days)  DAYS="$2"; shift 2;;
+        --camera) ONLY="$2"; shift 2;;
         -n|--dry-run) DRY=1; shift;;
         -h|--help) sed -n '2,/^set -uo/p' "$0" | head -n -1; exit 0;;
         *) echo "unknown arg: $1" >&2; exit 2;;
@@ -38,25 +48,36 @@ if [[ ${#NIGHTS[@]} -eq 0 ]] && pgrep -f "bin/publish-night-cam" >/dev/null; the
     echo "derot-after-ship: another publish-night-cam is running; next hour"; exit 0
 fi
 
-if [[ ${#NIGHTS[@]} -eq 0 ]]; then
-    for d in $(seq "$DAYS" -1 1); do
-        n=$(date -u -d "-$d day" +%F)
-        [[ -e "$ROOT/$n/.shipped" && ! -e "$ROOT/$n/.derot-done" ]] && NIGHTS+=("$n")
-    done
-fi
-[[ ${#NIGHTS[@]} -eq 0 ]] && { echo "derot-after-ship: nothing shipped and pending"; exit 0; }
-
+BACKFILL=$([[ ${#NIGHTS[@]} -gt 0 ]] && echo 1 || echo 0)
 rc_any=0
-for n in "${NIGHTS[@]}"; do
-    [[ -d "$ROOT/$n/v3w" ]] || { echo "[$n] no frames at $ROOT/$n/v3w; skipped"; continue; }
-    echo "[$n] DEROT_ONLY publish-night-cam --camera $CAMERA"
-    [[ "$DRY" -eq 1 ]] && continue
-    rc=0
-    DEROT_ONLY=1 "$HERE/publish-night-cam" --camera "$CAMERA" --night "$n" || rc=$?
-    # marked even on failure: a cloudy night fails the gate cleanly every time,
-    # and a real fault shows in the journal (and the unit's OnFailure)
-    echo "rc=$rc $(date -u +%FT%TZ)" > "$ROOT/$n/.derot-done"
-    echo "[$n] done rc=$rc"
-    [[ "$rc" -ne 0 ]] && rc_any=1
+for row in "${JOBS_TABLE[@]}"; do
+    read -r CAMERA SUB MARK ENV <<<"$row"
+    [[ -n "$ONLY" && "$ONLY" != "$CAMERA" ]] && continue
+    todo=()
+    if [[ "$BACKFILL" -eq 1 ]]; then
+        todo=("${NIGHTS[@]}")
+    else
+        for d in $(seq "$DAYS" -1 1); do
+            n=$(date -u -d "-$d day" +%F)
+            [[ -e "$ROOT/$n/.shipped" && ! -e "$ROOT/$n/$MARK" ]] && todo+=("$n")
+        done
+    fi
+    [[ ${#todo[@]} -eq 0 ]] && { echo "$CAMERA: nothing shipped and pending"; continue; }
+    for n in "${todo[@]}"; do
+        [[ -d "$ROOT/$n/$SUB" ]] || { echo "[$CAMERA $n] no frames at $ROOT/$n/$SUB; skipped"; continue; }
+        echo "[$CAMERA $n] ${ENV/#-/} publish-night-cam --camera $CAMERA"
+        [[ "$DRY" -eq 1 ]] && continue
+        rc=0
+        if [[ "$ENV" == "-" ]]; then
+            "$HERE/publish-night-cam" --camera "$CAMERA" --night "$n" || rc=$?
+        else
+            env "$ENV" "$HERE/publish-night-cam" --camera "$CAMERA" --night "$n" || rc=$?
+        fi
+        # marked even on failure: a cloudy night fails the gate cleanly every time,
+        # and a real fault shows in the journal (and the unit's OnFailure)
+        echo "rc=$rc $(date -u +%FT%TZ)" > "$ROOT/$n/$MARK"
+        echo "[$CAMERA $n] done rc=$rc"
+        [[ "$rc" -ne 0 ]] && rc_any=1
+    done
 done
 exit "$rc_any"
