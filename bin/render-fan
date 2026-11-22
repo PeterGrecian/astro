@@ -23,8 +23,10 @@ cv = CameraModel(json.load(open(D / "canvas-model.json")))
 import os, datetime as _dt
 CAMNAME = os.environ.get("DEROT_CAMERA", "astrocam"); NIGHT = hdr["NIGHT"]
 ROOT = {"astrocam": f"/mnt/bigstore/astro-data/astrocam-frames/{NIGHT}",
-        "eclipticam-v3w": f"/mnt/bigstore/astro-data/eclipticam-frames/night/{NIGHT}"}[CAMNAME]
-cam = CameraModel(Path(ROOT) / hdr["CAMMODEL"])
+        "eclipticam-v3w": f"/mnt/bigstore/astro-data/eclipticam-frames/night/{NIGHT}",
+        "eclipticam-hq16": f"/mnt/bigstore/astro-data/eclipticam-frames/night/{NIGHT}/hq16"}.get(CAMNAME, ".")
+# FAN_CAMMODEL overrides (a model fitted outside the night dir, e.g. hqfs)
+cam = CameraModel(Path(os.environ["FAN_CAMMODEL"]) if "FAN_CAMMODEL" in os.environ else Path(ROOT) / hdr["CAMMODEL"])
 fr = AltAz(obstime=T, location=EarthLocation(lat=51.3948 * u.deg, lon=-0.2923 * u.deg), pressure=0)
 PXDEG = cv.f * np.pi / 180
 # Wt is normalised to its peak (the pole, in every frame), so a fixed fraction

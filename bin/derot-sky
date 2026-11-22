@@ -455,6 +455,7 @@ def cmd_clean(a):
 # Bayer channel for `stack` (--channel): set in cmd_stack before the worker
 # Pool forks, so the chunk workers inherit it. "sum" is the default mono stack.
 STACK_CHANNEL = "sum"
+RESID = None      # `derot-sky residual` map for stack --residual; set before the Pool forks
 
 
 def _stack_chunk(args):
@@ -471,6 +472,8 @@ def _stack_chunk(args):
     for dt, path in chunk:
         raw = load_binned(path, STACK_CHANNEL)
         img, amp, rms, level = gm.subtract(raw, return_fit=True)
+        if RESID is not None:
+            img -= level * RESID          # camera-fixed pattern per unit sky (--residual)
         if level <= 0:
             continue
         if mask is None:
@@ -532,6 +535,8 @@ def _stack_chunk_canvas(args):
     used, mask = [], None
     for dt, path in chunk:
         img, amp, rms, level = gm.subtract(load_binned(path, STACK_CHANNEL), return_fit=True)
+        if RESID is not None:
+            img -= level * RESID          # camera-fixed pattern per unit sky (--residual)
         if level <= 0:
             continue
         if mask is None:
@@ -576,6 +581,8 @@ def _drizzle_chunk(args):
     keep = None
     for dt, path in chunk:
         img, amp, rms, level = gm.subtract(load_binned(path, STACK_CHANNEL), return_fit=True)
+        if RESID is not None:
+            img -= level * RESID          # camera-fixed pattern per unit sky (--residual)
         if level <= 0:
             continue
         if keep is None:
@@ -613,10 +620,12 @@ def _drizzle_chunk(args):
 
 
 def cmd_stack(a):
-    global STACK_CHANNEL
+    global STACK_CHANNEL, RESID
     from multiprocessing import Pool
     from astropy.io import fits
     STACK_CHANNEL = a.channel
+    if a.residual:
+        RESID = np.load(a.residual).astype(np.float32)
     frames = night_frames(a.night)
     t_ref = utc_on_night(a.night, a.ref_utc)
     if a.start:
@@ -978,6 +987,8 @@ def main():
     s.add_argument("--erode", type=int, default=2)
     s.add_argument("--asinh", type=float, default=8.0)
     s.add_argument("--align", help="per-frame alignment table from `derot-sky align` (corrects breathing and drift)")
+    s.add_argument("--residual", help="camera-fixed residual map from `derot-sky residual`, subtracted before re-projection "
+                   "(a whole-night canvas otherwise sweeps lit edges and rings into arcs)")
     s.add_argument("--drizzle", type=int, default=0, metavar="N",
                    help="point-kernel drizzle onto an N x finer grid instead of bilinear resampling")
     s.add_argument("-j", "--jobs", type=int, default=4)
