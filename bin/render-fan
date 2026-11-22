@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""The whole night as the sky saw it: astrocam 2026-10-07, all clean frames, `derot-sky stack --canvas`
-(equidistant sky canvas at REFUTC, not cropped to one frame), so the frame's edges are dragged round
-the pole into a fan. Labels from canvas-model.json at REFUTC; the 23:50 frame's outline for scale.
-Usage: render_fan.py <stack dir> [<stretch-from stack dir> [<title> [<subtitle>]]]   (writes fan.jpg, fan-labelled.jpg there)
-With a second dir, the stretch (ADU -> grey) is taken from that stack, so a series shares one stretch."""
+"""render-fan: a night's `derot-sky stack --canvas` output as an image. Every clean frame on one
+equidistant sky canvas at REFUTC, not cropped to one frame, so the frame's edges sweep round the
+pole into a fan. Labels (stars, galactic plane, the REFUTC frame outline, 10 deg bar) from
+canvas-model.json; camera model from the stack header (NIGHT, CAMMODEL) and DEROT_CAMERA.
+Usage: render-fan <stack dir> [<stretch-from stack dir> [<title> [<subtitle>]]]
+Writes fan.jpg, fan-labelled.jpg and fan-labelled-web.jpg (1200 wide) in <stack dir>.
+With a second dir, the stretch (ADU -> grey) is taken from that stack, so a series shares one stretch.
+Promoted from scratch/canvas/render_fan.py (astro-science #1107); run nightly by publish-night-cam."""
 import sys, json, numpy as np, warnings
 from pathlib import Path
 warnings.filterwarnings("ignore"); sys.path.insert(0, str(Path.home() / "astro"))
@@ -70,4 +73,6 @@ else:
     hrs = (Time(fj[-1][0].replace("+00:00", "")) - Time(fj[0][0].replace("+00:00", ""))).to_value("hour")
     d.text((40, 30), f"{CAMNAME}, the whole night of {span}: {N} frames, {t0}-{t1} UTC", fill=(224, 224, 224), font=F)
     d.text((40, 80), f"the sky turned {15.04 * hrs:.0f} deg about the pole in {hrs:.1f} h, and the frame's edges with it", fill=GREY, font=Fs)
-img.save(D / "fan-labelled.jpg", quality=92); print("wrote", D / "fan.jpg", D / "fan-labelled.jpg", img.size)
+img.save(D / "fan-labelled.jpg", quality=92)
+img.resize((1200, round(img.height * 1200 / img.width)), Image.LANCZOS).save(D / "fan-labelled-web.jpg", quality=85)
+print("wrote", D / "fan.jpg", D / "fan-labelled.jpg", D / "fan-labelled-web.jpg", img.size)
