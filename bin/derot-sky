@@ -479,6 +479,64 @@ def _stack_chunk(args):
     return S, Wt, used
 
 
+def canvas_geometry(cm, frames, t_ref, shape, scale=1.0, margin=24):
+    """`stack --canvas`: an output grid big enough for the whole night's sweep. Same pointing as the
+    camera, but equidistant (k = 0, f*scale px/rad everywhere) and re-centred: every frame's border,
+    rotated to the sky at t_ref, lands inside it. Returns (canvas model dict, (H, W))."""
+    H, W = shape
+    q = dict(cm.p, k=0.0, f=cm.f * scale)
+    cv = CameraModel(q)
+    t = np.arange(0, W, 16.0); u = np.arange(0, H, 16.0)
+    bx = np.r_[t, np.full(u.size, W - 1.0), t, np.zeros(u.size)]          # the frame's border, every 16 px
+    by = np.r_[np.zeros(t.size), u, np.full(t.size, H - 1.0), u]
+    V = cm.unproject(bx, by).reshape(-1, 3)
+    X, Y = [], []
+    for dt, _ in list(frames[::10]) + [frames[-1]]:
+        R = _rot_matrix(cm.pole, +SIDEREAL_RAD_PER_S * (mid(dt) - t_ref).total_seconds())
+        x, y = cv.project(V @ R.T); X.append(np.asarray(x)); Y.append(np.asarray(y))
+    X, Y = np.concatenate(X), np.concatenate(Y)
+    x0, x1, y0, y1 = np.floor(X.min()), np.ceil(X.max()), np.floor(Y.min()), np.ceil(Y.max())
+    q["cx"], q["cy"] = cv.cx - x0 + margin, cv.cy - y0 + margin
+    q["grid"] = "derot-sky stack --canvas: equidistant (k=0) sky canvas at REFUTC, scale %.3f of the camera's f" % scale
+    return q, (int(y1 - y0) + 2 * margin, int(x1 - x0) + 2 * margin)
+
+
+def _stack_chunk_canvas(args):
+    """As _stack_chunk, onto the canvas grid (canvas_geometry), in row blocks to bound memory."""
+    import cv2
+    chunk, cam_path, glow_path, t_ref, canvas, erode, align = args
+    q, (Ho, Wo) = canvas
+    cm, gm, cv = CameraModel(cam_path), GlowModel(glow_path), CameraModel(q)
+    S = np.zeros((Ho, Wo), np.float64); Wt = np.zeros((Ho, Wo), np.float64)
+    BL = 256
+    blocks = []
+    for r0 in range(0, Ho, BL):
+        yy, xx = np.mgrid[r0:min(r0 + BL, Ho), 0:Wo].astype(np.float32)
+        blocks.append((r0, cv.unproject(xx, yy).astype(np.float32)))
+    used, mask = [], None
+    for dt, path in chunk:
+        img, amp, rms, level = gm.subtract(load_binned(path, STACK_CHANNEL), return_fit=True)
+        if level <= 0:
+            continue
+        if mask is None:
+            mask = gm.sky_mask(img.shape, erode).astype(np.float32)
+        ms = int(os.path.basename(path).split(".")[0])
+        if align and ms not in align:
+            continue
+        w = 1.0 / level; dts = (mid(dt) - t_ref).total_seconds()
+        for r0, Vb in blocks:
+            x, y = cm.project(cm.sky_motion(Vb.astype(np.float64), dts))
+            if align:
+                x, y = _apply_align(x, y, cm, align[ms])
+            mx, my = np.asarray(x, np.float32), np.asarray(y, np.float32)
+            samp = cv2.remap(img, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+            msk = (cv2.remap(mask, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.999)
+            r1 = r0 + samp.shape[0]
+            S[r0:r1] += w * msk * samp; Wt[r0:r1] += w * msk
+        used.append((dt.isoformat(), float(rms), float(level)))
+    return S, Wt, used
+
+
 def _drizzle_chunk(args):
     """Point-kernel drizzle: carry every input pixel CENTRE to the sky at t_ref
     and drop its value into the nearest pixel of an output grid `scale` x finer.
@@ -549,8 +607,21 @@ def cmd_stack(a):
     align = load_align(a.align)
     if a.align:
         print(f"per-frame alignment from {a.align}: {len(align)} frames")
-    with Pool(a.jobs) as p:
+    canvas = None
+    if a.canvas_from:
+        a.canvas = True
+    if a.canvas:
         if a.drizzle:
+            sys.exit("derot-sky stack: --canvas does not drizzle yet (memory); use bilinear")
+        if a.canvas_from:      # reuse a saved canvas (e.g. the whole night's) so short stacks line up with it
+            q = json.load(open(a.canvas_from)); canvas = (q, tuple(q["shape"]))
+        else:
+            canvas = canvas_geometry(CameraModel(a.camera), frames, t_ref, shape, a.canvas_scale)
+        print(f"canvas {canvas[1][1]} x {canvas[1][0]} px, equidistant, {canvas[0]['f'] * np.pi / 180:.2f} px/deg")
+    with Pool(a.jobs) as p:
+        if canvas:
+            parts = p.map(_stack_chunk_canvas, [(c, a.camera, a.glow, t_ref, canvas, a.erode, align) for c in chunks])
+        elif a.drizzle:
             parts = p.map(_drizzle_chunk, [(c, a.camera, a.glow, t_ref, shape, a.erode, a.drizzle, align) for c in chunks])
         else:
             parts = p.map(_stack_chunk, [(c, a.camera, a.glow, t_ref, shape, a.erode, align) for c in chunks])
@@ -568,6 +639,9 @@ def cmd_stack(a):
     hdr["COMMENT"] = "weighted mean of glow-subtracted frames, re-projected to the sky at REFUTC"
     hdr["ALIGN"] = (os.path.basename(a.align) if a.align else "none", "per-frame similarity from derot-sky align")
     hdr["DRIZZLE"] = (a.drizzle or 0, "0 = bilinear resample; N = point drizzle onto an N x finer grid")
+    if canvas:
+        hdr["CANVAS"] = (True, "sky canvas; geometry in canvas-model.json (CameraModel)")
+        json.dump(dict(canvas[0], shape=list(canvas[1])), open(out / "canvas-model.json", "w"), indent=1)
     fits.HDUList([fits.PrimaryHDU(mean, hdr),
                   fits.ImageHDU((Wt / nmax).astype(np.float32), name="WEIGHT")]).writeto(out / "derot-sky.fits", overwrite=True)
     json.dump(used, open(out / "derot-sky-frames.json", "w"))
@@ -882,6 +956,12 @@ def main():
     s.add_argument("-j", "--jobs", type=int, default=4)
     s.add_argument("--channel", choices=["sum", "R", "G", "B"], default="sum",
                    help="stack one Bayer colour (on the 2x2-sum scale) for a colour image; default sum")
+    s.add_argument("--canvas", action="store_true",
+                   help="output onto a sky canvas big enough for the whole sweep (equidistant, k=0), "
+                        "not cropped to the reference frame; geometry written to canvas-model.json")
+    s.add_argument("--canvas-scale", type=float, default=1.0, help="canvas px/rad as a fraction of the camera's f")
+    s.add_argument("--canvas-from", metavar="JSON", help="reuse the canvas in this canvas-model.json (implies --canvas), "
+                   "so stacks of different windows share one grid")
     s.add_argument("-o", "--out", required=True)
     w = sub.add_parser("sweep"); w.add_argument("camera"); w.add_argument("night")
     w.add_argument("--glow", required=True)
