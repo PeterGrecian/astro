@@ -10,10 +10,16 @@ import re, numpy as np
 from pathlib import Path
 from astropy.io import fits
 from PIL import Image, ImageDraw, ImageFont
-B = Path.home() / "tmp/beforeafter"; OUT = B / "out"; OUT.mkdir(exist_ok=True)
+import sys
+# args (all optional): <stack root> <exposure s> <night span label> <first-last UTC>; defaults are 7-8 Oct
+B = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "tmp/beforeafter"; OUT = B / "out"; OUT.mkdir(exist_ok=True)
+EXP = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
+SPAN = sys.argv[4] if len(sys.argv) > 4 else "19:19-04:22 UTC"
 PXDEG = 1683.86 * np.pi / 180
 FONT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
 SETS = [("1", "m1"), ("3", "m3"), ("10", "m10"), ("30", "m30"), ("night", "mall")]
+if (B / "m1f").exists():
+    SETS = [("frame", "m1f")] + SETS
 def nframes(tag):
     m = re.search(r"(\d+) frames stacked", (B / f"{tag}.log").read_text()); return int(m.group(1))
 def noise(tag):
@@ -28,7 +34,8 @@ def grey(a):
     return (np.clip(np.arcsinh(GAIN * x) / np.arcsinh(GAIN), 0, 1) * 255).astype(np.uint8)
 def label(k):
     n = nframes(dict(SETS)[k])
-    if k == "night": return f"whole night: {n} frames, {n} min (19:19-04:22 UTC)"
+    if k == "night": return f"whole night: {n} frames, {n * EXP / 60:.0f} min ({SPAN})"
+    if k == "frame": return f"one frame: {EXP:.0f} s"
     return f"{k} min: {n} frame{'s' if n > 1 else ''}"
 def bar(d, x, y, deg, s, text):
     L = deg * PXDEG * s; d.line([x, y, x + L, y], fill=(255, 255, 255), width=4); d.text((x, y - 34), text, fill=(255, 255, 255), font=FONT)
