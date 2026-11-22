@@ -19,7 +19,10 @@ cv = CameraModel(json.load(open(D / "canvas-model.json")))
 cam = CameraModel(Path("/mnt/muppet/bigstore/astrocam-frames/2026-10-07/skyglow-cammodel-night.json".replace("/mnt/muppet/bigstore", "/mnt/bigstore/astro-data")))
 fr = AltAz(obstime=T, location=EarthLocation(lat=51.3948 * u.deg, lon=-0.2923 * u.deg), pressure=0)
 PXDEG = cv.f * np.pi / 180
-good = (Wt > 0.05) & np.isfinite(S)
+# Wt is normalised to its peak (the pole, in every frame), so a fixed fraction
+# would black out edges that only a few frames reached, more so the deeper the
+# stack. Cut on absolute coverage instead: about 1.5 frames' worth.
+good = (Wt > min(0.05, 1.5 / max(N, 1))) & np.isfinite(S)
 # stretch on the deep part (>= 25% coverage) so the thin edges are not what sets it
 Sref, Wref = (fits.getdata(Path(sys.argv[2]) / "derot-sky.fits", 0), fits.getdata(Path(sys.argv[2]) / "derot-sky.fits", 1)) if len(sys.argv) > 2 else (S, Wt)
 deep = (Wref > 0.25) & np.isfinite(Sref); v = Sref[deep]
