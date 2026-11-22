@@ -334,10 +334,22 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
                 local ct
                 ct=$("$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "$glow" --times 6 --times-out /dev/fd/3 \
                      3>&1 >/dev/null 2>/dev/null | tr '\n' ' ' || true)
-                for t in 23:00:00 00:00:00 22:30:00 01:00:00 02:00:00 $ct; do
-                    "$PY" "$HERE/derot-sky" refine "$cammodel" "$NIGHT" "$t" --glow "$glow" -o "$cam.try" \
-                        && "$PY" -c "import json,sys; p=json.load(open('$cam.try')); sys.exit(not (p['refine_n'] >= 50 and p['refine_median_px'] < 1.5))" \
-                        && mv "$cam.try" "$cam" && break
+                # Seed from the latest earlier night's refined model first: the
+                # mount drifts (astrocam was 4 deg off its 09-22 model by 10-27,
+                # past the coarse search, so 11-15/19/20 failed), and last
+                # night's pointing is the nearest guess. The repo model second.
+                local seed seeds=() prev
+                prev=$(ls -d "$(dirname "$night_dir")"/20??-??-??/skyglow-cammodel.json 2>/dev/null \
+                       | awk -v n="$(dirname "$night_dir")/$NIGHT/" '$0 < n' | sort | tail -1)
+                [[ -n "$prev" ]] && seeds+=("$prev")
+                seeds+=("$cammodel")
+                for seed in "${seeds[@]}"; do
+                    echo "    refine seed: $seed"
+                    for t in 23:00:00 00:00:00 22:30:00 01:00:00 02:00:00 $ct; do
+                        "$PY" "$HERE/derot-sky" refine "$seed" "$NIGHT" "$t" --glow "$glow" -o "$cam.try" \
+                            && "$PY" -c "import json,sys; p=json.load(open('$cam.try')); sys.exit(not (p['refine_n'] >= 50 and p['refine_median_px'] < 1.5))" \
+                            && mv "$cam.try" "$cam" && break 2
+                    done
                 done
                 rm -f "$cam.try"
                 [[ -s "$cam" ]] || { echo "derot-sky: no clean refine frame"; return 1; }
