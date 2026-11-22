@@ -715,7 +715,12 @@ class _Sweeper:
             if self.resid is not None:
                 img -= level * self.resid    # camera-fixed pattern, per unit sky
             if self.mask is None:
-                self.mask = self.gm.sky_mask(img.shape, self.erode)
+                self.mask = self.gm.sky_mask(img.shape, self.erode).astype(bool)
+                # privacy rows (v3w's neighbouring windows) masked at the source, as
+                # in stack: derotation carries them above the encode-time crop line
+                pm = privacy_mask(img.shape)
+                if pm is not None:
+                    self.mask &= pm > 0
             img[~self.mask] = np.nan        # NaN spreads through INTER_LINEAR: masked edges go too
             sig = 1.4826 * np.nanmedian(np.abs(img[::4, ::4] - np.nanmedian(img[::4, ::4])))
             self.cache[path] = (img, level, sig)
