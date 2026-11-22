@@ -395,6 +395,12 @@ print(f'{m // 60:02d}:{m % 60:02d}:00')" "$SWEEP_START" "$SWEEP_END") || return 
                 ${al:+--align "$al"} --canvas -j "${FAN_JOBS:-2}" -o "$out" || return 1
             "$PY" "$fan" "$out" || return 1
             cp "$out/fan.jpg" "$out/fan-labelled.jpg" "${night_dir}/"
+            # the night page shows a 1200-wide copy and links the full size (astro-deliverables)
+            "$PY" -c "
+import sys; from PIL import Image
+im = Image.open(sys.argv[1]); w = 1200
+im.resize((w, round(im.height * w / im.width)), Image.LANCZOS).save(sys.argv[2], quality=85)" \
+                "${night_dir}/fan-labelled.jpg" "${night_dir}/fan-labelled-web.jpg"
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"
     fi
@@ -589,7 +595,7 @@ names = [
     "poster-glow.jpg",
     "poster-derot-deep.jpg",
     "sky-labelled.jpg", "hq16-in-v3w.jpg",
-    "fan.jpg", "fan-labelled.jpg",   # night_fan: whole night on one canvas
+    "fan.jpg", "fan-labelled.jpg", "fan-labelled-web.jpg",   # night_fan: whole night on one canvas
     # web-delivery versions (what the website actually serves: loop+fullscreen)
     "sweep-colour-web.mp4",
     "sweep-detrans-web.mp4",
@@ -628,7 +634,7 @@ if getattr(cfg, "privacy", None):
               "sweep-derot-web.mp4", "sweep-derot-deep-web.mp4",
               "poster-derot.jpg", "poster-derot-deep.jpg",
               "sky-labelled.jpg", "hq16-in-v3w.jpg",   # derot-annotate crops
-              "fan.jpg", "fan-labelled.jpg",
+              "fan.jpg", "fan-labelled.jpg", "fan-labelled-web.jpg",
               "sweep-glow.mp4", "sweep-glow-web.mp4", "poster-glow.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
