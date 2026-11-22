@@ -4,8 +4,8 @@ import json, numpy as np, sys
 sys.path.insert(0, "/home/peter/astro")
 from astro.skyglow import CameraModel
 B = "/mnt/bigstore/astro-data"
-ast = CameraModel(f"{B}/astrocam-frames/2026-10-07/skyglow-cammodel-night.json")
-ecl = CameraModel("/home/peter/astro/eclipticam-v3w/cammodel-2026-10-07.json")
+ast = CameraModel(sys.argv[1] if len(sys.argv) > 1 else f"{B}/astrocam-frames/2026-10-07/skyglow-cammodel-night.json")
+ecl = CameraModel(sys.argv[2] if len(sys.argv) > 2 else "/home/peter/astro/eclipticam-v3w/cammodel-2026-10-07.json")
 LAT = np.radians(51.3948)
 def foot(cm, W, H, n=60):
     x, y = np.meshgrid(np.linspace(0, W - 1, n), np.linspace(0, H - 1, n))
@@ -28,3 +28,21 @@ print(f"instant: closest eclipticam ray to astrocam footprint {sep.min():.1f} de
       f"fraction of eclipticam within 1 deg of astrocam {np.mean(sep < 1):.3f}")
 da, de = dec(A), dec(E)
 print(f"whole night: dec overlap {max(da.min(), de.min()):.0f}..{min(da.max(), de.max()):.0f}")
+
+# whole-night sky overlap: footprints in (HA, Dec) swept over the dark window -> RA/Dec cells
+if len(sys.argv) > 3:
+    from astropy.time import Time
+    from astropy.coordinates import EarthLocation
+    import astropy.units as u
+    loc = EarthLocation(lat=51.3948 * u.deg, lon=-0.2923 * u.deg)
+    t = Time(sys.argv[3]) + np.arange(0, float(sys.argv[4]) * 60 + 1, 5) * u.min
+    lst = t.sidereal_time("apparent", longitude=loc.lon).deg
+    def cells(cm, W, H):
+        V = foot(cm, W, H, 120); d = dec(V)
+        ha = np.degrees(np.arctan2(-V[:, 0], np.cos(LAT) * V[:, 2] - np.sin(LAT) * V[:, 1]))  # HA west +
+        ra = (lst[:, None] - ha[None, :]) % 360
+        return {(int(r), int(dd + 90)) for r, dd in zip(ra.ravel(), np.repeat(d[None, :], len(lst), 0).ravel())}
+    cA = cells(ast, 2304, 1296); cE = cells(ecl, 2304, 1296); both = cA & cE
+    print(f"night {sys.argv[3]} +{sys.argv[4]} h: 1-deg cells astrocam {len(cA)}, eclipticam {len(cE)}, shared {len(both)}")
+    if both:
+        r = np.array(sorted(both)); print("  shared RA", r[:, 0].min(), "..", r[:, 0].max(), " Dec", r[:, 1].min() - 90, "..", r[:, 1].max() - 90)

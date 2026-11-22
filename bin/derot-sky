@@ -97,6 +97,19 @@ def night_frames(night, cover="open"):
     return sorted(out)
 
 
+def privacy_mask(shape):
+    """1 above the camera's publish crop, 0 below (<camera>/privacy.json: v3w's bottom rows show
+    neighbouring windows). Applied to every stacked frame, so no stack, canvas or drizzle smears
+    those rows across the sky; None when the camera has no privacy.json."""
+    pj = Path(__file__).resolve().parent.parent / CAMERA / "privacy.json"
+    if not pj.exists():
+        return None
+    spec = json.load(open(pj))
+    keep = int(round(spec["publish_keep_top_px"] * shape[0] / spec["frame_size_px"][1]))
+    m = np.ones(shape, np.float32); m[keep:] = 0
+    return m
+
+
 def mid(dt):
     return dt + timedelta(seconds=EXPTIME_S / 2)
 
@@ -462,6 +475,9 @@ def _stack_chunk(args):
             continue
         if mask is None:
             mask = gm.sky_mask(img.shape, erode).astype(np.float32)
+            pm = privacy_mask(img.shape)
+            if pm is not None:
+                mask *= pm
         x, y = cm.project(cm.sky_motion(Vref, (mid(dt) - t_ref).total_seconds()))
         ms = int(os.path.basename(path).split(".")[0])
         if align:
@@ -520,6 +536,9 @@ def _stack_chunk_canvas(args):
             continue
         if mask is None:
             mask = gm.sky_mask(img.shape, erode).astype(np.float32)
+            pm = privacy_mask(img.shape)
+            if pm is not None:
+                mask *= pm
         ms = int(os.path.basename(path).split(".")[0])
         if align and ms not in align:
             continue
@@ -561,6 +580,9 @@ def _drizzle_chunk(args):
             continue
         if keep is None:
             keep = gm.sky_mask(img.shape, erode).ravel()
+            pm = privacy_mask(img.shape)
+            if pm is not None:
+                keep = keep & (pm.ravel() > 0)
         ms = int(os.path.basename(path).split(".")[0])
         if align:
             if ms not in align:

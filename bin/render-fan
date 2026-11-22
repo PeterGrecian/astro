@@ -50,7 +50,12 @@ j = np.where(ok)[0]
 if j.size: d.text((x[j[len(j) // 3]] + 20, y[j[len(j) // 3]]), "galactic plane", fill=BLUE, font=Fs)
 for name, ra, dec, dx, dy in [("Polaris", 37.955, 89.264, 24, -10), ("Capella", 79.172, 45.998, 24, -10), ("Mirfak", 51.081, 49.861, 24, -10),
                               ("Double Cluster", 34.75, 57.13, 24, -10), ("Kochab", 222.676, 74.156, 24, -10), ("Deneb", 310.358, 45.280, 24, -10),
-                              ("Vega", 279.234, 38.784, 24, -10), ("Dubhe", 165.932, 61.751, 24, -10)]:
+                              ("Vega", 279.234, 38.784, 24, -10), ("Dubhe", 165.932, 61.751, 24, -10),
+                              # southern sky (eclipticam): bright stars, Pleiades, M42
+                              ("Altair", 297.696, 8.868, 24, -10), ("Fomalhaut", 344.413, -29.622, 24, -10), ("Aldebaran", 68.980, 16.509, 24, -10),
+                              ("Pleiades", 56.75, 24.12, 24, -10), ("Betelgeuse", 88.793, 7.407, 24, -10), ("Rigel", 78.634, -8.202, 24, -10),
+                              ("M42", 83.82, -5.39, 24, -10), ("Sirius", 101.287, -16.716, 24, -10), ("Procyon", 114.825, 5.225, 24, -10),
+                              ("Hamal", 31.793, 23.462, 24, -10), ("Diphda", 10.897, -17.987, 24, -10), ("Enif", 326.046, 9.875, 24, -10)]:
     x, y = pxy(SkyCoord(ra=ra * u.deg, dec=dec * u.deg)); x, y = float(x[0]), float(y[0])
     if 0 < x < img.width and 0 < y < img.height and good[int(y), int(x)]:
         d.ellipse([x - 18, y - 18, x + 18, y + 18], outline=AMBER, width=3); d.text((x + dx, y + dy), name, fill=AMBER, font=Fs)
