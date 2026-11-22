@@ -375,14 +375,13 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
         # the whole night on one sky canvas (astro-science #1107, Peter 11-22):
         # every clean frame re-projected so the frame edges fan round Polaris.
         # camera.json fan_render: true. Writes night_dir/canvas-night/ (the
-        # canvas FITS, ~60 MB, stays there) and fan.jpg + fan-labelled.jpg,
+        # canvas FITS, ~60 MB, is kept: astro-storage 11-22) and fan.jpg + fan-labelled.jpg,
         # which publish. ~6 min per 500 frames at -j 2, ~630 MB.
         night_fan () {
             local cam="$1" glow="$2" al="$3" out="${night_dir}/canvas-night" fan ref
             [[ "$("$PY" -c "import json,sys; print(int(bool(json.load(open(sys.argv[1])).get('fan_render',0))))" \
                 "$REPO/${CAMERA}/camera.json" 2>/dev/null)" == 1 ]] || return 0
-            fan="$HERE/render-fan"; [[ -x "$fan" ]] || fan="$REPO/scratch/canvas/render_fan.py"
-            echo "--- night fan ($(basename "$fan"))"
+            echo "--- night fan"
             # reference time: the middle of astronomical dark (the sweep span)
             ref=$("$PY" -c "
 import sys
@@ -393,14 +392,10 @@ print(f'{m // 60:02d}:{m % 60:02d}:00')" "$SWEEP_START" "$SWEEP_END") || return 
             mkdir -p "$out"
             "$PY" "$HERE/derot-sky" stack "$cam" "$NIGHT" --glow "$glow" --ref-utc "$ref" \
                 ${al:+--align "$al"} --canvas -j "${FAN_JOBS:-2}" -o "$out" || return 1
-            "$PY" "$fan" "$out" || return 1
-            cp "$out/fan.jpg" "$out/fan-labelled.jpg" "${night_dir}/"
-            # the night page shows a 1200-wide copy and links the full size (astro-deliverables)
-            "$PY" -c "
-import sys; from PIL import Image
-im = Image.open(sys.argv[1]); w = 1200
-im.resize((w, round(im.height * w / im.width)), Image.LANCZOS).save(sys.argv[2], quality=85)" \
-                "${night_dir}/fan-labelled.jpg" "${night_dir}/fan-labelled-web.jpg"
+            # render-fan writes fan.jpg, fan-labelled.jpg and the 1200-wide
+            # fan-labelled-web.jpg the night page shows (astro-deliverables)
+            "$PY" "$HERE/render-fan" "$out" || return 1
+            cp "$out/fan.jpg" "$out/fan-labelled.jpg" "$out/fan-labelled-web.jpg" "${night_dir}/"
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"
     fi
