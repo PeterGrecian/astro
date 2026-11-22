@@ -370,6 +370,31 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
             if [[ "$CAMERA" == eclipticam-v3w ]]; then
                 "$PY" "$HERE/derot-annotate" hq16 "$NIGHT" || echo "derot-annotate hq16 failed"
             fi
+            night_fan "$cam" "$glow" "$al" || echo "night fan failed"
+        }
+        # the whole night on one sky canvas (astro-science #1107, Peter 11-22):
+        # every clean frame re-projected so the frame edges fan round Polaris.
+        # camera.json fan_render: true. Writes night_dir/canvas-night/ (the
+        # canvas FITS, ~60 MB, stays there) and fan.jpg + fan-labelled.jpg,
+        # which publish. ~6 min per 500 frames at -j 2, ~630 MB.
+        night_fan () {
+            local cam="$1" glow="$2" al="$3" out="${night_dir}/canvas-night" fan ref
+            [[ "$("$PY" -c "import json,sys; print(int(bool(json.load(open(sys.argv[1])).get('fan_render',0))))" \
+                "$REPO/${CAMERA}/camera.json" 2>/dev/null)" == 1 ]] || return 0
+            fan="$HERE/render-fan"; [[ -x "$fan" ]] || fan="$REPO/scratch/canvas/render_fan.py"
+            echo "--- night fan ($(basename "$fan"))"
+            # reference time: the middle of astronomical dark (the sweep span)
+            ref=$("$PY" -c "
+import sys
+a, b = [int(x[:2]) * 60 + int(x[3:5]) for x in sys.argv[1:3]]
+b += 1440 if b <= a else 0
+m = (a + b) // 2 % 1440
+print(f'{m // 60:02d}:{m % 60:02d}:00')" "$SWEEP_START" "$SWEEP_END") || return 1
+            mkdir -p "$out"
+            "$PY" "$HERE/derot-sky" stack "$cam" "$NIGHT" --glow "$glow" --ref-utc "$ref" \
+                ${al:+--align "$al"} --canvas -j "${FAN_JOBS:-2}" -o "$out" || return 1
+            "$PY" "$fan" "$out" || return 1
+            cp "$out/fan.jpg" "$out/fan-labelled.jpg" "${night_dir}/"
         }
         derot_sky_sweeps || echo "derot-sky sweeps FAILED; continuing without them"
     fi
@@ -564,6 +589,7 @@ names = [
     "poster-glow.jpg",
     "poster-derot-deep.jpg",
     "sky-labelled.jpg", "hq16-in-v3w.jpg",
+    "fan.jpg", "fan-labelled.jpg",   # night_fan: whole night on one canvas
     # web-delivery versions (what the website actually serves: loop+fullscreen)
     "sweep-colour-web.mp4",
     "sweep-detrans-web.mp4",
@@ -602,6 +628,7 @@ if getattr(cfg, "privacy", None):
               "sweep-derot-web.mp4", "sweep-derot-deep-web.mp4",
               "poster-derot.jpg", "poster-derot-deep.jpg",
               "sky-labelled.jpg", "hq16-in-v3w.jpg",   # derot-annotate crops
+              "fan.jpg", "fan-labelled.jpg",
               "sweep-glow.mp4", "sweep-glow-web.mp4", "poster-glow.jpg"):
         if (nd/n).exists():
             P.mark_ok(nd/n)
