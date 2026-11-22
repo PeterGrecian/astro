@@ -16,7 +16,12 @@ from PIL import Image, ImageDraw, ImageFont
 D = Path(sys.argv[1]); S = fits.getdata(D / "derot-sky.fits", 0); Wt = fits.getdata(D / "derot-sky.fits", 1)
 hdr = fits.getheader(D / "derot-sky.fits"); T = Time(hdr["REFUTC"].replace("+00:00", "")); N = hdr["NFRAMES"]
 cv = CameraModel(json.load(open(D / "canvas-model.json")))
-cam = CameraModel(Path("/mnt/muppet/bigstore/astrocam-frames/2026-10-07/skyglow-cammodel-night.json".replace("/mnt/muppet/bigstore", "/mnt/bigstore/astro-data")))
+# the night's own camera model, named in the stack header (DEROT_CAMERA picks the camera, as in derot-sky)
+import os, datetime as _dt
+CAMNAME = os.environ.get("DEROT_CAMERA", "astrocam"); NIGHT = hdr["NIGHT"]
+ROOT = {"astrocam": f"/mnt/bigstore/astro-data/astrocam-frames/{NIGHT}",
+        "eclipticam-v3w": f"/mnt/bigstore/astro-data/eclipticam-frames/night/{NIGHT}"}[CAMNAME]
+cam = CameraModel(Path(ROOT) / hdr["CAMMODEL"])
 fr = AltAz(obstime=T, location=EarthLocation(lat=51.3948 * u.deg, lon=-0.2923 * u.deg), pressure=0)
 PXDEG = cv.f * np.pi / 180
 # Wt is normalised to its peak (the pole, in every frame), so a fixed fraction
@@ -53,13 +58,16 @@ d.text((x[2] - 60, y[2] - 70), "Cassiopeia", fill=AMBER, font=Fs)
 t = np.arange(0, 2304, 8.0); s_ = np.arange(0, 1296, 8.0)
 bx = np.r_[t, np.full(s_.size, 2303.0), t[::-1], np.zeros(s_.size)]; by = np.r_[np.zeros(t.size), s_, np.full(t.size, 1295.0), s_[::-1]]
 x, y = cv.project(cam.unproject(bx, by)); d.line(list(zip(x, y)) + [(x[0], y[0])], fill=GREY + (220,), width=3)
-d.text((x[0] + 10, y[0] + 10), "one frame (23:50 UTC)", fill=GREY, font=Fs)
+d.text((x[0] + 10, y[0] + 10), f"one frame ({T.datetime:%H:%M} UTC)", fill=GREY, font=Fs)
 L = 10 * PXDEG; d.line([40, img.height - 60, 40 + L, img.height - 60], fill=(255, 255, 255), width=6); d.text((40, img.height - 110), "10 deg", fill=(255, 255, 255), font=Fs)
 fj = json.load(open(D / "derot-sky-frames.json")); t0, t1 = fj[0][0][11:16], fj[-1][0][11:16]
 if len(sys.argv) > 3:
     d.text((40, 30), sys.argv[3].format(N=N, t0=t0, t1=t1), fill=(224, 224, 224), font=F)
     d.text((40, 80), (sys.argv[4] if len(sys.argv) > 4 else "same sky canvas and the same stretch as the whole-night image").format(N=N, t0=t0, t1=t1), fill=GREY, font=Fs)
 else:
-    d.text((40, 30), f"astrocam, the whole night of 7-8 Oct 2026: {N} frames of 60 s, {t0}-{t1} UTC", fill=(224, 224, 224), font=F)
-    d.text((40, 80), "looking north from Surbiton; the sky turned 135 deg about Polaris and the frame's edges with it", fill=GREY, font=Fs)
+    n0 = _dt.date.fromisoformat(NIGHT); n1 = n0 + _dt.timedelta(days=1)
+    span = (n0.strftime("%-d %b") if n0.month != n1.month else n0.strftime("%-d")) + n1.strftime("-%-d %b %Y")
+    hrs = (Time(fj[-1][0].replace("+00:00", "")) - Time(fj[0][0].replace("+00:00", ""))).to_value("hour")
+    d.text((40, 30), f"{CAMNAME}, the whole night of {span}: {N} frames, {t0}-{t1} UTC", fill=(224, 224, 224), font=F)
+    d.text((40, 80), f"the sky turned {15.04 * hrs:.0f} deg about the pole in {hrs:.1f} h, and the frame's edges with it", fill=GREY, font=Fs)
 img.save(D / "fan-labelled.jpg", quality=92); print("wrote", D / "fan.jpg", D / "fan-labelled.jpg", img.size)
