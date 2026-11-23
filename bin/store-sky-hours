@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""store-sky-hours — put the astrocam sky-quality hour tables in AWS, carefully.
+
+Pulls a survey directory from muppet (scratch/wetlens survey.py + hours.py outputs), packs it, and
+uploads to s3://astro-berrylands-eu-west-1/state/sky-quality/:
+
+  latest/  hours.csv  hours-ranked.csv  regimes.json  README.md  survey-npz.tar.gz  MANIFEST.sha256
+  YYYY-MM-DD/  the same files, written once and never overwritten (the bucket is not versioned)
+
+Refuses to overwrite an existing dated snapshot. Verifies every upload by size against S3.
+Usage: store-sky-hours [--survey muppet:~/tmp/wetsurvey] [--date YYYY-MM-DD] [-n]"""
+import argparse, datetime, hashlib, json, os, subprocess, sys, tarfile
+BUCKET = "astro-berrylands-eu-west-1"; PREFIX = "state/sky-quality"
+README = """# astrocam sky-quality hours
+
+One row per astrocam hour (UTC) of every night in the archive, from the water/cloud survey
+(astro scratch/wetlens: survey.py, hours.py; astro-science strand, 2026-11-23).
+
+## Files
+- `hours.csv`: every hour, by time.
+- `hours-ranked.csv`: the same rows sorted by `clarity` (best first), with `rank`.
+- `regimes.json`: the regime date ranges and water notes used for ranking.
+- `survey-npz.tar.gz`: per-night survey.py output (`<night>.npz`): `table` (one row per sampled
+  frame: epoch_ms, total stars, 9 per-cell star counts, 9 per-cell star sizes, frame median, noise,
+  box RH, cover open), `flat` (clear-sky flat binned 8, 576x324, normalised), `clear`, `files`.
+- `MANIFEST.sha256`: sha256 of each file above.
+
+## Columns
+- `night`: night label (noon rollover, local date of the evening). `hour`: UTC hour start.
+- `nframes`, `sky_median`, `exptime`, `open_frac`: from the night's brightness.csv (all frames;
+  empty for summer nights, which have no brightness.csv).
+- `stars`, `stars_min`: median / minimum star count over the hour's sampled frames (one per 10 min;
+  peaks > 8 sigma on a 2x2-binned, background-subtracted frame).
+- `star_size`: median 2nd-moment star radius (binned px) across the 3x3 cells.
+- `sun_alt`, `moon_alt` (deg), `moon_illum` (0-1) at the half hour, Surbiton.
+- `regime`: camera epoch / exposure / cover / water period (see regimes.json).
+- `regime_ref_stars`: 95th percentile star count of moonless astro-dark hours in that regime.
+- `clarity` = stars_min / regime_ref_stars (capped 1.5): 1.0 = as clear as the regime's best
+  hours, for the whole hour. Star count also depends on what sky is in view (Milky Way) and the
+  Moon, so compare within a regime and read with the flags.
+- `flags`: twilight (sun > -18), moonNN%, blurred (star_size > 1.25x regime median),
+  water-suspect (regime after the 10-22 wet night / 10-28 storm), cover-closed.
+"""
+
+def sh(cmd, **kw): return subprocess.run(cmd, check=True, text=True, capture_output=True, **kw).stdout
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--survey", default="muppet:tmp/wetsurvey")
+    ap.add_argument("--date", default=datetime.date.today().isoformat())
+    ap.add_argument("-n", "--dry-run", action="store_true")
+    a = ap.parse_args()
+    stage = os.path.expanduser(f"~/tmp/sky-quality/{a.date}"); os.makedirs(stage, exist_ok=True)
+    host, rdir = a.survey.split(":", 1)
+    for f in ("hours.csv", "hours-ranked.csv", "regimes.json"):
+        sh(["scp", "-q", f"{host}:{rdir}/{f}", f"{stage}/{f}"])
+    tgz = f"{stage}/survey-npz.tar.gz"
+    with open(tgz, "wb") as out:
+        subprocess.run(["ssh", host, f"cd {rdir} && tar czf - --exclude='*.csv' --exclude='*.json' ."], check=True, stdout=out)
+    with tarfile.open(tgz) as t: n_npz = sum(m.name.endswith(".npz") for m in t.getmembers())
+    open(f"{stage}/README.md", "w").write(README + f"\nSnapshot {a.date}: {n_npz} nights.\n")
+    files = ["hours.csv", "hours-ranked.csv", "regimes.json", "README.md", "survey-npz.tar.gz"]
+    man = "".join(f"{hashlib.sha256(open(f'{stage}/{f}', 'rb').read()).hexdigest()}  {f}\n" for f in files)
+    open(f"{stage}/MANIFEST.sha256", "w").write(man); files.append("MANIFEST.sha256")
+    total = sum(os.path.getsize(f"{stage}/{f}") for f in files)
+    print(f"staged {stage}: {n_npz} nights, {total / 1e6:.1f} MB; S3 standard ~${total / 1e9 * 0.023 * 2:.4f}/month (latest + dated)")
+    dated = f"s3://{BUCKET}/{PREFIX}/{a.date}/"
+    exists = subprocess.run(["aws", "s3", "ls", dated], capture_output=True, text=True).stdout.strip()
+    if exists: sys.exit(f"refusing: {dated} already exists (dated snapshots are write-once)")
+    if a.dry_run: print("dry run: nothing uploaded"); return
+    ct = {".csv": "text/csv", ".json": "application/json", ".md": "text/markdown", ".gz": "application/gzip", ".sha256": "text/plain"}
+    for dest in (dated, f"s3://{BUCKET}/{PREFIX}/latest/"):
+        for f in files:
+            sh(["aws", "s3", "cp", "--only-show-errors", "--content-type", ct[os.path.splitext(f)[1]], f"{stage}/{f}", dest + f])
+            key = (dest + f).split(f"s3://{BUCKET}/", 1)[1]
+            size = int(sh(["aws", "s3api", "head-object", "--bucket", BUCKET, "--key", key, "--query", "ContentLength"]).strip())
+            if size != os.path.getsize(f"{stage}/{f}"): sys.exit(f"size mismatch on {key}")
+        print("uploaded + verified", dest)
+
+if __name__ == "__main__": main()
