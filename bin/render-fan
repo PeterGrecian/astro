@@ -39,6 +39,12 @@ deep = (Wref > 0.25) & np.isfinite(Sref); v = Sref[deep]
 sig = 1.4826 * np.median(np.abs(v - np.median(v))); lo, hi = np.median(v) - 1.5 * sig, np.percentile(v, 99.7)
 g = np.clip((np.nan_to_num(S, nan=lo) - lo) / (hi - lo), 0, None); g = np.arcsinh(14 * g) / np.arcsinh(14)
 g[~good] = 0
+# FAN_CROP_BOTTOM=1: drop the empty canvas below the swept sky (rows the stretch-from stack never
+# covered, plus room for the scale bar), so a series cropped this way keeps one size
+if os.environ.get("FAN_CROP_BOTTOM"):
+    Nref = fits.getheader(Path(sys.argv[2]) / "derot-sky.fits")["NFRAMES"] if len(sys.argv) > 2 else N
+    rows = np.where(((Wref > min(0.05, 1.5 / max(Nref, 1))) & np.isfinite(Sref)).any(1))[0]
+    Hc = min(g.shape[0], int(rows.max()) + 140) if rows.size else g.shape[0]; g = g[:Hc]; good = good[:Hc]
 img = Image.fromarray((np.clip(g, 0, 1) * 255).astype(np.uint8)).convert("RGB"); img.save(D / "fan.jpg", quality=92)
 F = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40); Fs = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
 d = ImageDraw.Draw(img, "RGBA"); AMBER, BLUE, GREY = (255, 149, 0), (0, 122, 255), (142, 142, 147)
