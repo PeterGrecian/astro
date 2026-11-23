@@ -102,6 +102,7 @@
   "night_output": "subcam",
   "night_output_notes": "Products go in night/<night>/hq16/ beside the hour dirs, not night/<night>/ where v3w's live (astro/frames.py night_output_dir).",
   "glow_sweep": true,
+  "refine_min_n": 30,
   "fan_render": true,
   "fan_render_notes": "Night fan for /astro/latest (astro-deliverables, 2026-11-23). Derot and the fan run on cammodel-2026-11-12.json, astro-science #1107 fithq16.py: 107 Hipparcos stars, median 1.16 px, single frame 11-13 01:01 UTC. derot-sky refine follows the nightly drift.",
   "glow_sweep_notes": "publish-night-cam builds the night's sky-glow model (skyglow-model cube + fit, in night/<n>/hq16/) and renders the glow sweep (diff-sweep --glow-model) behind derot-sky's clean gate, though HQ16 has no camera model for derot (astro-pipeline #1066, 2026-11-13, at Peter's ask via astro-hq16). Clean-gate noise reference: derot-sky CLEAN_NOISE_REF, from 2026-11-12.",

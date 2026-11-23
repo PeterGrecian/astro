@@ -343,11 +343,16 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
                        | awk -v n="$(dirname "$night_dir")/$NIGHT/" '$0 < n' | sort | tail -1)
                 [[ -n "$prev" ]] && seeds+=("$prev")
                 seeds+=("$cammodel")
+                # star count a refine needs: 50 suits the wide cameras; a narrow
+                # field has fewer (hq16: 30, astro-science 2026-11-23)
+                local refine_min_n
+                refine_min_n=$("$PY" -c "import json,sys; print(int(json.load(open(sys.argv[1])).get('refine_min_n', 50)))" \
+                    "$REPO/${CAMERA}/camera.json" 2>/dev/null || echo 50)
                 for seed in "${seeds[@]}"; do
                     echo "    refine seed: $seed"
                     for t in 23:00:00 00:00:00 22:30:00 01:00:00 02:00:00 $ct; do
                         "$PY" "$HERE/derot-sky" refine "$seed" "$NIGHT" "$t" --glow "$glow" -o "$cam.try" \
-                            && "$PY" -c "import json,sys; p=json.load(open('$cam.try')); sys.exit(not (p['refine_n'] >= 50 and p['refine_median_px'] < 1.5))" \
+                            && "$PY" -c "import json,sys; p=json.load(open('$cam.try')); sys.exit(not (p['refine_n'] >= $refine_min_n and p['refine_median_px'] < 1.5))" \
                             && mv "$cam.try" "$cam" && break 2
                     done
                 done

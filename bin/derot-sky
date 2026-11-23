@@ -242,6 +242,7 @@ def cmd_refine(a):
     px, py = CameraModel(p0).project(V)
     px, py = px + sx, py + sy
     first = True
+    best_r = None
     for rnd in range(3):
         meas, keep = _match(img, noise, px, py, a.search)
         if rnd == 0:
@@ -266,12 +267,20 @@ def cmd_refine(a):
         px, py = CameraModel(p0).project(V)
         d = np.hypot(*np.split(s.fun, 2))
         print(f"  round {rnd + 1}: {len(keep)} stars, median offset {np.median(d):.2f} px")
-    p0.update(refined_on=f"{a.night} {dt.isoformat()}", refine_median_px=float(np.median(d)),
-              refine_n=int(len(keep)))
+        if best_r is None or np.median(d) < best_r[0]:
+            best_r = (float(np.median(d)), int(len(keep)), dict(p0), rnd + 1)
+    # keep the best round, not the last: a later round's re-match can take a
+    # wrong nearest-brightest pixel and fit worse (hq16 at 40"/px, 11-12:
+    # 1.52 -> 1.88 -> 1.78 px; astro-science 2026-11-23)
+    med_d, n_keep, p0, rbest = best_r
+    if rbest != 3:
+        print(f"  keeping round {rbest} ({med_d:.2f} px)")
+    p0.update(refined_on=f"{a.night} {dt.isoformat()}", refine_median_px=med_d,
+              refine_n=n_keep, refine_round=rbest)
     json.dump(p0, open(a.out, "w"), indent=1)
     b0 = _enu(np.array(cm.p["az0"]), np.array(cm.p["alt0"]))
     b1 = _enu(np.array(p0["az0"]), np.array(p0["alt0"]))
-    print(f"  after refine:  median offset {np.median(d):.2f} px  (pointing moved "
+    print(f"  after refine:  median offset {med_d:.2f} px  (pointing moved "
           f"{np.degrees(np.arccos(np.clip(b0 @ b1, -1, 1))):.3f} deg, "
           f"roll {np.degrees(p0['roll'] - cm.p['roll']):+.3f} deg)\n  -> {a.out}")
 
