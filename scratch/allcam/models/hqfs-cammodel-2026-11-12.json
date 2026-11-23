@@ -1,0 +1,22 @@
+{
+ "lat": 51.3948,
+ "lon": -0.2923,
+ "mirror": -1,
+ "k": 0.0,
+ "cx": 507.0,
+ "cy": 380.0,
+ "az0": 0.004971445858254716,
+ "alt0": 0.9021604448428407,
+ "roll": 0.02433183930853711,
+ "f": 45242.63460550505,
+ "model_note": "equidistant (k=0) about the optical axis, fixed alt-az camera; binned 1014x760 grid (load_binned of stored 2028x1520)",
+ "fit_night": "2026-11-12",
+ "fit_frames": [
+  "/mnt/bigstore/astro-data/xoverpi-frames/night/2026-11-12/19/20261112T185923Z-00301.fits.fz",
+  "/mnt/bigstore/astro-data/xoverpi-frames/night/2026-11-12/20/20261112T185923Z-00310.fits.fz"
+ ],
+ "fit_utc": "2026-11-12T20:00:55.374",
+ "fit_n": 105,
+ "fit_median_px": 0.4865660746427483,
+ "fit_method": "astro-science #1107 scratch/allcam/fithqfs.py: Polaris anchor + brute-force similarity vs Gaia DR3 G<13, then least squares"
+}
