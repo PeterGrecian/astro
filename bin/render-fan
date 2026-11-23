@@ -39,12 +39,16 @@ deep = (Wref > 0.25) & np.isfinite(Sref); v = Sref[deep]
 sig = 1.4826 * np.median(np.abs(v - np.median(v))); lo, hi = np.median(v) - 1.5 * sig, np.percentile(v, 99.7)
 g = np.clip((np.nan_to_num(S, nan=lo) - lo) / (hi - lo), 0, None); g = np.arcsinh(14 * g) / np.arcsinh(14)
 g[~good] = 0
-# FAN_CROP_BOTTOM=1: drop the empty canvas below the swept sky (rows the stretch-from stack never
-# covered, plus room for the scale bar), so a series cropped this way keeps one size
-if os.environ.get("FAN_CROP_BOTTOM"):
+# FAN_CROP=1 (or the older FAN_CROP_BOTTOM): trim the empty canvas round the swept sky, on every side
+# (rows/columns the stretch-from stack never covered, plus a margin for labels and the scale bar), so a
+# series rendered against one stretch-from stack keeps one size. The canvas model shifts with the crop.
+if os.environ.get("FAN_CROP") or os.environ.get("FAN_CROP_BOTTOM"):
     Nref = fits.getheader(Path(sys.argv[2]) / "derot-sky.fits")["NFRAMES"] if len(sys.argv) > 2 else N
-    rows = np.where(((Wref > min(0.05, 1.5 / max(Nref, 1))) & np.isfinite(Sref)).any(1))[0]
-    Hc = min(g.shape[0], int(rows.max()) + 140) if rows.size else g.shape[0]; g = g[:Hc]; good = good[:Hc]
+    cov = (Wref > min(0.05, 1.5 / max(Nref, 1))) & np.isfinite(Sref)
+    r, c = np.where(cov.any(1))[0], np.where(cov.any(0))[0]
+    y0, y1 = max(0, r.min() - 140), min(g.shape[0], r.max() + 140); x0, x1 = max(0, c.min() - 40), min(g.shape[1], c.max() + 40)
+    g, good = g[y0:y1, x0:x1], good[y0:y1, x0:x1]
+    cv = CameraModel(dict(cv.p, cx=cv.p["cx"] - x0, cy=cv.p["cy"] - y0))
 img = Image.fromarray((np.clip(g, 0, 1) * 255).astype(np.uint8)).convert("RGB"); img.save(D / "fan.jpg", quality=92)
 F = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40); Fs = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
 d = ImageDraw.Draw(img, "RGBA"); AMBER, BLUE, GREY = (255, 149, 0), (0, 122, 255), (142, 142, 147)
