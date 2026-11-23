@@ -1,0 +1,19 @@
+{
+ "lat": 51.3948,
+ "lon": -0.2923,
+ "mirror": -1,
+ "az0": 3.484237792861501,
+ "alt0": 0.5424451437338644,
+ "roll": -0.15760907278267114,
+ "f": 5144.673491278707,
+ "k": 0.13679327586445494,
+ "cx": 979.1749353449876,
+ "cy": 732.5127758895782,
+ "model_note": "equidistant+cubic about the optical axis, fixed alt-az camera; binned 2028x1520 grid (load_binned)",
+ "fit_night": "2026-11-12",
+ "fit_frame": "/mnt/bigstore/astro-data/eclipticam-frames/night/2026-11-12/hq16/01/1794531644699.fits.fz",
+ "fit_utc": "2026-11-13T01:01:14.649",
+ "fit_n": 107,
+ "fit_median_px": 1.1557475978152727,
+ "fit_method": "astro-science #1107 scratch/allcam/fithq16.py: astrometry.net .corr matches, least squares; then iterated against Hipparcos V<7.5 on the frame's detections"
+}
