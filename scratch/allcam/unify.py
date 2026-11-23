@@ -29,7 +29,7 @@ srcs = dict(a.split("=", 1) for a in sys.argv[1:])
 gy, gx = np.mgrid[0:NPX, 0:NPX].astype(np.float32)
 Vu = uv.unproject(gx, gy).reshape(-1, 3)
 inside = (np.hypot(gx - NPX / 2, gy - NPX / 2) <= RMAX * F).ravel()
-rgb = np.zeros((NPX, NPX, 3), np.float32); covered = {}
+rgb = np.zeros((NPX, NPX, 3), np.float32); covered = {}; span = {}
 MINW = {"v3w": 0.1}   # v3w's frame corner reaches the bottom-right edge only briefly (~4% weight), where the
                       # glow fit fails and a bright smear survives; drop that thin edge
 def grey(S, Wt, N, minw=0.0):
@@ -51,6 +51,7 @@ for name in ORDER:
     cc = cv2.remap(good, mx, my, cv2.INTER_LINEAR, borderValue=0) > 0.5
     rgb[cc] = gg[cc, None]                               # later cameras on top
     covered[name] = cc
+    fl = json.load(open(D / "derot-sky-frames.json")); span[name] = (Time(fl[0][0][:23]), Time(fl[-1][0][:23]))
     print(f"{name}: {h['NFRAMES']} frames, REF {h['REFUTC'][11:16]}, {cc.mean() * 100:.2f}% of the map, native {cv.f * np.pi / 180:.1f} px/deg vs map {F * np.pi / 180:.1f}")
 img = Image.fromarray((rgb * 255).astype(np.uint8)); img.save(OUT / "unified.jpg", quality=92)
 # ---- labels
@@ -60,6 +61,29 @@ for name, cc in covered.items():                         # outline each camera's
     cs, _ = cv2.findContours(cc.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     for c in cs:
         if len(c) > 20: d.line([tuple(p[0]) for p in c] + [tuple(c[0][0])], fill=COL[name] + (230,), width=5)
+# one frame's outline every 2 h through the night, labelled with its time (as the fans' "one frame (HH:MM UTC)")
+night = REF.datetime.date().isoformat(); ABM = "/mnt/bigstore/astro-data"
+FRAME = {"astrocam": (f"{ABM}/astrocam-frames/{night}/skyglow-cammodel.json", 2304, 1296),
+         "v3w": (f"{ABM}/eclipticam-frames/night/{night}/skyglow-cammodel.json", 2304, 1064),   # privacy: top 1064 rows only
+         "hq16": (str(OUT / f"hq16-cammodel-{night}.json"), 2028, 1520)}
+STEP = 2 * 3600
+for name in ("astrocam", "v3w", "hq16"):
+    if name not in covered or not Path(FRAME[name][0]).exists(): continue
+    fm = CameraModel(json.load(open(FRAME[name][0]))); W, H = FRAME[name][1:]
+    e = np.r_[np.arange(0, W, 8.0), np.full(int(H / 8), W - 1.0), np.arange(W - 1, 0, -8.0), np.zeros(int(H / 8))]
+    f_ = np.r_[np.zeros(int(W / 8)), np.arange(0, H, 8.0), np.full(int(W / 8), H - 1.0), np.arange(H - 1, 0, -8.0)]
+    n = min(len(e), len(f_)); Vt = fm.unproject(e[:n], f_[:n]).reshape(-1, 3)
+    t0, t1 = span[name]; ts = np.ceil(t0.unix / STEP) * STEP - REF.unix   # on the even hour
+    while ts <= (t1 - REF).to_value("s"):
+        V = Vt @ rot(uv.pole, SIDEREAL_RAD_PER_S * ts).T; x, y = uv.project(V)
+        ok = np.hypot(x - NPX / 2, y - NPX / 2) < RMAX * F
+        for i in range(n - 1):
+            if ok[i] and ok[i + 1] and i % 4 < 2: d.line([x[i], y[i], x[i + 1], y[i + 1]], fill=COL[name] + (200,), width=3)
+        k = np.where(ok)[0]
+        if len(k):
+            j = k[np.argmin(y[k])]; T = (REF + ts * u.s).datetime
+            d.text((float(x[j]) + 8, float(y[j]) - 52), f"{T:%H:%M}", fill=COL[name] + (255,), font=Fm)
+        ts += STEP
 fr = AltAz(obstime=REF, location=LOC, pressure=0)
 def pxy(sc):
     a = sc.transform_to(fr); return uv.project(_enu(a.az.rad, a.alt.rad))
@@ -87,7 +111,10 @@ d.text((60, 40), "Four cameras, one night: 12-13 Nov 2026, Surbiton", fill=(224,
 d.text((60, 120), "each camera's whole night on one fisheye of the sky at 23:45 UTC (zenith at centre; grey: horizon, 30, 60 deg)", fill=(142, 142, 147), font=Fm)
 yk = 190
 for name, lab in (("astrocam", "astrocam (north, wide)"), ("v3w", "eclipticam v3w (south, wide)"), ("hq16", "eclipticam HQ16 (16 mm)"), ("hqfs", "hqfs (FirstScope, 300 mm, at the pole)")):
-    if name in covered: d.rectangle([60, yk + 8, 110, yk + 48], outline=COL[name], width=6); d.text((130, yk), lab, fill=COL[name], font=Fm); yk += 64
+    if name in covered:
+        a, b = span[name]; lab += f": {a.datetime:%H:%M}-{b.datetime:%H:%M} UTC"
+        d.rectangle([60, yk + 8, 110, yk + 48], outline=COL[name], width=6); d.text((130, yk), lab, fill=COL[name], font=Fm); yk += 64
+d.text((60, yk + 6), "dashed: one frame every 2 h, labelled with its time (where that frame's sky sits at 23:45)", fill=(142, 142, 147), font=Fm)
 L = 10 * F * np.pi / 180; d.line([60, NPX - 80, 60 + L, NPX - 80], fill=(255, 255, 255), width=8); d.text((60, NPX - 150), "10 deg (at the centre)", fill=(255, 255, 255), font=Fm)
 # insets: native-scale fans
 yi = 60
