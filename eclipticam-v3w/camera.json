@@ -76,6 +76,8 @@
   "quality_file": "quality.json",
   "location_file": "location.json",
   "privacy_file": "privacy.json",
+  "fan_render": true,
+  "fan_render_notes": "publish-night-cam night_fan: whole-night derot-sky stack --canvas, privacy-masked, rendered by render-fan into fan.jpg, fan-labelled.jpg and fan-labelled-web.jpg; published for /astro/latest (astro-deliverables, 2026-11-23).",
   "occlusion_file": "occlusion.json",
   "position_index": 7,
   "position_index_notes": "Which physical pointing setup the camera is in. INCREMENT whenever the camera is moved, nudged or remounted. Unlike astrocam, eclipticam is NOT clamped: moves of 0.2-2 deg happen without notice and most are recorded nowhere, so the registry was built from the data (astro-science, 2026-10-10, for the Saturn walk): a pointing fit per night (scratch/saturn-walk/scan-epochs.py, epochs-scan.csv) and every 20 min through the nights around each step (scan-within.py, within-scan.csv), confirmed by red/cyan roofline overlays (look/boundaries/). The pointing given per epoch is a STARTING POINT, not a calibration: within one night the fit wanders 0.1-0.3 deg in alt (fixed lens centre and k, a changing star field), and epoch 6 creeps in roll, so every use still needs a per-night or per-frame refine. Lens model: cammodel-2026-10-07.json (equidistant + cubic, binned 2304x1296 grid). STAMPED as POSINDEX from epoch 7 (2026-10-13 21:53 BST): v3w_night_daemon.py reads position_index; earlier frames carry none and are placed by date.",
