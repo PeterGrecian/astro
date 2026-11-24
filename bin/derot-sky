@@ -640,6 +640,11 @@ def cmd_stack(a):
     if a.start:
         t0, t1 = utc_on_night(a.night, a.start), utc_on_night(a.night, a.end)
         frames = [f for f in frames if t0 <= f[0] < t1]
+    if a.windows:                              # several windows (UTC ISO pairs), e.g. a night's clear 10-min blocks
+        W_ = [(datetime.fromisoformat(u), datetime.fromisoformat(v)) for u, v in json.load(open(a.windows))]
+        frames = [f for f in frames if any(u <= f[0] < v for u, v in W_)]
+        if not frames:
+            sys.exit("derot-sky stack: no frames in --windows")
     frames = clean_frames(a.night, frames, a.glow, a.max_ratio)
     print(f"ref {t_ref.isoformat()}")
     shape = load_binned(frames[0][1]).shape
@@ -674,6 +679,7 @@ def cmd_stack(a):
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     hdr = fits.Header()
     hdr["NIGHT"] = a.night; hdr["REFUTC"] = t_ref.isoformat(); hdr["NFRAMES"] = len(used)
+    hdr["WTMAX"] = (float(nmax), "WEIGHT HDU x WTMAX = summed frame weight (to combine stacks)")
     hdr["CHANNEL"] = (a.channel, "Bayer channel, on the 2x2-sum scale")
     hdr["CAMMODEL"] = os.path.basename(a.camera); hdr["GLOWMODL"] = os.path.basename(a.glow)
     hdr["COMMENT"] = "weighted mean of glow-subtracted frames, re-projected to the sky at REFUTC"
@@ -992,6 +998,7 @@ def main():
     s = sub.add_parser("stack"); s.add_argument("camera"); s.add_argument("night")
     s.add_argument("--glow", required=True); s.add_argument("--ref-utc", required=True)
     s.add_argument("--from", dest="start"); s.add_argument("--to", dest="end")
+    s.add_argument("--windows", help="JSON list of [start, end] UTC ISO times: stack only frames inside them")
     s.add_argument("--max-ratio", type=float, default=1.5)
     s.add_argument("--erode", type=int, default=2)
     s.add_argument("--asinh", type=float, default=8.0)
