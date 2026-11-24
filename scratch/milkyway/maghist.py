@@ -32,14 +32,21 @@ dy, dx = np.nonzero(pk); det = np.stack([dx + x0, dy + y0], 1).astype(float)
 inner = lambda X, Y: np.hypot(X - px, Y - py) < rpx - 4
 det = det[inner(det[:, 0], det[:, 1])]
 sel = (dec > 90 - R + 0.05) & inner(gx, gy)
-tr = cKDTree(det); P = np.stack([gx[sel], gy[sel]], 1)
-hit = tr.query(P)[0] < 3.0; rnd = tr.query(P + [60, 0])[0] < 3.0      # shifted catalogue: chance-match rate
-Gs = G[sel]; bins = np.arange(4.0, 13.51, 0.5); rows = []
+# each detection is credited to the BRIGHTEST Gaia star within 3 px (else a 9.8 star's detection also
+# "finds" the 12th-mag stars around it); chance: the same with the detections shifted 60 px
+Gs = G[sel]; gt = cKDTree(np.stack([gx[sel], gy[sel]], 1))
+def assign(P):
+    out = []
+    for nb in gt.query_ball_point(P, 3.0):
+        if nb: out.append(Gs[nb].min())
+    return np.array(out)
+ga, gr = assign(det), assign(det + [60, 0])
+bins = np.arange(4.0, 13.51, 0.5); rows = []
 for lo in bins[:-1]:
-    m = (Gs >= lo) & (Gs < lo + 0.5); n = int(m.sum())
-    c = max(0.0, (hit[m].mean() - rnd[m].mean()) / max(1e-9, 1 - rnd[m].mean())) if n else np.nan
-    rows.append(dict(g_lo=lo, g_hi=lo + 0.5, catalogue=n, matched_raw=int(hit[m].sum()), chance_rate=round(float(rnd[m].mean()), 3) if n else None,
-                     detected=round(c * n, 1) if n else 0, completeness=round(float(c), 3) if n else None))
+    n = int(((Gs >= lo) & (Gs < lo + 0.5)).sum()); na = int(((ga >= lo) & (ga < lo + 0.5)).sum()); nr = int(((gr >= lo) & (gr < lo + 0.5)).sum())
+    dn = max(0, na - nr)
+    rows.append(dict(g_lo=float(lo), g_hi=float(lo + 0.5), catalogue=n, matched_raw=na, chance=nr, detected=dn,
+                     completeness=round(min(1.0, dn / n), 3) if n else None))
 g50 = None
 for a, b in zip(rows, rows[1:]):
     if a["completeness"] is not None and b["completeness"] is not None and a["completeness"] >= 0.5 > b["completeness"] and a["catalogue"] >= 5:

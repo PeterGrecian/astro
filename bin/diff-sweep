@@ -42,6 +42,14 @@ still-open window.
   noise reads as grain rather than half the pixels clipped to black.
   --window-min 1 gives a plain single-frame background-subtracted video.
 
+- --bg-median N: subtract a per-pixel running median of N frames in the
+  camera frame instead (detrans-sweep's RunningMedian: level-step
+  segmentation at light switches, 48 px coarse residual), for a camera whose
+  sky does not fit the 2-mode glow model (eclipticam-hq16: moonlight and a
+  switching light; astro-hq16, Peter 2026-11-24). Output as --glow-model
+  (signed max over the window). With --glow-model too, the model is used
+  only for --mask-foreground's sky mask, not subtracted.
+
 --synthetic mode: a single bright pixel walking diagonally on a
 constant background. Bg subtracts to zero; trail survives.
 """
@@ -258,6 +266,9 @@ def main() -> int:
                     help="with --glow-model: black everything outside the model's sky mask, "
                          "eroded ERODE blocks (3 matches derot-sky's video default), and take "
                          "the stretch from the sky only")
+    ap.add_argument("--bg-median", type=int, default=0, metavar="N",
+                    help="subtract a per-pixel running median of N frames (detrans-sweep's "
+                         "RunningMedian) instead of the glow model; grey only")
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--no-mp4", action="store_true")
     ap.add_argument("--synthetic", type=int, default=0, metavar="N")
@@ -307,12 +318,34 @@ def main() -> int:
             print("--glow-model is grey only; ignoring --colour", file=sys.stderr)
             rgb_pattern = None
 
+        rmed = None
+        if args.bg_median:
+            from importlib.machinery import SourceFileLoader
+            from importlib.util import module_from_spec, spec_from_loader
+            _ld = SourceFileLoader("detrans_sweep", str(Path(__file__).resolve().parent / "detrans-sweep"))
+            _ds = module_from_spec(spec_from_loader("detrans_sweep", _ld))
+            _ld.exec_module(_ds)
+            rgb_pattern = None
+            args.out_dir.mkdir(parents=True, exist_ok=True)
+            # bin 2: the same 2x2 sum as load_fits_binned, so the mask's shape fits
+            rmed = _ds.RunningMedian([str(p) for _, p in all_frames], 2, args.bg_median,
+                                     levels_path=args.out_dir / "bg-levels-bin2.npz")
+            print(f"background: running median of {rmed.n} frames (camera frame)")
+
         def gen():
-            for t, p in all_frames:
-                f = load_fits_binned(p, rgb_pattern)
+            for i, (t, p) in enumerate(all_frames):
+                if rmed is not None:
+                    f = rmed.subtracted(i)
+                    if f is None:          # in a light switch's ramp: no clean background
+                        continue
+                else:
+                    f = load_fits_binned(p, rgb_pattern)
                 if glow is not None and args.mask_foreground is not None and fg_mask[0] is None:
                     fg_mask[0] = glow.sky_mask(f.shape, args.mask_foreground)
-                yield t, (glow.subtract(f) if glow is not None else f)
+                if rmed is not None:
+                    yield t, f
+                else:
+                    yield t, (glow.subtract(f) if glow is not None else f)
         frames_iter = gen()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -362,7 +395,7 @@ def main() -> int:
                          mean_mult=args.mean_mult,
                          signed=args.signed, neg_blue=args.neg_blue,
                          line_field=line_field, line_L=args.line_L,
-                         glow=bool(args.glow_model), mask=fg_mask[0])
+                         glow=bool(args.glow_model or args.bg_median), mask=fg_mask[0])
 
         # Prune deque: drop frames older than the oldest still-open
         # window's start.
@@ -382,7 +415,7 @@ def main() -> int:
                      noise_floor_mult=args.noise_floor_mult,
                      signed=args.signed, neg_blue=args.neg_blue,
                      line_field=line_field, line_L=args.line_L,
-                     glow=bool(args.glow_model), mask=fg_mask[0])
+                     glow=bool(args.glow_model or args.bg_median), mask=fg_mask[0])
 
     print(f"diff-sweep: {n} frames in, {len(windows)} JPEGs written")
 

@@ -278,6 +278,13 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     # gets them anyway, beside derot. derot_host gates both.
     glow_sweep=$("$PY" -c "import json,sys; print(int(bool(json.load(open(sys.argv[1])).get('glow_sweep',0))))" \
         "$REPO/${CAMERA}/camera.json" 2>/dev/null || echo 0)
+    # glow_sweep "median" (eclipticam-hq16, astro-hq16/Peter 2026-11-24): the
+    # glow sweep subtracts a 21-frame running median, not the 2-mode glow
+    # model, and has no clean gate: moonlight and a switching light don't fit
+    # the model, so the gate passed 0 frames on 11-13..11-20. The model is
+    # still built, for the foreground mask.
+    glow_mode=$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1])).get('glow_sweep',''))" \
+        "$REPO/${CAMERA}/camera.json" 2>/dev/null || true)
     if [[ -n "$derot_host" && "$derot_host" != "$(hostname -s)" ]]; then
         echo "--- derot-sky + glow: run on $derot_host (camera.json derot_host), not here"
         cammodel=""; glow_sweep=0
@@ -422,7 +429,20 @@ print(f'{m // 60:02d}:{m % 60:02d}:00')" "$SWEEP_START" "$SWEEP_END") || return 
         # polar cap that (max - mean) erased; needs the glow model above.
         # same cloud gate: a cloudy night's glow fit is meaningless and the
         # sweep shows only the cloud's banding (10-08)
-        if [[ -s "${night_dir}/skyglow-model.npz" ]] \
+        if [[ "$glow_mode" == median && -s "${night_dir}/skyglow-model.npz" ]]; then
+            echo "--- glow sweep (running median of ${GLOW_MEDIAN_N:-21}, foreground masked; no clean gate)"
+            if "$PY" "$HERE/diff-sweep" --camera "$CAMERA" --night "$NIGHT" \
+                    --sweep-start "$SWEEP_START" --sweep-end "$SWEEP_END" \
+                    --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" \
+                    --bg-median "${GLOW_MEDIAN_N:-21}" \
+                    --glow-model "${night_dir}/skyglow-model.npz" --mask-foreground 3 \
+                    --noise-floor-mult 1.0 --out-dir "${night_dir}/sweep-glow"; then
+                cp "${night_dir}/sweep-glow/sweep.mp4" "${night_dir}/sweep-glow.mp4"
+                echo "wrote ${night_dir}/sweep-glow.mp4"
+            else
+                echo "glow sweep FAILED; continuing without it"
+            fi
+        elif [[ -s "${night_dir}/skyglow-model.npz" ]] \
                 && "$PY" "$HERE/derot-sky" clean "$NIGHT" --glow "${night_dir}/skyglow-model.npz"; then
             echo "--- glow sweep (glow-subtracted, foreground masked)"
             if "$PY" "$HERE/diff-sweep" --camera "$CAMERA" --night "$NIGHT" \
