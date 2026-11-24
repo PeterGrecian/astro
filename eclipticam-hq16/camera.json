@@ -105,7 +105,7 @@
   "refine_min_n": 30,
   "fan_render": true,
   "fan_render_notes": "Night fan for /astro/latest (astro-deliverables, 2026-11-23). Derot and the fan run on cammodel-2026-11-12.json, astro-science #1107 fithq16.py: 107 Hipparcos stars, median 1.16 px, single frame 11-13 01:01 UTC. derot-sky refine follows the nightly drift.",
-  "glow_sweep_notes": "publish-night-cam builds the night's sky-glow model (skyglow-model cube + fit, in night/<n>/hq16/) and renders the glow sweep (diff-sweep --glow-model) behind derot-sky's clean gate, though HQ16 has no camera model for derot (astro-pipeline #1066, 2026-11-13, at Peter's ask via astro-hq16). Clean-gate noise reference: derot-sky CLEAN_NOISE_REF, from 2026-11-12.",
+  "glow_sweep_notes": "MEDIAN from 2026-11-24 (astro-hq16, Peter): the glow sweep subtracts a 21-frame running median (diff-sweep --bg-median, detrans-sweep RunningMedian with level-step segmentation), with no clean gate. The moon and a switching light (bottom right, off ~00:30 UTC) do not fit the 2-mode model, so the gate passed 0 frames on 11-13..11-20. The model is still built, for the foreground mask. Before: publish-night-cam builds the night's sky-glow model (skyglow-model cube + fit, in night/<n>/hq16/) and renders the glow sweep (diff-sweep --glow-model) behind derot-sky's clean gate, though HQ16 has no camera model for derot (astro-pipeline #1066, 2026-11-13, at Peter's ask via astro-hq16). Clean-gate noise reference: derot-sky CLEAN_NOISE_REF, from 2026-11-12.",
   "location_file": "location.json",
   "occlusion_file": null,
   "field_solve": {
