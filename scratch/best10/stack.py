@@ -6,7 +6,7 @@ reference, so every night's sky lands in the same orientation on one shared canv
 (glow model, camera model, align, ring residual) come from scratch/best10/inputs.sh. The per-night
 stacks are then combined by summed frame weight (WEIGHT x WTMAX).
 
-Usage: stack.py <out dir> <in dir> <base night> <ref HH:MM:SS> <regime> <selection.json> [...]
+Usage: stack.py <out dir> <in dir> <base night> <ref HH:MM:SS> <regime> <selection.json> [+<canvas-only.json>] [...]
        stack.py --combine <out fits dir> <per-night stack dir> [...]"""
 import sys, os, json, subprocess, importlib.machinery, importlib.util, datetime as dt
 from pathlib import Path
@@ -46,15 +46,17 @@ def main():
     out, ind, base, ref, regime = sys.argv[1:6]; sels = sys.argv[6:]
     out, ind = Path(out), Path(ind); out.mkdir(parents=True, exist_ok=True)
     base_ref = dt.datetime.combine(dt.date.fromisoformat(base) + dt.timedelta(days=int(ref[:2]) < 12), dt.time.fromisoformat(ref), UTC)
-    blocks = {}
+    blocks, cblocks = {}, {}                 # a selection named "+file" shapes the canvas but is not stacked
     for s in sels:
-        for b in json.load(open(s)):
-            if b["regime"] == regime: blocks.setdefault(b["night"], []).append(b["t_ms"])
+        for b in json.load(open(s.lstrip("+"))):
+            if b["regime"] == regime:
+                cblocks.setdefault(b["night"], []).append(b["t_ms"])
+                if not s.startswith("+"): blocks.setdefault(b["night"], []).append(b["t_ms"])
     ds = load_ds(); ds.EXPTIME_S = 59.9
     cam0 = ds.CameraModel(str(ind / base / "skyglow-cammodel.json"))
     # canvas: every selected block's frame border, rotated to the base reference, fits inside
     pseudo = []
-    for night, ts in blocks.items():
+    for night, ts in cblocks.items():
         sh = ref_for(night, base, base_ref) - base_ref
         for t in ts:
             t0 = dt.datetime.fromtimestamp(t / 1000, UTC) - sh
