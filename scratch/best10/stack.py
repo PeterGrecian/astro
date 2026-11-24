@@ -12,6 +12,7 @@ import sys, os, json, subprocess, importlib.machinery, importlib.util, datetime 
 from pathlib import Path
 import numpy as np
 from astropy.io import fits
+from scipy import ndimage as nd
 HERE = Path.home() / "astro"; PY = str(HERE / ".venv/bin/python"); DS = str(HERE / "bin/derot-sky")
 SID = 86164.0905
 QMAX = float(os.environ.get("QMAX", 1.2))       # q above ~1.2 is spurious (lit cloud edges counted as stars, 10-06 20:08)
@@ -30,29 +31,45 @@ def noise(m, w):                                # robust sky noise in the well-c
     v = m[(w > 0.3 * np.nanmax(w)) & np.isfinite(m)]
     return 1.4826 * np.median(np.abs(v - np.median(v))) if v.size > 1000 else np.inf
 
-def combine(out, dirs):
-    """Inverse-variance combine: each stack weighted by its coverage map / its own noise^2, so nights whose
-    glow model left structure (noise far above sqrt(N)) count for little."""
-    S = W = None; n = 0; frames = []; used = []
+def lowpass(x, ok, k=8, size=9):              # masked median low-pass on a k-binned grid, back to full size
+    H, W = x.shape; xb = np.where(ok, x, np.nan)[: H // k * k, : W // k * k].reshape(H // k, k, W // k, k)
+    b = np.nanmedian(xb, (1, 3)); fill = np.isfinite(b)
+    if not fill.any(): return np.zeros_like(x)
+    idx = nd.distance_transform_edt(~fill, return_distances=False, return_indices=True)
+    b = nd.median_filter(b[tuple(idx)], size)
+    return np.pad(nd.zoom(b, k, order=1), ((0, H - H // k * k), (0, W - W // k * k)), mode="edge")[:H, :W]
+
+def combine(out, dirs, iters=3):
+    """Inverse-variance combine with per-night background matching. Nights register to <1 px, but each
+    carries its own large-scale glow residual; the low-pass of (night - combined) over the night's coverage
+    is removed (so the common Milky Way stays), then nights are weighted by coverage / noise^2."""
+    St = []; frames = []
     for d in dirs:
         f = Path(d) / "derot-sky.fits"
         if not f.exists(): continue
-        m, w = fits.getdata(f, 0), np.nan_to_num(fits.getdata(f, 1)); h = fits.getheader(f)
+        h = fits.getheader(f)
         if h.get("NFRAMES", 0) < 5: continue
-        sg = noise(m, w)
-        if not np.isfinite(sg) or sg <= 0: continue
-        w = w / sg ** 2
-        S = np.nan_to_num(m) * w if S is None else S + np.nan_to_num(m) * w
-        W = w.copy() if W is None else W + w; n += h["NFRAMES"]; used.append((Path(d).name, h["NFRAMES"], sg))
+        m, w = fits.getdata(f, 0).astype(np.float32), np.nan_to_num(fits.getdata(f, 1)).astype(np.float32)
+        ok = (w > 0.3 * w.max()) & np.isfinite(m)
+        St.append([Path(d).parent.parent.name + "/" + Path(d).name, h["NFRAMES"], np.nan_to_num(m), w, ok, None])
         frames += json.load(open(Path(d) / "derot-sky-frames.json")); h0 = h
+    def comb():
+        S = sum(np.where(s[4] | (s[3] > 0), s[2], 0) * s[3] / s[5] ** 2 for s in St); W = sum(s[3] / s[5] ** 2 for s in St)
+        return np.where(W > 0, S / np.maximum(W, 1e-30), np.nan).astype(np.float32), W
+    for s in St: s[5] = noise(s[2] - lowpass(s[2], s[4]), s[3])     # first weights: high-passed noise
+    for it in range(iters):
+        mean, W = comb()
+        for s in St:
+            s[2] = s[2] - lowpass(s[2] - np.nan_to_num(mean), s[4] & np.isfinite(mean))
+            s[5] = noise(s[2] - np.nan_to_num(mean), s[3]) / np.sqrt(1.0)
+    mean, W = comb()
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
-    mean = np.where(W > 0, S / np.maximum(W, 1e-30), np.nan).astype(np.float32)
-    h0["NFRAMES"] = n; h0["WTMAX"] = 1.0; h0["COMMENT"] = f"inverse-variance combine of {len(used)} stacks"
+    h0["NFRAMES"] = sum(s[1] for s in St); h0["WTMAX"] = 1.0; h0["COMMENT"] = f"inverse-variance, background-matched combine of {len(St)} stacks"
     fits.HDUList([fits.PrimaryHDU(mean, h0), fits.ImageHDU((W / W.max()).astype(np.float32), name="WEIGHT")]).writeto(out / "derot-sky.fits", overwrite=True)
     json.dump(sorted(frames), open(out / "derot-sky-frames.json", "w"))
-    pred = 1 / np.sqrt(sum(1 / u[2] ** 2 for u in used))
-    for nm, nf, sg in sorted(used, key=lambda u: u[2]): print(f"    {nm:>10} {nf:4d} frames  noise {sg:6.3f}  share {1 / sg ** 2 / sum(1 / u[2] ** 2 for u in used):5.1%}")
-    print(f"combined {len(used)} stacks, {n} frames -> {out}  noise sigma {noise(mean, W):.3f} ADU (well-covered; ideal {pred:.3f})")
+    tot = sum(1 / s[5] ** 2 for s in St)
+    for s in sorted(St, key=lambda s: s[5])[:12]: print(f"    {s[0]:>22} {s[1]:4d} frames  resid-vs-combined {s[5]:6.3f}  share {1 / s[5] ** 2 / tot:5.1%}")
+    print(f"combined {len(St)} stacks, {h0['NFRAMES']} frames -> {out}  noise sigma {noise(mean, W):.3f}, high-passed {noise(mean - lowpass(np.nan_to_num(mean), W > 0.3 * W.max()), W):.3f} ADU (well-covered)")
 
 def main():
     if sys.argv[1] == "--combine": return combine(sys.argv[2], sys.argv[3:])
