@@ -135,9 +135,34 @@ def main():
                          "include (e.g. a known dark reference night), "
                          "added to the --recent set and de-duplicated. "
                          "Defaults to camera.json 'reference_nights'.")
+    ap.add_argument("--week", default=None,
+                    help="comma-separated YYYY-MM-DD starts: chart the 7 "
+                         "nights from each start instead (no reference "
+                         "nights), for the website's week pages; published "
+                         "as <camera>/weeks/<start>/brightness-combined.png")
+    ap.add_argument("--weeks-holding", default=None, metavar="NIGHT",
+                    help="shorthand for --week with the 7 starts whose week "
+                         "holds NIGHT (NIGHT-6 .. NIGHT): what a nightly "
+                         "publish refreshes. Weeks with no nights are skipped.")
     args = ap.parse_args()
 
     cfg = CameraConfig.load(args.camera)
+    if args.weeks_holding:
+        n0 = datetime.strptime(args.weeks_holding, "%Y-%m-%d").date()
+        args.week = ",".join((n0 - timedelta(days=k)).isoformat() for k in range(6, -1, -1))
+    if args.week:
+        # The website's week blocks tile back from the newest night, so their
+        # starts shift each day: one chart per start date covers every link.
+        rc = 0
+        for start in (w.strip() for w in args.week.split(",") if w.strip()):
+            args.week = start
+            r = run(args, cfg)
+            rc = rc if r == 2 else (rc or r)
+        return rc
+    return run(args, cfg)
+
+
+def run(args, cfg):
 
     # Standing reference nights from config, unless overridden on the CLI.
     # Lets the nightly published chart always show a known dark baseline
@@ -154,6 +179,11 @@ def main():
         subcam = cfg.name.split("-", 1)[1] if "-" in cfg.name else cfg.name
         default_name = f"brightness-combined-{subcam}.png"
     out_path = args.out or (cfg.frames_root / default_name)
+    week_end = None
+    if args.week:
+        week_start = datetime.strptime(args.week, "%Y-%m-%d").date()
+        week_end = week_start + timedelta(days=6)
+        out_path = cfg.frames_root / "weeks" / default_name.replace(".png", f"-{args.week}.png")
 
     all_nights = sorted(find_night_csvs(cfg), key=lambda nc: nc[0])
     if not all_nights:
@@ -161,10 +191,17 @@ def main():
               file=sys.stderr)
         return 1
     by_str = {n: p for n, p in all_nights}
+    if week_end is not None:
+        args.nights = None
+        selected = {n for n, _ in all_nights if args.week <= n <= week_end.isoformat()}
+        if not selected:
+            print(f"  week {args.week}: no nights, skipped", file=sys.stderr)
+            return 2
 
     # Selection: the N most recent, plus any explicit --nights (e.g. a
     # known dark night to compare against), de-duplicated and re-sorted.
-    selected = {n for n, _ in all_nights[-args.recent:]}
+    if week_end is None:
+        selected = {n for n, _ in all_nights[-args.recent:]}
     if args.nights:
         for want in (s.strip() for s in args.nights.split(",") if s.strip()):
             if want in by_str:
@@ -249,7 +286,7 @@ def main():
         idx = f"{trough:.2f}" if trough is not None else "-"
         if scale != 1.0:
             idx += f" ({e:.3g} s subs, \u00d7{scale:.1f})"
-        is_latest = night_str == latest_night
+        is_latest = night_str == latest_night and week_end is None
         is_ref = night_str in ref_set
         ref_note = ""
         if is_ref and not is_latest and latest_tz is not None:
@@ -328,7 +365,11 @@ def main():
     # detail still goes to stdout above, where the operator wants it.
     # Darkness is what the reader is after; the axis still measures it as a
     # brightness in bits (Peter, 2026-11-02).
-    ax.set_title("How dark the sky was overnight")
+    if week_end is not None:
+        ax.set_title(f"How dark the sky was, {week_start.strftime('%-d %b')} to "
+                     f"{week_end.strftime('%-d %b %Y')}")
+    else:
+        ax.set_title("How dark the sky was overnight")
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
     ax.xaxis.set_major_formatter(
@@ -381,7 +422,8 @@ def main():
         # so the combined plot sits at "<camera>/brightness-combined.png"
         # — one stable key, no per-night nesting.
         cam_prefix = cfg.s3["prefix"].removesuffix("/nights")
-        key = f"{cam_prefix}/brightness-combined.png"
+        key = (f"{cam_prefix}/weeks/{args.week}/brightness-combined.png" if week_end
+               else f"{cam_prefix}/brightness-combined.png")
         s3 = boto3.client("s3")
         s3.upload_file(str(out_path), bucket, key,
                        ExtraArgs={"ContentType": "image/png"})

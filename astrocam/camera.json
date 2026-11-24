@@ -65,8 +65,8 @@
   "sky_clear_ref_exptime_notes": "The exposure (s) sky_clear_max_stops was calibrated at: every clear/cloudy number above was measured on 59.9 s subs. From 2026-10-09 astrocam takes 15 s subs, and a per-FRAME mean then reads ~2 stops darker for no sky reason, so nightly-cam rescales the anchor mean to this exposure about black_level (the electronic zero does not scale) before taking stops on the pedestal axis. The same scale is applied to the stack's sky-clear cap. summary.json anchor.stops are therefore on the 59.9 s basis whatever the sub length; anchor.exptime records the real one. Change this only by re-deriving sky_clear_max_stops at the new exposure.",
   "state": {"sun_altitude_night_deg": -10.0, "sun_altitude_day_deg": -8.0},
   "state_notes": "Night starts at sun -10 deg below horizon (ephem), matching eclipticam-v3w/v1 at the same site so all cameras transition together. Was the -12 default before 2026-06-20. sun_altitude_day_deg (-8) gives a small hysteresis band for astrocam-v3-gate (the sun-altitude service gate) so the boundary does not flap. NB: astro-state's brightness tier currently MISCLASSIFIES because the imx708 pedestal is STALE; the v3 night service is gated on sun altitude only (astrocam_v3_gate.py) until the pedestal is remeasured.",
-  "reference_nights": ["2026-08-01"],
-  "reference_nights_notes": "Known dark/clear IMX708 baseline overlaid on the combined-brightness chart (drawn coloured dashed). 2026-08-01 is a clean, dark clear night in the IMX708 era. The latest night is drawn bold dashed black.",
+  "reference_nights": [],
+  "reference_nights_notes": "Emptied 2026-11-24 (Peter): 2026-08-01 dropped from the combined chart; D4/Dx baselines carry the comparison now. Was: known dark/clear IMX708 baseline overlaid on the combined-brightness chart (drawn coloured dashed). 2026-08-01 is a clean, dark clear night in the IMX708 era. The latest night is drawn bold dashed black.",
   "privacy_file": null,
   "fan_render": true,
   "fan_render_notes": "Whole-night sky-canvas fan (derot-sky stack --canvas, then render-fan): astro-science #1107, Peter 2026-11-22. Needs the night camera model, so only nights whose derot ran."

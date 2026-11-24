@@ -678,6 +678,9 @@ fi
 # Refresh the multi-night combined brightness plot at the camera prefix.
 echo "--- combined brightness (multi-night)"
 "$PY" "$HERE/combined-brightness" --camera "$CAMERA" --publish || true
+# And the week pages' charts: the 7 week windows that hold this night (the
+# site's week blocks tile back from the newest night, so starts shift daily).
+"$PY" "$HERE/combined-brightness" --camera "$CAMERA" --weeks-holding "$NIGHT" --publish || true
 
 # Moon-net / sun-net publishing RETIRED 2026-07-06. The hand-marked moon/sun
 # nets + the v1 anchoring were scaffolding to bootstrap v3w astrometry; Altair-
