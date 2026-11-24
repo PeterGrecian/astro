@@ -14,6 +14,8 @@ import numpy as np
 from astropy.io import fits
 HERE = Path.home() / "astro"; PY = str(HERE / ".venv/bin/python"); DS = str(HERE / "bin/derot-sky")
 SID = 86164.0905
+QMAX = float(os.environ.get("QMAX", 1.2))       # q above ~1.2 is spurious (lit cloud edges counted as stars, 10-06 20:08)
+MAXR = os.environ.get("MAXR", "1e9")            # glow-fit gate off: per-night glow models fail on clear nights; blocks are star-selected
 UTC = dt.timezone.utc
 
 def load_ds():
@@ -49,7 +51,7 @@ def main():
     blocks, cblocks = {}, {}                 # a selection named "+file" shapes the canvas but is not stacked
     for s in sels:
         for b in json.load(open(s.lstrip("+"))):
-            if b["regime"] == regime:
+            if b["regime"] == regime and b["q"] <= QMAX:
                 cblocks.setdefault(b["night"], []).append(b["t_ms"])
                 if not s.startswith("+"): blocks.setdefault(b["night"], []).append(b["t_ms"])
     ds = load_ds(); ds.EXPTIME_S = 59.9
@@ -75,9 +77,10 @@ def main():
         json.dump(win, open(o / "windows.json", "w"))
         r = ref_for(night, base, base_ref)
         cmd = [PY, DS, "stack", str(D / "skyglow-cammodel.json"), night, "--glow", str(D / "skyglow-model.npz"),
-               "--ref-utc", r.strftime("%H:%M:%S"), "--windows", str(o / "windows.json"), "--canvas-from", str(cfile), "-j", "2", "-o", str(o)]
+               "--ref-utc", r.strftime("%H:%M:%S"), "--windows", str(o / "windows.json"), "--canvas-from", str(cfile), "--max-ratio", MAXR, "-j", "2", "-o", str(o)]
         if (D / "align.npy").exists(): cmd += ["--align", str(D / "align.npy")]
-        if (D / "resid.npy").exists(): cmd += ["--residual", str(D / "resid.npy")]
+        rs = sorted(ind.glob("*/resid.npy"), key=lambda p: abs((dt.date.fromisoformat(p.parent.name) - dt.date.fromisoformat(night)).days))
+        if rs: cmd += ["--residual", str(rs[0])]           # own ring map, else the nearest night's (camera-fixed)
         res = subprocess.run(["nice", "-n", "15"] + cmd, capture_output=True, text=True, env=dict(os.environ, DEROT_CAMERA="astrocam"))
         last = [l for l in res.stdout.splitlines() if "stacked" in l or "noise" in l]
         print(f"  {night}: {len(win)} blocks, ref {r:%H:%M:%S}: {' | '.join(last) or res.stderr.strip().splitlines()[-1:]}", flush=True)
