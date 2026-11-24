@@ -56,20 +56,24 @@ def combine(out, dirs, iters=3):
     def comb():
         S = sum(np.where(s[4] | (s[3] > 0), s[2], 0) * s[3] / s[5] ** 2 for s in St); W = sum(s[3] / s[5] ** 2 for s in St)
         return np.where(W > 0, S / np.maximum(W, 1e-30), np.nan).astype(np.float32), W
-    for s in St: s[5] = noise(s[2] - lowpass(s[2], s[4]), s[3])     # first weights: high-passed noise
-    for it in range(iters):
-        mean, W = comb()
+    for s in St: s[5] = max(noise(s[2] - lowpass(s[2], s[4]), s[3]), 1e-3)     # first weights: high-passed noise
+    if len(St) > 1:
+      for it in range(iters):                     # match each night to the leave-one-out combination of the others
+        S = sum(s[2] * s[3] / s[5] ** 2 for s in St); W = sum(s[3] / s[5] ** 2 for s in St)
         for s in St:
-            s[2] = s[2] - lowpass(s[2] - np.nan_to_num(mean), s[4] & np.isfinite(mean))
-            s[5] = noise(s[2] - np.nan_to_num(mean), s[3]) / np.sqrt(1.0)
+            Wo = W - s[3] / s[5] ** 2; loo = np.where(Wo > 1e-6 * W.max(), (S - s[2] * s[3] / s[5] ** 2) / np.maximum(Wo, 1e-30), np.nan)
+            okc = s[4] & np.isfinite(loo)
+            s[2] = s[2] - lowpass(s[2] - np.nan_to_num(loo), okc)
+            d = s[2] - np.nan_to_num(loo); v = d[okc]
+            s[5] = 1.4826 * np.median(np.abs(v - np.median(v))) if v.size > 1000 else 1e3   # includes the others' noise: a ranking, slightly flattened
     mean, W = comb()
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
     h0["NFRAMES"] = sum(s[1] for s in St); h0["WTMAX"] = 1.0; h0["COMMENT"] = f"inverse-variance, background-matched combine of {len(St)} stacks"
     fits.HDUList([fits.PrimaryHDU(mean, h0), fits.ImageHDU((W / W.max()).astype(np.float32), name="WEIGHT")]).writeto(out / "derot-sky.fits", overwrite=True)
     json.dump(sorted(frames), open(out / "derot-sky-frames.json", "w"))
     tot = sum(1 / s[5] ** 2 for s in St)
-    for s in sorted(St, key=lambda s: s[5])[:12]: print(f"    {s[0]:>22} {s[1]:4d} frames  resid-vs-combined {s[5]:6.3f}  share {1 / s[5] ** 2 / tot:5.1%}")
-    print(f"combined {len(St)} stacks, {h0['NFRAMES']} frames -> {out}  noise sigma {noise(mean, W):.3f}, high-passed {noise(mean - lowpass(np.nan_to_num(mean), W > 0.3 * W.max()), W):.3f} ADU (well-covered)")
+    for s in sorted(St, key=lambda s: s[5])[:12]: print(f"    {s[0]:>22} {s[1]:4d} frames  resid-vs-others {s[5]:6.3f}  share {1 / s[5] ** 2 / tot:5.1%}")
+    print(f"combined {len(St)} stacks, {h0['NFRAMES']} frames -> {out}")
 
 def main():
     if sys.argv[1] == "--combine": return combine(sys.argv[2], sys.argv[3:])
