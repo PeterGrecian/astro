@@ -39,14 +39,18 @@ def label(k):
     return f"{k} min: {n} frame{'s' if n > 1 else ''}"
 def bar(d, x, y, deg, s, text):
     L = deg * PXDEG * s; d.line([x, y, x + L, y], fill=(255, 255, 255), width=4); d.text((x, y - 34), text, fill=(255, 255, 255), font=FONT)
+# BA_CROP="x0,y0": close-up box (384 x 324 binned px) top-left; default cell E3. With the stack oriented
+# to 19:19 the E3 sky has left the frame, so the first-frame set puts the box on the galactic plane.
+import os
+X0, Y0 = map(int, os.environ.get("BA_CROP", "1536,648").split(","))
 for k, t in SETS:
     g = grey(D[k]); n = nframes(t)
-    c = Image.fromarray(g[648:972, 1536:1920]).resize((768, 648), Image.LANCZOS).convert("RGB"); d = ImageDraw.Draw(c)
+    c = Image.fromarray(g[Y0:Y0 + 324, X0:X0 + 384]).resize((768, 648), Image.LANCZOS).convert("RGB"); d = ImageDraw.Draw(c)
     d.text((16, 12), label(k), fill=(224, 224, 224), font=FONT); bar(d, 16, 620, 2, 2, "2 deg")
     c.save(OUT / f"project-ba-close-{k}.jpg", quality=92)
     w = Image.fromarray(g).convert("RGB"); d = ImageDraw.Draw(w)
     d.text((20, 16), label(k), fill=(224, 224, 224), font=FONT); bar(d, 20, 1260, 10, 1, "10 deg")
-    d.rectangle([1536, 648, 1920, 972], outline=(255, 149, 0), width=2)
+    d.rectangle([X0, Y0, X0 + 384, Y0 + 324], outline=(255, 149, 0), width=2)
     w.save(OUT / f"project-ba-wide-{k}.jpg", quality=90)
 # noise: measured sigma vs 1/sqrt(N), and a two-part fit sigma^2 = a/N + c (c = what does not average down)
 N = np.array([nframes(t) for _, t in SETS]); S = np.array([noise(t) for _, t in SETS])
