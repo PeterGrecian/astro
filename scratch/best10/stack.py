@@ -26,22 +26,33 @@ def ref_for(night, base, base_ref):           # same sidereal time as base_ref, 
     k = (dt.date.fromisoformat(night) - dt.date.fromisoformat(base)).days
     return base_ref + dt.timedelta(seconds=k * SID)
 
+def noise(m, w):                                # robust sky noise in the well-covered region
+    v = m[(w > 0.3 * np.nanmax(w)) & np.isfinite(m)]
+    return 1.4826 * np.median(np.abs(v - np.median(v))) if v.size > 1000 else np.inf
+
 def combine(out, dirs):
-    S = W = None; n = 0; frames = []
+    """Inverse-variance combine: each stack weighted by its coverage map / its own noise^2, so nights whose
+    glow model left structure (noise far above sqrt(N)) count for little."""
+    S = W = None; n = 0; frames = []; used = []
     for d in dirs:
         f = Path(d) / "derot-sky.fits"
         if not f.exists(): continue
-        m, w = fits.getdata(f, 0), fits.getdata(f, 1); h = fits.getheader(f); w = w * h["WTMAX"]
+        m, w = fits.getdata(f, 0), np.nan_to_num(fits.getdata(f, 1)); h = fits.getheader(f)
+        if h.get("NFRAMES", 0) < 5: continue
+        sg = noise(m, w)
+        if not np.isfinite(sg) or sg <= 0: continue
+        w = w / sg ** 2
         S = np.nan_to_num(m) * w if S is None else S + np.nan_to_num(m) * w
-        W = w.copy() if W is None else W + w; n += h["NFRAMES"]
+        W = w.copy() if W is None else W + w; n += h["NFRAMES"]; used.append((Path(d).name, h["NFRAMES"], sg))
         frames += json.load(open(Path(d) / "derot-sky-frames.json")); h0 = h
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
     mean = np.where(W > 0, S / np.maximum(W, 1e-30), np.nan).astype(np.float32)
-    h0["NFRAMES"] = n; h0["WTMAX"] = float(W.max()); h0["COMMENT"] = f"combined from {len(dirs)} stacks by summed frame weight"
+    h0["NFRAMES"] = n; h0["WTMAX"] = 1.0; h0["COMMENT"] = f"inverse-variance combine of {len(used)} stacks"
     fits.HDUList([fits.PrimaryHDU(mean, h0), fits.ImageHDU((W / W.max()).astype(np.float32), name="WEIGHT")]).writeto(out / "derot-sky.fits", overwrite=True)
     json.dump(sorted(frames), open(out / "derot-sky-frames.json", "w"))
-    good = W > 0.3 * W.max(); v = mean[good]; sig = 1.4826 * np.median(np.abs(v - np.median(v)))
-    print(f"combined {len(dirs)} stacks, {n} frames -> {out}  noise sigma {sig:.3f} ADU (well-covered)")
+    pred = 1 / np.sqrt(sum(1 / u[2] ** 2 for u in used))
+    for nm, nf, sg in sorted(used, key=lambda u: u[2]): print(f"    {nm:>10} {nf:4d} frames  noise {sg:6.3f}  share {1 / sg ** 2 / sum(1 / u[2] ** 2 for u in used):5.1%}")
+    print(f"combined {len(used)} stacks, {n} frames -> {out}  noise sigma {noise(mean, W):.3f} ADU (well-covered; ideal {pred:.3f})")
 
 def main():
     if sys.argv[1] == "--combine": return combine(sys.argv[2], sys.argv[3:])
