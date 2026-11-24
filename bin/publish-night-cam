@@ -283,6 +283,11 @@ if [[ "$NO_SWEEP" -eq 0 ]]; then
     # model, and has no clean gate: moonlight and a switching light don't fit
     # the model, so the gate passed 0 frames on 11-13..11-20. The model is
     # still built, for the foreground mask.
+    # glow_mask_erode: blocks the sweep's foreground mask is eroded by (default
+    # 3). Erosion also eats that many blocks at the FRAME border (border_value
+    # 0), so an all-sky camera sets -1: no mask (hq16, astro-hq16 2026-11-24)
+    glow_mask_erode=$("$PY" -c "import json,sys; print(int(json.load(open(sys.argv[1])).get('glow_mask_erode', 3)))" \
+        "$REPO/${CAMERA}/camera.json" 2>/dev/null || echo 3)
     glow_mode=$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1])).get('glow_sweep',''))" \
         "$REPO/${CAMERA}/camera.json" 2>/dev/null || true)
     if [[ -n "$derot_host" && "$derot_host" != "$(hostname -s)" ]]; then
@@ -435,7 +440,7 @@ print(f'{m // 60:02d}:{m % 60:02d}:00')" "$SWEEP_START" "$SWEEP_END") || return 
                     --sweep-start "$SWEEP_START" --sweep-end "$SWEEP_END" \
                     --window-min "$WINDOW_MIN" --step-min "$STEP_MIN" --fps "$FPS" \
                     --bg-median "${GLOW_MEDIAN_N:-21}" \
-                    --glow-model "${night_dir}/skyglow-model.npz" --mask-foreground 3 \
+                    --glow-model "${night_dir}/skyglow-model.npz" --mask-foreground "$glow_mask_erode" \
                     --noise-floor-mult 1.0 --out-dir "${night_dir}/sweep-glow"; then
                 cp "${night_dir}/sweep-glow/sweep.mp4" "${night_dir}/sweep-glow.mp4"
                 echo "wrote ${night_dir}/sweep-glow.mp4"
