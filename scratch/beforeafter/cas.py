@@ -20,8 +20,8 @@ good = (Wt > 0.3 * Wt.max()) & np.isfinite(S)
 LO, HI = np.percentile(S[good], 5), np.percentile(S[good], 99.8); GAIN = 12.0
 g = np.clip((np.nan_to_num(S, nan=LO) - LO) / (HI - LO), 0, None); g = (np.clip(np.arcsinh(GAIN * g) / np.arcsinh(GAIN), 0, 1) * 255).astype(np.uint8)
 g[Wt < 0.05 * Wt.max()] = 0
-cx, cy = x.mean(), y.mean(); hw = max(np.ptp(x), np.ptp(y)) / 2 + 70
-bw, bh = int(2 * hw), int(2 * hw * 0.75)
+cx, cy = (x.min() + x.max()) / 2, (y.min() + y.max()) / 2       # 4:3 box holding the W with 70 px margins
+bw = int(max(np.ptp(x) + 140, (np.ptp(y) + 140) / 0.75)); bh = int(bw * 0.75)
 x0, y0 = int(max(0, min(S.shape[1] - bw, cx - bw / 2))), int(max(0, min(S.shape[0] - bh, cy - bh / 2)))
 Z = 1200 / bw
 img = Image.fromarray(g[y0:y0 + bh, x0:x0 + bw]).resize((1200, round(bh * Z)), Image.LANCZOS).convert("RGB")
