@@ -13,7 +13,7 @@ Gates, in order of preference (the first tier with any window wins; its name goe
 Score: clarity = min sampled star count in the window / regime_ref_stars (as hours.csv), capped at 1.0
 for ranking because counts above the regime's best are mostly spurious (lit cloud edges counted as
 stars); ties broken by darkness: score = min(clarity, 1) - 0.1 * sky_stops.
-sky_stops = log2 of the window's median sky level above black (64 ADU) over the regime's darkest
+sky_stops (meaningful within a regime only; E1-av2 is auto-exposure, so its stops sit near 0) = log2 of the window's median sky level above black (64 ADU) over the regime's darkest
 (5th percentile of astro-gated samples): 0 = as dark as that camera setup gets, 1 = twice as bright.
 Flags: water-suspect (regime), blurred (star size > 1.25x regime median), cover-closed (only where the
 frame headers record COVER, ~10-18 on), moonNN%, clarity-suspect (clarity > 1.2).
@@ -54,12 +54,12 @@ size_ref = {rg: float(np.nanmedian(v)) for rg, v in size.items()}
 def frames_in(night, a, b):
     bf = f"{root}/{night}/brightness.csv"
     if not os.path.exists(bf): return ""
-    n = 0
+    n = m = 0
     for r in csv.DictReader(open(bf)):
         try: t = int(r["epoch_ms"])
         except (KeyError, ValueError): continue
-        n += a <= t < b
-    return n
+        m += 1; n += a <= t < b
+    return n if m else ""
 
 rows = []
 for night, d in sorted(nights.items()):
