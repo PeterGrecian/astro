@@ -15,6 +15,8 @@ for ranking because counts above the regime's best are mostly spurious (lit clou
 stars); ties broken by darkness: score = min(clarity, 1) - 0.1 * sky_stops.
 sky_stops = log2 of the window's median sky level above black (64 ADU) over the regime's darkest
 (5th percentile of astro-gated samples): 0 = as dark as that camera setup gets, 1 = twice as bright.
+Flags: water-suspect (regime), blurred (star size > 1.25x regime median), cover-closed (only where the
+frame headers record COVER, ~10-18 on), moonNN%, clarity-suspect (clarity > 1.2).
 Writes <survey dir>/dark-hours.csv. Usage: darkhour.py <survey dir>"""
 import os, sys, glob, csv, json, datetime as dt, numpy as np, warnings
 warnings.filterwarnings("ignore")
@@ -82,7 +84,7 @@ for night, d in sorted(nights.items()):
     if rg in WATER: fl.append("water-suspect")
     sz = np.nanmedian(T[j, 11:20])
     if np.isfinite(sz) and sz > 1.25 * size_ref.get(rg, np.inf): fl.append("blurred")
-    if np.mean(T[j, 23]) < 0.5: fl.append("cover-closed")
+    if T[:, 23].max() > 0 and np.mean(T[j, 23]) < 0.5: fl.append("cover-closed")   # COVER header only from ~10-18; absent reads 0
     if d["moon"][j].max() > 0: fl.append(f"moon{int(d['illum'][j].mean() * 100)}%")
     if T[j, 1].min() / ref > 1.2: fl.append("clarity-suspect")
     rows.append(dict(night=night, start_utc=dt.datetime.fromtimestamp(a / 1000, dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
